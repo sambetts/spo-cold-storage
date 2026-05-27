@@ -47,6 +47,7 @@ public class SPOColdStorageDbContext : DbContext
     public DbSet<StagingTempFile> StagingFiles { get; set; } = null!;
     public DbSet<FileMigrationErrorLog> FileMigrationErrors { get; set; } = null!;
     public DbSet<FileMigrationCompletedLog> FileMigrationsCompleted { get; set; } = null!;
+    public DbSet<DriveDeltaToken> DriveDeltaTokens { get; set; } = null!;
     protected override void OnModelCreating(ModelBuilder builder)
     {
         builder.Entity<SPFile>()
@@ -64,6 +65,12 @@ public class SPOColdStorageDbContext : DbContext
         builder.Entity<FileDirectory>()
             .HasIndex(u => u.DirectoryPath)
             .IsUnique();
+
+        builder.Entity<DriveDeltaToken>()
+            .HasKey(d => d.DriveId);
+
+        builder.Entity<DriveDeltaToken>()
+            .HasIndex(d => d.SiteId);
     }
     protected override void OnConfiguring(DbContextOptionsBuilder options)
         => options.UseSqlServer(_config!.ConnectionStrings.SQLConnectionString, op => op.EnableRetryOnFailure());

@@ -1,21 +1,30 @@
 
-export const getStorageConfigFromAPI = async (token : string) => {
-  return await fetch('AppConfiguration/GetServiceConfiguration', {
-    method: 'GET',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': 'Bearer ' + token,
-    }
-  }
-  )
-    .then(async response => {
-      if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`HTTP ${response.status}: ${errorText}`);
+export const getStorageConfigFromAPI = async (token: string): Promise<ServiceConfiguration> => {
+  let response: Response;
+  try {
+    response = await fetch('AppConfiguration/GetServiceConfiguration', {
+      method: 'GET',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer ' + token,
       }
-      const data: ServiceConfiguration = await response.json();
-      return Promise.resolve(data);
     });
+  } catch (networkError: any) {
+    throw new Error(`Network error contacting AppConfiguration/GetServiceConfiguration: ${networkError?.message ?? networkError}`);
+  }
+
+  if (!response.ok) {
+    let errorText = '';
+    try { errorText = await response.text(); } catch { /* ignore */ }
+    throw new Error(`HTTP ${response.status} ${response.statusText} from AppConfiguration/GetServiceConfiguration${errorText ? `: ${errorText}` : ''}`);
+  }
+
+  try {
+    const data: ServiceConfiguration = await response.json();
+    return data;
+  } catch (parseError: any) {
+    throw new Error(`Failed to parse storage configuration response as JSON: ${parseError?.message ?? parseError}`);
+  }
 };
 
 

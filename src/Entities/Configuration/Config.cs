@@ -7,10 +7,16 @@ public class Config(Microsoft.Extensions.Configuration.IConfiguration config) : 
 
     public string ServiceBusQueueName => "filediscovery";
 
-    [ConfigValue]
+    /// <summary>
+    /// Key Vault URL - only required when using Certificate authentication mode
+    /// </summary>
+    [ConfigValue(true)]
     public string KeyVaultUrl { get; set; } = string.Empty;
 
-    [ConfigValue]
+    /// <summary>
+    /// Blob container name - only required for migration operations (not for snapshot building)
+    /// </summary>
+    [ConfigValue(true)]
     public string BlobContainerName { get; set; } = string.Empty;
 
     [ConfigValue(true)]

@@ -15,6 +15,45 @@
   font-size: 14px;
 }
 
+/* Storage connection info banner */
+.storage-connection-info {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 12px;
+  padding: 6px 12px;
+  background-color: #f3f9fd;
+  border: 1px solid #c7e0f4;
+  border-radius: 2px;
+  font-size: 12px;
+  color: var(--spo-text-primary);
+  max-width: 100%;
+  overflow: hidden;
+}
+
+.storage-connection-icon {
+  color: var(--spo-primary);
+  flex-shrink: 0;
+}
+
+.storage-connection-label {
+  color: var(--spo-text-secondary);
+}
+
+.storage-connection-account,
+.storage-connection-container {
+  font-family: Consolas, "Courier New", monospace;
+  font-weight: 600;
+  color: var(--spo-text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.storage-connection-separator {
+  color: var(--spo-text-secondary);
+}
+
 .file-browser-content {
   margin-top: 20px;
 }
@@ -29,6 +68,10 @@
   color: var(--spo-text-secondary);
 }
 
+.loading-container.small {
+  padding: 24px 20px;
+}
+
 .loading-spinner {
   width: 40px;
   height: 40px;
@@ -41,6 +84,111 @@
 
 @keyframes spinner {
   to { transform: rotate(360deg); }
+}
+
+/* Error State */
+.error-container {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 48px 24px;
+  text-align: center;
+  color: var(--spo-text-primary);
+}
+
+.error-icon {
+  color: #d13438;
+  margin-bottom: 16px;
+}
+
+.error-title {
+  margin: 0 0 8px 0;
+  font-size: 18px;
+  font-weight: 600;
+}
+
+.error-message {
+  margin: 0 0 16px 0;
+  color: var(--spo-text-secondary);
+  max-width: 560px;
+}
+
+.error-details {
+  margin: 0 0 16px 0;
+  max-width: 720px;
+  width: 100%;
+  text-align: left;
+}
+
+.error-details summary {
+  cursor: pointer;
+  color: var(--spo-primary);
+  font-size: 13px;
+  padding: 4px 0;
+}
+
+.error-details pre {
+  background-color: #faf9f8;
+  border: 1px solid var(--spo-border);
+  border-radius: 2px;
+  padding: 12px;
+  font-size: 12px;
+  color: var(--spo-text-primary);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 240px;
+  overflow: auto;
+}
+
+.error-retry-button {
+  background-color: var(--spo-primary);
+  color: #ffffff;
+  border: none;
+  border-radius: 2px;
+  padding: 8px 16px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background-color 0.1s;
+  font-family: inherit;
+}
+
+.error-retry-button:hover {
+  background-color: var(--spo-primary-hover, #106ebe);
+}
+
+.error-retry-button:active {
+  background-color: #005a9e;
+}
+
+.list-error {
+  background-color: #fde7e9;
+  border: 1px solid #f1707b;
+  color: #a4262c;
+  padding: 12px 16px;
+  margin: 12px;
+  border-radius: 2px;
+}
+
+.list-error p {
+  margin: 6px 0 10px 0;
+  color: #a4262c;
+  font-size: 13px;
+}
+
+.list-error-details {
+  margin-bottom: 10px;
+}
+
+.list-error-details summary {
+  color: #a4262c;
+}
+
+.list-error-details pre {
+  background-color: #ffffff;
+  border-color: #f1707b;
+  color: #323130;
 }
 
 /* File Explorer - Windows Style */

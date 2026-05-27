@@ -13,6 +13,11 @@ namespace Migration.Engine;
 public class AuthUtils
 {
     private static X509Certificate2? _cachedCert = null;
+    
+    /// <summary>
+    /// Retrieves a certificate from Azure Key Vault.
+    /// Only used when AuthenticationMode is set to "Certificate".
+    /// </summary>
     public static async Task<X509Certificate2> RetrieveKeyVaultCertificate(string name, string tenantId, string clientId, string clientSecret, string keyVaultUrl)
     {
         if (_cachedCert == null)
@@ -27,9 +32,15 @@ public class AuthUtils
     }
     public async static Task<ClientContext> GetClientContext(string siteUrl, string tenantId, string clientId, string clientSecret, string keyVaultUrl, string baseServerAddress, ILogger logger)
     {
-        return await GetClientContext(siteUrl, tenantId, clientId, clientSecret, keyVaultUrl, baseServerAddress, logger, null);
+        return await GetClientContext(siteUrl, tenantId, clientId, clientSecret, keyVaultUrl, baseServerAddress, logger, null, true, "AzureAutomationSPOAccess");
     }
+    
     public async static Task<ClientContext> GetClientContext(string siteUrl, string tenantId, string clientId, string clientSecret, string keyVaultUrl, string baseServerAddress, ILogger logger, Action<AuthenticationResult>? authResultDelegate)
+    {
+        return await GetClientContext(siteUrl, tenantId, clientId, clientSecret, keyVaultUrl, baseServerAddress, logger, authResultDelegate, true, "AzureAutomationSPOAccess");
+    }
+
+    public async static Task<ClientContext> GetClientContext(string siteUrl, string tenantId, string clientId, string clientSecret, string keyVaultUrl, string baseServerAddress, ILogger logger, Action<AuthenticationResult>? authResultDelegate, bool useCertificateAuth, string certificateName)
     {
         if (string.IsNullOrEmpty(siteUrl))
         {
@@ -51,9 +62,9 @@ public class AuthUtils
             throw new ArgumentException($"'{nameof(clientSecret)}' cannot be null or empty.", nameof(clientSecret));
         }
 
-        if (string.IsNullOrEmpty(keyVaultUrl))
+        if (useCertificateAuth && string.IsNullOrEmpty(keyVaultUrl))
         {
-            throw new ArgumentException($"'{nameof(keyVaultUrl)}' cannot be null or empty.", nameof(keyVaultUrl));
+            throw new ArgumentException($"'{nameof(keyVaultUrl)}' cannot be null or empty when using certificate authentication.", nameof(keyVaultUrl));
         }
 
         if (string.IsNullOrEmpty(baseServerAddress))
@@ -61,7 +72,7 @@ public class AuthUtils
             throw new ArgumentException($"'{nameof(baseServerAddress)}' cannot be null or empty.", nameof(baseServerAddress));
         }
 
-        var app = await GetNewClientApp(tenantId, clientId, clientSecret, keyVaultUrl);
+        var app = await GetNewClientApp(tenantId, clientId, clientSecret, keyVaultUrl, useCertificateAuth, certificateName);
         var result = await app.AuthForSharePointOnline(baseServerAddress);
         if (authResultDelegate != null)
         {
@@ -96,27 +107,51 @@ public class AuthUtils
         return ctx;
     }
 
+    /// <summary>
+    /// Creates a confidential client application with certificate-based authentication (legacy method for backward compatibility).
+    /// </summary>
     public static async Task<IConfidentialClientApplication> GetNewClientApp(string tenantId, string clientId, string clientSecret, string keyVaultUrl)
     {
-        var appRegistrationCert = await AuthUtils.RetrieveKeyVaultCertificate("AzureAutomationSPOAccess", tenantId, clientId, clientSecret, keyVaultUrl);
-        var app = ConfidentialClientApplicationBuilder.Create(clientId)
-                                              .WithCertificate(appRegistrationCert)
-                                              .WithAuthority($"https://login.microsoftonline.com/{tenantId}")
-                                              .Build();
+        return await GetNewClientApp(tenantId, clientId, clientSecret, keyVaultUrl, true, "AzureAutomationSPOAccess");
+    }
 
-        return app;
+    /// <summary>
+    /// Creates a confidential client application with either certificate or client secret authentication.
+    /// </summary>
+    /// <param name="useCertificateAuth">If true, uses certificate from Key Vault; if false, uses client secret directly</param>
+    /// <param name="certificateName">Name of certificate in Key Vault (only used if useCertificateAuth is true)</param>
+    public static async Task<IConfidentialClientApplication> GetNewClientApp(string tenantId, string clientId, string clientSecret, string keyVaultUrl, bool useCertificateAuth, string certificateName)
+    {
+        var builder = ConfidentialClientApplicationBuilder.Create(clientId)
+                                              .WithAuthority($"https://login.microsoftonline.com/{tenantId}");
+
+        if (useCertificateAuth)
+        {
+            // Certificate-based authentication (requires Key Vault)
+            var appRegistrationCert = await AuthUtils.RetrieveKeyVaultCertificate(certificateName, tenantId, clientId, clientSecret, keyVaultUrl);
+            builder.WithCertificate(appRegistrationCert);
+        }
+        else
+        {
+            // Client secret authentication (no certificate needed)
+            builder.WithClientSecret(clientSecret);
+        }
+
+        return builder.Build();
     }
 
     public static async Task<ClientContext> GetClientContext(Config config, string siteUrl, ILogger logger, Action<AuthenticationResult>? authResultDelegate)
     {
         return await GetClientContext(siteUrl, config.AzureAdConfig.TenantId!, config.AzureAdConfig.ClientID!,
-            config.AzureAdConfig.Secret!, config.KeyVaultUrl, config.BaseServerAddress, logger, authResultDelegate);
+            config.AzureAdConfig.Secret!, config.KeyVaultUrl, config.BaseServerAddress, logger, authResultDelegate,
+            config.AzureAdConfig.UseCertificateAuth, config.AzureAdConfig.CertificateName);
     }
 
     public static async Task<IConfidentialClientApplication> GetNewClientApp(Config config)
     {
         return await GetNewClientApp(config.AzureAdConfig.TenantId!,
-            config.AzureAdConfig.ClientID!, config.AzureAdConfig.Secret!, config.KeyVaultUrl);
+            config.AzureAdConfig.ClientID!, config.AzureAdConfig.Secret!, config.KeyVaultUrl,
+            config.AzureAdConfig.UseCertificateAuth, config.AzureAdConfig.CertificateName);
     }
 }
 

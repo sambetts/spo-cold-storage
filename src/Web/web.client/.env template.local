@@ -1,6 +1,10 @@
 VITE_MSAL_CLIENT_ID=
 VITE_MSAL_AUTHORITY=https://login.microsoftonline.com/organizations
-VITE_MSAL_SCOPES=https://storage.azure.com/user_impersonation
+# Scope of YOUR web API (the same app registration as VITE_MSAL_CLIENT_ID),
+# NOT the storage scope. Example: api://<client-id>/access_as_user.
+VITE_MSAL_SCOPES=api://<client-id>/access_as_user
+# Scope used for direct RBAC calls to Azure Blob Storage.
+VITE_MSAL_STORAGE_SCOPES=https://storage.azure.com/user_impersonation
 VITE_TEAMSFX_START_LOGIN_PAGE_URL=https://localhost:5173/auth-start.html
 
 # Copy to either ".env.development" or ".env.production" to use the environment variables in the client app.

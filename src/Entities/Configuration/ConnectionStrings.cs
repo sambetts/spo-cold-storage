@@ -4,13 +4,19 @@ namespace Entities.Configuration;
 
 public class ConnectionStrings(Microsoft.Extensions.Configuration.IConfigurationSection config) : BaseConfig(config)
 {
-    [ConfigValue]
+    /// <summary>
+    /// Storage connection string - only required for migration operations
+    /// </summary>
+    [ConfigValue(true)]
     public string Storage { get; set; } = string.Empty;
 
     [ConfigValue]
     public string SQLConnectionString { get; set; } = string.Empty;
 
-    [ConfigValue]
+    /// <summary>
+    /// Service Bus connection string - only required for distributed migration operations
+    /// </summary>
+    [ConfigValue(true)]
     public string ServiceBus { get; set; } = string.Empty;
 
 }
