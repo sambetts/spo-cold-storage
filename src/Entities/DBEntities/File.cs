@@ -53,6 +53,20 @@ public class SPFile : BaseDBObjectWithUrl
 
     [Column("file_size")]
     public long FileSize { get; set; } = 0;
+
+    /// <summary>
+    /// Graph drive id (Drive resource ID). Persisted so we can call
+    /// /drives/{id}/items/{itemId}/analytics on later runs without re-crawling.
+    /// Nullable to allow legacy rows that pre-date this column.
+    /// </summary>
+    [Column("drive_id")]
+    public string? DriveId { get; set; }
+
+    /// <summary>
+    /// Graph drive-item id. Pairs with <see cref="DriveId"/>.
+    /// </summary>
+    [Column("graph_item_id")]
+    public string? GraphItemId { get; set; }
 }
 
 public class StagingTempFile : BaseSharePointFileInfo

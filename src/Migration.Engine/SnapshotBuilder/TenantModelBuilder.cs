@@ -111,6 +111,14 @@ public class TenantModelBuilder(Config config, ILogger ILogger) : BaseComponent(
         existingFile.CreatedDate = updatedFile.CreatedDate;
         existingFile.FileSize = updatedFile.FileSize;
 
+        // Backfill Graph IDs if the row pre-dates the schema change and the
+        // merge SQL hasn't filled them yet. Cheap, idempotent, lets us re-run
+        // analytics for this file on a later snapshot run without re-crawling.
+        if (string.IsNullOrEmpty(existingFile.DriveId) && !string.IsNullOrEmpty(updatedFile.DriveId))
+            existingFile.DriveId = updatedFile.DriveId;
+        if (string.IsNullOrEmpty(existingFile.GraphItemId) && !string.IsNullOrEmpty(updatedFile.GraphItemId))
+            existingFile.GraphItemId = updatedFile.GraphItemId;
+
         return results;
     }
 

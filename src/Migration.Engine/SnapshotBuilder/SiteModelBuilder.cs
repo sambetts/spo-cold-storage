@@ -1,6 +1,7 @@
 using Entities;
 using Entities.Configuration;
 using Entities.DBEntities;
+using Microsoft.EntityFrameworkCore;
 using Migration.Engine.Adapters;
 using Migration.Engine.Connectors;
 using Migration.Engine.Utils;
@@ -137,7 +138,19 @@ public class SiteModelBuilder : BaseComponent, IDisposable
             // Fill OUR model directly (no merging, no cache issues)
             await driveBuilder.BuildSnapshotAsync(_model, batchSize, newFilesCallback).ConfigureAwait(false);
 
-            _logger.LogInformation($"STAGE 1/2: Drive crawl complete. Files found: {_model.AllFiles.Count}");
+            _logger.LogInformation($"STAGE 1/2: Drive crawl complete. Files found from delta: {_model.AllFiles.Count}");
+
+            // STAGE 1b: re-enqueue files in SQL that never finished analytics
+            // (analysis_completed IS NULL). Delta only returns *changes*, so a
+            // second run with nothing changed in SP would otherwise leave any
+            // previously-unfinished rows abandoned forever.
+            var resumed = await EnqueueUnanalyzedFilesFromDbAsync().ConfigureAwait(false);
+            if (resumed > 0)
+            {
+                _logger.LogInformation(
+                    $"STAGE 1b: re-queued {resumed} previously-unanalyzed file(s) from DB. " +
+                    $"Total files awaiting analytics: {_model.AllFiles.Count}.");
+            }
 
             // STAGE 2: Collect analytics (access counts) and version history per file
             if (_analyticsProvider != null && _model.AllFiles.Count > 0)
@@ -155,6 +168,129 @@ public class SiteModelBuilder : BaseComponent, IDisposable
         {
             _logger.LogError(ex, $"ERROR: '{ex.Message}' reading site {_site.RootURL} with Graph Drive API");
         }
+    }
+
+    /// <summary>
+    /// Load files from SQL where analysis_completed IS NULL (and we have Graph
+    /// IDs to call analytics) and add them to the in-memory model so STAGE 2
+    /// will process them. Skips anything already present in the model from
+    /// the delta scan (matched by GraphItemId).
+    /// </summary>
+    /// <returns>Count of files re-enqueued.</returns>
+    private async Task<int> EnqueueUnanalyzedFilesFromDbAsync()
+    {
+        using var db = new SPOColdStorageDbContext(_config);
+
+        // Pull only what we need to rehydrate analytics. AsNoTracking because
+        // these rows are projected into in-memory DTOs; we don't want EF
+        // change-tracking 80k rows for nothing.
+        var unfinished = await db.Files
+            .AsNoTracking()
+            .Where(f => f.AnalysisCompleted == null
+                     && f.GraphItemId != null && f.GraphItemId != ""
+                     && f.DriveId != null && f.DriveId != "")
+            .Select(f => new
+            {
+                f.Url,
+                f.DriveId,
+                f.GraphItemId,
+                f.FileSize,
+                f.LastModified,
+                f.CreatedDate
+            })
+            .ToListAsync()
+            .ConfigureAwait(false);
+
+        // Also count rows that are NULL-analyzed but have no IDs — these are
+        // legacy rows from before the schema change; they can't be retried
+        // until they're re-discovered by the delta scan (which will UPDATE
+        // their IDs via MergeStagingFiles.sql).
+        var legacyCount = await db.Files
+            .AsNoTracking()
+            .CountAsync(f => f.AnalysisCompleted == null
+                          && (f.GraphItemId == null || f.GraphItemId == ""
+                              || f.DriveId == null || f.DriveId == ""))
+            .ConfigureAwait(false);
+
+        if (legacyCount > 0)
+        {
+            _logger.LogWarning(
+                $"{legacyCount} file(s) in DB have NULL analysis_completed but no Graph IDs " +
+                $"(pre-migration rows). They will be filled in when SharePoint next reports them " +
+                $"as changed (or when DriveDeltaTokens is cleared to force a fresh full scan).");
+        }
+
+        if (unfinished.Count == 0) return 0;
+
+        // Build a quick set of GraphItemIds already in the model (from this run's
+        // delta scan) so we don't double-add. _model.AllFiles is cached/cheap.
+        var inModel = new HashSet<string>(
+            _model.AllFiles
+                .OfType<DocumentSiteWithMetadata>()
+                .Where(d => !string.IsNullOrEmpty(d.GraphItemId))
+                .Select(d => d.GraphItemId!));
+
+        // Map known DocLibs in the model by DriveId. The delta scan creates
+        // one per processed drive; a re-queued file's DriveId may or may not
+        // match — if not, we construct a stub DocLib so AddFile still works.
+        var docLibsByDrive = _model.AllDocLibs
+            .Where(l => !string.IsNullOrEmpty(l.DriveId))
+            .GroupBy(l => l.DriveId)
+            .ToDictionary(g => g.Key, g => (DocLib)g.First());
+
+        int added = 0;
+        int skippedAlreadyPresent = 0;
+        foreach (var row in unfinished)
+        {
+            if (inModel.Contains(row.GraphItemId!))
+            {
+                skippedAlreadyPresent++;
+                continue;
+            }
+
+            if (!docLibsByDrive.TryGetValue(row.DriveId!, out var docLib))
+            {
+                // No matching DocLib in this run's model (e.g. the drive
+                // wasn't returned by delta and we never instantiated it).
+                // Create a stub – analytics only needs DriveId + GraphItemId.
+                docLib = new DocLib
+                {
+                    DriveId = row.DriveId!,
+                    Title = $"<resumed-drive {row.DriveId}>",
+                    ServerRelativeUrl = string.Empty
+                };
+                docLibsByDrive[row.DriveId!] = docLib;
+            }
+
+            var driveItem = new DriveItemSharePointFileInfo
+            {
+                ServerRelativeFilePath = row.Url ?? string.Empty,
+                FileSize = row.FileSize,
+                LastModified = row.LastModified,
+                CreatedDate = row.CreatedDate,
+                DriveId = row.DriveId,
+                GraphItemId = row.GraphItemId,
+                SiteUrl = _site.RootURL,
+                WebUrl = _site.RootURL,
+                List = docLib
+            };
+
+            var doc = new DocumentSiteWithMetadata(driveItem)
+            {
+                State = SiteFileAnalysisState.AnalysisPending
+            };
+
+            _model.AddFile(doc, docLib);
+            added++;
+        }
+
+        if (skippedAlreadyPresent > 0)
+        {
+            _logger.LogDebug(
+                $"Skipped {skippedAlreadyPresent} unanalyzed DB row(s) that were already in this run's delta.");
+        }
+
+        return added;
     }
 
     /// <summary>
@@ -239,7 +375,11 @@ public class SiteModelBuilder : BaseComponent, IDisposable
             if (filesToLoad.Count > 0)
             {
                 // Start metadata update any doc with "pending" state
-                Console.WriteLine($"Have completed {_model.DocsCompleted.Count} of {_model.AllFiles.Count}. Pending: {filesToLoad.Count} ({_model.DocsByState(SiteFileAnalysisState.TransientError).Count} errors to retry)");
+                var transientCount = _model.DocsByState(SiteFileAnalysisState.TransientError).Count;
+                var fatalCount = _model.DocsByState(SiteFileAnalysisState.FatalError).Count;
+                Console.WriteLine(
+                    $"Have completed {_model.DocsCompleted.Count} of {_model.AllFiles.Count}. " +
+                    $"Pending: {filesToLoad.Count} ({transientCount} transient errors to retry, {fatalCount} given up)");
                 await UpdatePendingFilesAsync(batchSize, [.. filesToLoad.Cast<SharePointFileInfoWithList>()], filesUpdatedCallback).ConfigureAwait(false);
             }
             else
@@ -265,15 +405,59 @@ public class SiteModelBuilder : BaseComponent, IDisposable
     async Task StartAnalysisStatsUpdates()
     {
         _showStats = true;
+        var startedAt = DateTime.UtcNow;
+        int previousComplete = 0;
+        var previousTickAt = startedAt;
+
         while (_showStats)
         {
-            var pendingCount = _model.DocsByState(SiteFileAnalysisState.AnalysisPending).Count;
-            if (pendingCount > 0)
+            // Single-pass bucket count over AllFiles to avoid 5 separate
+            // DocsByState() scans each tick (each of which allocates a List).
+            int pending = 0, inProgress = 0, complete = 0, transient = 0, fatal = 0;
+            int totalDocs = 0;
+            foreach (var f in _model.AllFiles)
             {
-                Console.WriteLine($"{pendingCount:N0} files pending analytics & version data");
+                if (f is not DocumentSiteWithMetadata d) continue;
+                totalDocs++;
+                switch (d.State)
+                {
+                    case SiteFileAnalysisState.AnalysisPending: pending++; break;
+                    case SiteFileAnalysisState.AnalysisInProgress: inProgress++; break;
+                    case SiteFileAnalysisState.Complete: complete++; break;
+                    case SiteFileAnalysisState.TransientError: transient++; break;
+                    case SiteFileAnalysisState.FatalError: fatal++; break;
+                }
             }
 
-            await Task.Delay(TimeSpan.FromMinutes(1)).ConfigureAwait(false);
+            var now = DateTime.UtcNow;
+            var tickElapsed = (now - previousTickAt).TotalSeconds;
+            var sinceStart = (now - startedAt).TotalSeconds;
+            var deltaComplete = complete - previousComplete;
+            var instantRate = tickElapsed > 0 ? deltaComplete / tickElapsed : 0;
+            var avgRate = sinceStart > 0 ? complete / sinceStart : 0;
+            var remaining = pending + inProgress + transient;
+            string eta = "?";
+            if (avgRate > 0.01 && remaining > 0)
+            {
+                var etaSec = remaining / avgRate;
+                eta = etaSec >= 3600
+                    ? $"{(int)(etaSec / 3600)}h {((int)etaSec % 3600) / 60}m"
+                    : etaSec >= 60
+                        ? $"{(int)(etaSec / 60)}m {(int)etaSec % 60}s"
+                        : $"{(int)etaSec}s";
+            }
+
+            Console.WriteLine(
+                $"Analytics progress: {complete}/{totalDocs} complete " +
+                $"(+{deltaComplete} in last {tickElapsed:0}s, " +
+                $"{instantRate:0.0}/s now, {avgRate:0.0}/s avg). " +
+                $"InProgress: {inProgress}, Pending: {pending}, " +
+                $"Transient retry: {transient}, Given up: {fatal}. ETA: {eta}.");
+
+            previousComplete = complete;
+            previousTickAt = now;
+
+            await Task.Delay(TimeSpan.FromSeconds(30)).ConfigureAwait(false);
         }
     }
 
@@ -331,7 +515,19 @@ public class SiteModelBuilder : BaseComponent, IDisposable
         var versionUpdates = new Dictionary<DriveItemSharePointFileInfo, DriveItemVersionInfo>();
         var analyticsUpdates = new Dictionary<DriveItemSharePointFileInfo, ItemAnalyticsResponse.AnalyticsItemActionStat>();
 
+        _logger.LogInformation(
+            $"Dispatched {backgroundTasksThisChunk.Count} analytics/version task(s) " +
+            $"for {filesToUpdate.Count} files (batch size {batchSize}, " +
+            $"max 10 concurrent Graph calls per adapter). Awaiting completion " +
+            $"— see 30s heartbeat for progress.");
+        var chunkStart = DateTime.UtcNow;
+
         await Task.WhenAll(backgroundTasksThisChunk).ConfigureAwait(false);
+
+        _logger.LogInformation(
+            $"Analytics/version batch finished in " +
+            $"{(DateTime.UtcNow - chunkStart).TotalSeconds:N0}s " +
+            $"for {filesToUpdate.Count} files.");
 
         foreach (var finishedTask in backgroundTasksThisChunk)
         {

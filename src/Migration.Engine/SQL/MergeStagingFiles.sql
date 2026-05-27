@@ -53,7 +53,9 @@ insert into files(
 	directory_id,
 	file_size,
 	version_count,
-	versions_total_size
+	versions_total_size,
+	drive_id,
+	graph_item_id
 	)
 	select distinct 
 		imports.ServerRelativeFilePath, 
@@ -64,7 +66,9 @@ insert into files(
 		file_directories.id as directoryId,
 		imports.FileSize,
 		0 as version_count,
-		0 as versions_total_size
+		0 as versions_total_size,
+		imports.DriveId,
+		imports.GraphItemId
 	FROM [StagingFiles] imports
 		inner join users on users.email = imports.Author
 		inner join webs on webs.url = imports.WebUrl
@@ -72,5 +76,24 @@ insert into files(
 	left join files duplicates on duplicates.url = imports.ServerRelativeFilePath
 	where duplicates.url is null and
 	imports.ImportBlockId = @blockGuid
+
+-- Backfill drive_id / graph_item_id on rows that pre-date these columns
+-- (or that were inserted by an older build with NULLs). Picks the first
+-- staging row per URL within this block. Using TOP 1 + correlated subquery
+-- avoids ambiguity if a URL somehow appears twice in this block.
+update f
+	set f.drive_id = s.DriveId,
+	    f.graph_item_id = s.GraphItemId
+from files f
+inner join (
+	select staging.ServerRelativeFilePath, staging.DriveId, staging.GraphItemId,
+	       row_number() over (partition by staging.ServerRelativeFilePath order by staging.id) as rn
+	from [StagingFiles] staging
+	where staging.ImportBlockId = @blockGuid
+	  and staging.GraphItemId is not null
+	  and staging.GraphItemId != ''
+) s on s.ServerRelativeFilePath = f.url and s.rn = 1
+where (f.graph_item_id is null or f.graph_item_id = '' or
+       f.drive_id is null or f.drive_id = '')
 
 delete from [StagingFiles] where ImportBlockId = @blockGuid

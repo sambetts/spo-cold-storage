@@ -18,6 +18,8 @@ public class BaseSharePointFileInfo
         this.LastModified = driveArg.LastModified;
         this.CreatedDate = driveArg.CreatedDate;
         this.FileSize = driveArg.FileSize;
+        this.DriveId = driveArg.DriveId;
+        this.GraphItemId = driveArg.GraphItemId;
     }
 
     /// <summary>
@@ -55,6 +57,19 @@ public class BaseSharePointFileInfo
     /// Bytes
     /// </summary>
     public long FileSize { get; set; } = 0;
+
+    /// <summary>
+    /// Graph drive id. Set when this file came from a Drive scan; required to
+    /// call /drives/{id}/items/{itemId}/analytics. Persisted in the files
+    /// table so analytics can be retried on later runs without a full crawl.
+    /// </summary>
+    public string? DriveId { get; set; }
+
+    /// <summary>
+    /// Graph drive-item id. Pairs with <see cref="DriveId"/> to identify the
+    /// item across Graph API calls.
+    /// </summary>
+    public string? GraphItemId { get; set; }
 
     /// <summary>
     /// Calculated.
@@ -140,12 +155,5 @@ public class SharePointFileInfoWithList : BaseSharePointFileInfo
 public class DriveItemSharePointFileInfo : SharePointFileInfoWithList
 {
     public DriveItemSharePointFileInfo() : base() { }
-    public DriveItemSharePointFileInfo(DriveItemSharePointFileInfo driveArg) : base(driveArg)
-    {
-        this.DriveId = driveArg.DriveId;
-        this.GraphItemId = driveArg.GraphItemId;
-    }
-
-    public string DriveId { get; set; } = string.Empty;
-    public string GraphItemId { get; set; } = string.Empty;
+    public DriveItemSharePointFileInfo(DriveItemSharePointFileInfo driveArg) : base(driveArg) { }
 }

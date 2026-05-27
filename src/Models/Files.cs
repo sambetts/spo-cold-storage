@@ -22,6 +22,14 @@ public class DocumentSiteWithMetadata : DriveItemSharePointFileInfo
 
     public SiteFileAnalysisState State { get; set; } = SiteFileAnalysisState.Unknown;
 
+    /// <summary>
+    /// Number of times the analytics/version fetch has been attempted and failed
+    /// with a transient error. Used by the analytics provider to cap retries on
+    /// files that keep returning transient errors (e.g. Graph 500s on a single item).
+    /// </summary>
+    [JsonIgnore]
+    public int AnalyticsRetryCount { get; set; }
+
     public int? AccessCount { get; set; } = null;
     public int VersionCount { get; set; }
     public long VersionHistorySize { get; set; }
