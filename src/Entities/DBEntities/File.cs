@@ -59,13 +59,19 @@ public class SPFile : BaseDBObjectWithUrl
     /// /drives/{id}/items/{itemId}/analytics on later runs without re-crawling.
     /// Nullable to allow legacy rows that pre-date this column.
     /// </summary>
+    // MaxLength 450 keeps the column as NVARCHAR(450) so it can participate
+    // in IX_files_analysis_completed_null. Without this, EF maps string? to
+    // NVARCHAR(MAX), which SQL Server rejects as an index key column.
     [Column("drive_id")]
+    [MaxLength(450)]
     public string? DriveId { get; set; }
 
     /// <summary>
     /// Graph drive-item id. Pairs with <see cref="DriveId"/>.
     /// </summary>
+    // See DriveId comment: must stay NVARCHAR(450) for the filtered index.
     [Column("graph_item_id")]
+    [MaxLength(450)]
     public string? GraphItemId { get; set; }
 }
 

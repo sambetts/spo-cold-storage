@@ -60,6 +60,35 @@ IF COL_LENGTH('dbo.files', 'graph_item_id') IS NULL
     ALTER TABLE dbo.files ADD graph_item_id NVARCHAR(450) NULL;
 ";
 
+        // Repair step for databases created before the [MaxLength(450)] attributes
+        // were added to SPFile / BaseSharePointFileInfo. In those builds EF mapped
+        // string? to NVARCHAR(MAX), which SQL Server rejects as an index key column
+        // (the original cause of "Column 'graph_item_id' ... is of a type that is
+        // invalid for use as a key column in an index"). max_length = -1 in
+        // sys.columns identifies NVARCHAR(MAX); shrink it to NVARCHAR(450) so the
+        // filtered index below can be created.
+        const string shrinkGraphIdColumnsSql = @"
+IF EXISTS (SELECT 1 FROM sys.columns
+           WHERE object_id = OBJECT_ID('dbo.files')
+             AND name = 'graph_item_id' AND max_length = -1)
+    ALTER TABLE dbo.files ALTER COLUMN graph_item_id NVARCHAR(450) NULL;
+
+IF EXISTS (SELECT 1 FROM sys.columns
+           WHERE object_id = OBJECT_ID('dbo.files')
+             AND name = 'drive_id' AND max_length = -1)
+    ALTER TABLE dbo.files ALTER COLUMN drive_id NVARCHAR(450) NULL;
+
+IF EXISTS (SELECT 1 FROM sys.columns
+           WHERE object_id = OBJECT_ID('dbo.StagingFiles')
+             AND name = 'GraphItemId' AND max_length = -1)
+    ALTER TABLE dbo.StagingFiles ALTER COLUMN GraphItemId NVARCHAR(450) NULL;
+
+IF EXISTS (SELECT 1 FROM sys.columns
+           WHERE object_id = OBJECT_ID('dbo.StagingFiles')
+             AND name = 'DriveId' AND max_length = -1)
+    ALTER TABLE dbo.StagingFiles ALTER COLUMN DriveId NVARCHAR(450) NULL;
+";
+
         const string addUnanalyzedIndexSql = @"
 IF NOT EXISTS (
     SELECT 1 FROM sys.indexes
@@ -71,9 +100,15 @@ IF NOT EXISTS (
 ";
 
         await context.Database.ExecuteSqlRawAsync(addGraphIdColumnsSql);
-        // Index creation must run after the columns exist; SQL Server compiles
-        // the whole batch up-front and would otherwise fail on a fresh DB
-        // where the columns didn't exist before this call.
+        // Shrink any pre-existing NVARCHAR(MAX) columns to NVARCHAR(450) before
+        // trying to index them. Must run as its own batch after the ADD COLUMN
+        // batch above, otherwise SQL Server parses references to columns that
+        // don't yet exist on a fresh DB.
+        await context.Database.ExecuteSqlRawAsync(shrinkGraphIdColumnsSql);
+        // Index creation must run after the columns exist and have an
+        // index-compatible type; SQL Server compiles the whole batch up-front
+        // and would otherwise fail on a fresh DB where the columns didn't
+        // exist before this call.
         await context.Database.ExecuteSqlRawAsync(addUnanalyzedIndexSql);
     }
 }

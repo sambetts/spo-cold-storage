@@ -1,3 +1,4 @@
+using System.ComponentModel.DataAnnotations;
 using System.Text.Json.Serialization;
 
 namespace Models;
@@ -63,12 +64,17 @@ public class BaseSharePointFileInfo
     /// call /drives/{id}/items/{itemId}/analytics. Persisted in the files
     /// table so analytics can be retried on later runs without a full crawl.
     /// </summary>
+    // MaxLength 450 mirrors the EF mapping on SPFile so the StagingFiles
+    // table is created with NVARCHAR(450) instead of NVARCHAR(MAX), keeping
+    // both tables consistent and indexable.
+    [MaxLength(450)]
     public string? DriveId { get; set; }
 
     /// <summary>
     /// Graph drive-item id. Pairs with <see cref="DriveId"/> to identify the
     /// item across Graph API calls.
     /// </summary>
+    [MaxLength(450)]
     public string? GraphItemId { get; set; }
 
     /// <summary>
