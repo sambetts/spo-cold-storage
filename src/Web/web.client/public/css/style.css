@@ -1,0 +1,30 @@
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: "Segoe UI", -apple-system, BlinkMacSystemFont, "Roboto", "Helvetica Neue", sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  background-color: #faf9f8;
+  color: #201f1e;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.spo-app {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.spo-content {
+  flex: 1;
+}
+
+@media only screen and (max-width: 768px) {
+  body {
+    font-size: 13px;
+  }
+}

@@ -1,0 +1,18 @@
+<Project>
+
+  <PropertyGroup>
+	<!-- Shared, repo-wide build settings for the ColdStorage solution. -->
+	<Nullable>enable</Nullable>
+	<ImplicitUsings>enable</ImplicitUsings>
+	<!-- Run IDE code-style analyzers (IDExxxx) as part of build so style stays consistent across the repo. -->
+	<EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>
+	<!--
+	  AnalysisLevel intentionally left at SDK default (latest-minimum).
+	  Raising to 'latest-recommended' produced ~330 mostly cosmetic CA warnings
+	  (CA1305 globalization, CA1707 underscores in test method names, CA1822 static, etc.).
+	  Treat that as a separate, focused pass before enabling warnings-as-errors.
+	-->
+	<TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+  </PropertyGroup>
+
+</Project>

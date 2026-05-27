@@ -1,0 +1,135 @@
+﻿/* SharePoint Online Modern Header Styles */
+.spo-header {
+  background-color: #fff;
+  border-bottom: 1px solid #edebe9;
+  position: sticky;
+  top: 0;
+  z-index: 1000;
+  box-shadow: 0 0.3px 0.9px rgba(0, 0, 0, 0.108), 0 1.6px 3.6px rgba(0, 0, 0, 0.132);
+}
+
+.spo-header-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 48px;
+  padding: 0 20px;
+  background-color: #fff;
+}
+
+.spo-header-left {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.spo-header-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.spo-waffle-button {
+  width: 40px;
+  height: 40px;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 2px;
+  color: #201f1e;
+  transition: background-color 0.1s;
+}
+
+.spo-waffle-button:hover {
+  background-color: #f3f2f1;
+}
+
+.spo-site-title {
+  font-size: 16px;
+  font-weight: 600;
+  color: #201f1e;
+}
+
+.spo-title-link {
+  color: #201f1e;
+  text-decoration: none;
+}
+
+.spo-title-link:hover {
+  color: #106ebe;
+  text-decoration: none;
+}
+
+.spo-nav {
+  background-color: #fff;
+  border-top: 1px solid #edebe9;
+}
+
+.spo-nav-links {
+  display: flex;
+  padding: 0 20px;
+  gap: 4px;
+  overflow-x: auto;
+}
+
+.spo-nav-link {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 16px;
+  color: #201f1e;
+  text-decoration: none;
+  font-size: 14px;
+  font-weight: 400;
+  border-bottom: 2px solid transparent;
+  white-space: nowrap;
+  transition: all 0.1s;
+  position: relative;
+}
+
+.spo-nav-link:hover {
+  color: #106ebe;
+  text-decoration: none;
+  background-color: #f3f2f1;
+}
+
+.spo-nav-link.active {
+  color: #0078d4;
+  border-bottom-color: #0078d4;
+  font-weight: 600;
+}
+
+.spo-nav-icon {
+  font-size: 20px;
+}
+
+html {
+  font-size: 14px;
+}
+
+@media (min-width: 768px) {
+  html {
+    font-size: 14px;
+  }
+}
+
+@media (max-width: 640px) {
+  .spo-nav-link span {
+    display: none;
+  }
+  
+  .spo-site-title {
+    font-size: 14px;
+  }
+  
+  .spo-header-top {
+    padding: 0 12px;
+  }
+  
+  .spo-nav-links {
+    padding: 0 12px;
+  }
+}

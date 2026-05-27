@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+	<OutputType>Exe</OutputType>
+	<TargetFramework>net10.0</TargetFramework>
+	<UserSecretsId>c94dbb1b-98f2-4577-9fa5-86f3be0cfc65</UserSecretsId>
+	<FileVersion>1.0.0.1</FileVersion>
+  </PropertyGroup>
+
+  <ItemGroup>
+	<None Remove="appsettings.json" />
+  </ItemGroup>
+
+  <ItemGroup>
+	<Content Include="appsettings.json">
+	  <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+	</Content>
+  </ItemGroup>
+
+  <ItemGroup>
+	<PackageReference Include="Microsoft.Extensions.Configuration.UserSecrets" />
+  </ItemGroup>
+
+  <ItemGroup>
+	<ProjectReference Include="..\Migration.Engine\Migration.Engine.csproj" />
+  </ItemGroup>
+
+</Project>

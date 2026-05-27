@@ -1,0 +1,24 @@
+# Build output
+bin/
+obj/
+*.dll
+*.pdb
+
+# Test output
+TestResults/
+[Tt]est[Rr]esults/
+
+# Visual Studio
+.vs/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+*.slnLaunch.user
+
+# Rider / VS Code
+.idea/
+
+# Node / SPA
+node_modules/
+dist/

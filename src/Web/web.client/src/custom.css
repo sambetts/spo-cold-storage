@@ -1,0 +1,170 @@
+/* SharePoint Online Modern UI Styles */
+:root {
+  --spo-primary: #0078d4;
+  --spo-primary-hover: #106ebe;
+  --spo-text-primary: #201f1e;
+  --spo-text-secondary: #605e5c;
+  --spo-bg-primary: #ffffff;
+  --spo-bg-secondary: #faf9f8;
+  --spo-border: #edebe9;
+  --spo-border-hover: #c8c6c4;
+}
+
+body {
+  background-color: var(--spo-bg-secondary);
+  color: var(--spo-text-primary);
+  font-family: "Segoe UI", -apple-system, BlinkMacSystemFont, "Roboto", "Helvetica Neue", sans-serif;
+}
+
+a {
+  color: var(--spo-primary);
+  text-decoration: none;
+}
+
+a:hover {
+  color: var(--spo-primary-hover);
+  text-decoration: underline;
+}
+
+.btn:focus, .btn:active:focus, .btn-link.nav-link:focus, .form-control:focus, .form-check-input:focus {
+  box-shadow: 0 0 0 1px var(--spo-primary);
+  outline: none;
+}
+
+code {
+  color: #a4262c;
+  background-color: #faf9f8;
+  padding: 2px 6px;
+  border-radius: 2px;
+  font-family: Consolas, Monaco, monospace;
+  font-size: 0.9em;
+}
+
+.btn-primary {
+  color: #fff;
+  background-color: var(--spo-primary);
+  border-color: var(--spo-primary);
+  border-radius: 2px;
+  font-weight: 600;
+  padding: 6px 16px;
+}
+
+.btn-primary:hover {
+  background-color: var(--spo-primary-hover);
+  border-color: var(--spo-primary-hover);
+}
+
+/* SharePoint List/Library Styles */
+.spo-page-container {
+  max-width: 1920px;
+  margin: 0 auto;
+  padding: 20px;
+  background-color: var(--spo-bg-secondary);
+}
+
+.spo-content-card {
+  background-color: var(--spo-bg-primary);
+  border: 1px solid var(--spo-border);
+  border-radius: 2px;
+  box-shadow: 0 0.3px 0.9px rgba(0, 0, 0, 0.108), 0 1.6px 3.6px rgba(0, 0, 0, 0.132);
+  padding: 20px;
+  margin-bottom: 20px;
+}
+
+.spo-section-header {
+  font-size: 20px;
+  font-weight: 600;
+  color: var(--spo-text-primary);
+  margin-bottom: 16px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--spo-border);
+}
+
+.spo-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--spo-border);
+  margin-bottom: 16px;
+}
+
+.spo-list-view {
+  background-color: var(--spo-bg-primary);
+}
+
+.spo-list-item {
+  display: flex;
+  align-items: center;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--spo-border);
+  transition: background-color 0.1s;
+  cursor: pointer;
+}
+
+.spo-list-item:hover {
+  background-color: #f3f2f1;
+}
+
+.spo-list-item:active {
+  background-color: #edebe9;
+}
+
+.spo-icon {
+  margin-right: 12px;
+  color: var(--spo-primary);
+}
+
+.spo-empty-state {
+  text-align: center;
+  padding: 60px 20px;
+  color: var(--spo-text-secondary);
+}
+
+.spo-empty-state-icon {
+  font-size: 48px;
+  color: #c8c6c4;
+  margin-bottom: 16px;
+}
+
+.spo-empty-state-text {
+  font-size: 16px;
+  margin-bottom: 8px;
+}
+
+.spo-command-bar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 8px 0;
+  flex-wrap: wrap;
+}
+
+/* Form Controls */
+input[type="text"],
+input[type="search"],
+select,
+textarea {
+  border: 1px solid var(--spo-border);
+  border-radius: 2px;
+  padding: 6px 8px;
+  font-size: 14px;
+  font-family: "Segoe UI", sans-serif;
+  transition: border-color 0.1s;
+}
+
+input[type="text"]:hover,
+input[type="search"]:hover,
+select:hover,
+textarea:hover {
+  border-color: var(--spo-border-hover);
+}
+
+input[type="text"]:focus,
+input[type="search"]:focus,
+select:focus,
+textarea:focus {
+  border-color: var(--spo-primary);
+  outline: none;
+  box-shadow: 0 0 0 1px var(--spo-primary);
+}

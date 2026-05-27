@@ -1,0 +1,62 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+	<TargetFramework>net10.0</TargetFramework>
+	<IsPackable>false</IsPackable>
+	<UserSecretsId>a1b5bce7-0bdb-4a62-a249-6cab421e3f9a</UserSecretsId>
+	<!--
+	  xUnit v3 introduced xUnit1051 which asks every CancellationToken-accepting call inside a test
+	  to use TestContext.Current.CancellationToken. Suppress here so the test suite keeps building
+	  with TreatWarningsAsErrors enabled; revisit during a focused test-quality pass.
+	-->
+	<NoWarn>$(NoWarn);xUnit1051</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+	<None Remove="appsettings.json" />
+  </ItemGroup>
+
+  <ItemGroup>
+	<Content Include="appsettings.json">
+	  <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+	</Content>
+  </ItemGroup>
+
+  <ItemGroup>
+	<PackageReference Include="Microsoft.AspNetCore.Mvc.Core" />
+	<PackageReference Include="Microsoft.AspNetCore.TestHost" />
+	<PackageReference Include="Microsoft.EntityFrameworkCore.Tools">
+	  <PrivateAssets>all</PrivateAssets>
+	  <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+	</PackageReference>
+	<PackageReference Include="Microsoft.Extensions.Configuration" />
+	<PackageReference Include="Microsoft.Extensions.Configuration.FileExtensions" />
+	<PackageReference Include="Microsoft.Extensions.Configuration.UserSecrets" />
+	<PackageReference Include="Microsoft.Extensions.Hosting" />
+	<PackageReference Include="Microsoft.Graph" />
+	<PackageReference Include="Microsoft.NET.Test.Sdk" />
+	<PackageReference Include="xunit.v3" />
+	<PackageReference Include="xunit.runner.visualstudio">
+	  <PrivateAssets>all</PrivateAssets>
+	  <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+	</PackageReference>
+	<PackageReference Include="NSubstitute" />
+	<PackageReference Include="NSubstitute.Analyzers.CSharp">
+	  <PrivateAssets>all</PrivateAssets>
+	  <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+	</PackageReference>
+	<!-- AwesomeAssertions: MIT-licensed community fork of FluentAssertions (keeps FluentAssertions namespace). -->
+	<PackageReference Include="AwesomeAssertions" />
+	<PackageReference Include="coverlet.collector">
+	  <PrivateAssets>all</PrivateAssets>
+	  <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+	</PackageReference>
+  </ItemGroup>
+
+  <ItemGroup>
+	<ProjectReference Include="..\Entities\Entities.csproj" />
+	<ProjectReference Include="..\Migration.Engine\Migration.Engine.csproj" />
+	<ProjectReference Include="..\Models\Models.csproj" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,20 @@
+**/bin/
+**/obj/
+**/node_modules/
+**/dist/
+**/TestResults/
+**/.vs/
+**/.vscode/
+**/.idea/
+**/*.user
+**/*.suo
+
+# Test projects (not needed at runtime)
+**/Tests/
+**/Migration.Engine.Tests/
+**/LoadGenerator/
+
+# Docs / git
+.git/
+.gitignore
+**/*.md
