@@ -1,0 +1,27 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/spfx-build/config.2.0.schema.json",
+  "version": "2.0",
+  "bundles": {
+    "cold-storage-commands": {
+      "components": [
+        {
+          "entrypoint": "./lib/extensions/coldStorageCommands/ColdStorageCommandSet.js",
+          "manifest": "./src/extensions/coldStorageCommands/ColdStorageCommandSet.manifest.json"
+        }
+      ]
+    },
+    "cold-storage-status-field": {
+      "components": [
+        {
+          "entrypoint": "./lib/extensions/coldStorageStatusField/ColdStorageStatusFieldCustomizer.js",
+          "manifest": "./src/extensions/coldStorageStatusField/ColdStorageStatusFieldCustomizer.manifest.json"
+        }
+      ]
+    }
+  },
+  "externals": {},
+  "localizedResources": {
+    "ColdStorageCommandSetStrings": "lib/extensions/coldStorageCommands/loc/{locale}.js",
+    "ColdStorageStatusFieldCustomizerStrings": "lib/extensions/coldStorageStatusField/loc/{locale}.js"
+  }
+}

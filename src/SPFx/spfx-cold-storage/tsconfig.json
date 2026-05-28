@@ -1,0 +1,22 @@
+{
+  "compilerOptions": {
+    "target": "es2017",
+    "forceConsistentCasingInFileNames": true,
+    "module": "esnext",
+    "moduleResolution": "node",
+    "jsx": "react",
+    "declaration": true,
+    "sourceMap": true,
+    "experimentalDecorators": true,
+    "skipLibCheck": true,
+    "outDir": "lib",
+    "inlineSources": false,
+    "noImplicitAny": true,
+    "strictNullChecks": true,
+    "typeRoots": ["./node_modules/@types", "./node_modules/@microsoft"],
+    "types": ["webpack-env"],
+    "lib": ["es2017", "dom", "es2017.object"]
+  },
+  "include": ["src/**/*.ts", "src/**/*.tsx"],
+  "exclude": ["node_modules", "lib"]
+}

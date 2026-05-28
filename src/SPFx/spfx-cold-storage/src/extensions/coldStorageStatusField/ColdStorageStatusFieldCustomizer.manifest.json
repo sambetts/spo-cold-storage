@@ -1,0 +1,10 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/spfx/field-customizer-extension-manifest.schema.json",
+  "id": "9d3e1f0b-1a1a-1a1a-1a1a-1a1a1a1a1a1a",
+  "alias": "ColdStorageStatusFieldCustomizer",
+  "componentType": "Extension",
+  "extensionType": "FieldCustomizer",
+  "version": "*",
+  "manifestVersion": 2,
+  "requiresCustomScript": false
+}

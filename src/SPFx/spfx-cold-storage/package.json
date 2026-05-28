@@ -1,0 +1,38 @@
+{
+  "name": "spfx-cold-storage",
+  "version": "0.1.0",
+  "private": true,
+  "description": "SharePoint Framework solution for SPO Cold Storage. Adds a ListView Command Set with Migrate / Restore commands plus a status field customizer for the cold storage lifecycle column.",
+  "engines": {
+    "node": ">=18.0.0 <19.0.0"
+  },
+  "main": "lib/index.js",
+  "scripts": {
+    "build": "gulp bundle",
+    "clean": "gulp clean",
+    "test": "gulp test",
+    "serve": "gulp serve",
+    "package": "gulp bundle --ship && gulp package-solution --ship"
+  },
+  "dependencies": {
+    "@microsoft/sp-core-library": "1.19.0",
+    "@microsoft/sp-listview-extensibility": "1.19.0",
+    "@microsoft/sp-application-base": "1.19.0",
+    "@microsoft/sp-http": "1.19.0",
+    "@microsoft/sp-property-pane": "1.19.0",
+    "@microsoft/sp-webpart-base": "1.19.0",
+    "@microsoft/sp-lodash-subset": "1.19.0",
+    "@microsoft/sp-office-ui-fabric-core": "1.19.0",
+    "tslib": "2.3.1"
+  },
+  "devDependencies": {
+    "@microsoft/sp-build-web": "1.19.0",
+    "@microsoft/sp-module-interfaces": "1.19.0",
+    "@microsoft/eslint-config-spfx": "1.19.0",
+    "@types/webpack-env": "~1.15.2",
+    "ajv": "^6.12.5",
+    "eslint": "8.7.0",
+    "gulp": "4.0.2",
+    "typescript": "4.7.4"
+  }
+}

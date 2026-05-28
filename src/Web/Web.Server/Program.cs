@@ -4,6 +4,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Identity.Web;
 using Entities;
 using Entities.Configuration;
+using Web.Services;
 
 namespace Web.Server;
 
@@ -38,6 +39,11 @@ public class Program
         // UsageStatsReport
         builder.Services.AddDbContext<SPOColdStorageDbContext>(options =>
             options.UseSqlServer(config.ConnectionStrings.SQLConnectionString));
+
+        // Cold-storage services backing the new SPFx-facing API surface.
+        builder.Services.AddScoped<ISiteOwnerAuthorizationService, SiteOwnerAuthorizationService>();
+        builder.Services.AddScoped<IContainerAccessService, ContainerAccessService>();
+        builder.Services.AddSingleton<IColdStorageBusPublisher, ColdStorageBusPublisher>();
 
         var app = builder.Build();
 

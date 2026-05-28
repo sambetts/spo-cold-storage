@@ -110,5 +110,143 @@ IF NOT EXISTS (
         // and would otherwise fail on a fresh DB where the columns didn't
         // exist before this call.
         await context.Database.ExecuteSqlRawAsync(addUnanalyzedIndexSql);
+
+        await ApplyColdStorageSchemaUpgradesAsync(context);
+    }
+
+    /// <summary>
+    /// Idempotent DDL for the cold-storage lifecycle tables. Run after
+    /// <see cref="DbContext.Database"/>.EnsureCreated so existing deployments
+    /// pick up the new tables/indexes without an EF migration.
+    /// </summary>
+    private static async Task ApplyColdStorageSchemaUpgradesAsync(SPOColdStorageDbContext context)
+    {
+        const string createContainersSql = @"
+IF OBJECT_ID('dbo.cold_storage_containers', 'U') IS NULL
+BEGIN
+    CREATE TABLE dbo.cold_storage_containers (
+        id INT IDENTITY(1,1) PRIMARY KEY,
+        name NVARCHAR(128) NOT NULL,
+        display_name NVARCHAR(256) NOT NULL,
+        blob_container_name NVARCHAR(63) NOT NULL,
+        storage_account_uri NVARCHAR(2048) NOT NULL CONSTRAINT DF_cold_storage_containers_uri DEFAULT(''),
+        is_default BIT NOT NULL CONSTRAINT DF_cold_storage_containers_default DEFAULT(0),
+        sort_order INT NOT NULL CONSTRAINT DF_cold_storage_containers_sort DEFAULT(0),
+        description NVARCHAR(MAX) NULL,
+        CONSTRAINT UX_cold_storage_containers_name UNIQUE(name)
+    );
+END;
+
+IF OBJECT_ID('dbo.cold_storage_container_acls', 'U') IS NULL
+BEGIN
+    CREATE TABLE dbo.cold_storage_container_acls (
+        id INT IDENTITY(1,1) PRIMARY KEY,
+        container_id INT NOT NULL,
+        principal_id NVARCHAR(64) NOT NULL,
+        principal_type INT NOT NULL,
+        principal_display NVARCHAR(256) NULL,
+        can_browse BIT NOT NULL CONSTRAINT DF_csca_browse DEFAULT(0),
+        can_migrate BIT NOT NULL CONSTRAINT DF_csca_migrate DEFAULT(0),
+        can_restore BIT NOT NULL CONSTRAINT DF_csca_restore DEFAULT(0),
+        CONSTRAINT FK_csca_container FOREIGN KEY(container_id)
+            REFERENCES dbo.cold_storage_containers(id) ON DELETE CASCADE,
+        CONSTRAINT UX_csca_principal UNIQUE(container_id, principal_id, principal_type)
+    );
+END;";
+
+        const string createJobsSql = @"
+IF OBJECT_ID('dbo.migration_jobs', 'U') IS NULL
+BEGIN
+    CREATE TABLE dbo.migration_jobs (
+        job_id UNIQUEIDENTIFIER NOT NULL PRIMARY KEY,
+        operation INT NOT NULL,
+        requested_by_upn NVARCHAR(256) NOT NULL,
+        site_url NVARCHAR(2048) NOT NULL,
+        web_url NVARCHAR(2048) NOT NULL CONSTRAINT DF_jobs_web DEFAULT(''),
+        container_id INT NULL,
+        conflict_behavior INT NOT NULL CONSTRAINT DF_jobs_conflict DEFAULT(0),
+        status INT NOT NULL CONSTRAINT DF_jobs_status DEFAULT(0),
+        created_at DATETIME2 NOT NULL CONSTRAINT DF_jobs_created DEFAULT(SYSUTCDATETIME()),
+        updated_at DATETIME2 NOT NULL CONSTRAINT DF_jobs_updated DEFAULT(SYSUTCDATETIME()),
+        completed_at DATETIME2 NULL,
+        summary NVARCHAR(1024) NULL,
+        CONSTRAINT FK_jobs_container FOREIGN KEY(container_id)
+            REFERENCES dbo.cold_storage_containers(id)
+    );
+END;
+
+IF OBJECT_ID('dbo.migration_job_items', 'U') IS NULL
+BEGIN
+    CREATE TABLE dbo.migration_job_items (
+        item_id UNIQUEIDENTIFIER NOT NULL PRIMARY KEY,
+        job_id UNIQUEIDENTIFIER NOT NULL,
+        item_kind INT NOT NULL,
+        recursive BIT NOT NULL CONSTRAINT DF_items_recursive DEFAULT(0),
+        sp_site_url NVARCHAR(2048) NOT NULL,
+        sp_web_url NVARCHAR(2048) NOT NULL,
+        sp_server_relative_url NVARCHAR(2048) NOT NULL,
+        sp_subpath NVARCHAR(2048) NOT NULL CONSTRAINT DF_items_subpath DEFAULT(''),
+        file_size BIGINT NOT NULL CONSTRAINT DF_items_size DEFAULT(0),
+        source_last_modified DATETIME2 NULL,
+        container_id INT NULL,
+        blob_container_name NVARCHAR(63) NULL,
+        blob_path NVARCHAR(1024) NULL,
+        blob_url NVARCHAR(2048) NULL,
+        placeholder_server_relative_url NVARCHAR(2048) NULL,
+        content_md5_base64 NVARCHAR(64) NULL,
+        permissions_json NVARCHAR(MAX) NULL,
+        status INT NOT NULL CONSTRAINT DF_items_status DEFAULT(0),
+        last_error NVARCHAR(2048) NULL,
+        attempts INT NOT NULL CONSTRAINT DF_items_attempts DEFAULT(0),
+        validated_at DATETIME2 NULL,
+        copied_at DATETIME2 NULL,
+        source_deleted_at DATETIME2 NULL,
+        placeholder_created_at DATETIME2 NULL,
+        restored_at DATETIME2 NULL,
+        completed_at DATETIME2 NULL,
+        created_at DATETIME2 NOT NULL CONSTRAINT DF_items_created DEFAULT(SYSUTCDATETIME()),
+        updated_at DATETIME2 NOT NULL CONSTRAINT DF_items_updated DEFAULT(SYSUTCDATETIME()),
+        CONSTRAINT FK_items_job FOREIGN KEY(job_id)
+            REFERENCES dbo.migration_jobs(job_id) ON DELETE CASCADE,
+        CONSTRAINT FK_items_container FOREIGN KEY(container_id)
+            REFERENCES dbo.cold_storage_containers(id)
+    );
+END;
+
+IF OBJECT_ID('dbo.migration_job_logs', 'U') IS NULL
+BEGIN
+    CREATE TABLE dbo.migration_job_logs (
+        id INT IDENTITY(1,1) PRIMARY KEY,
+        job_id UNIQUEIDENTIFIER NOT NULL,
+        item_id UNIQUEIDENTIFIER NULL,
+        timestamp DATETIME2 NOT NULL CONSTRAINT DF_jlogs_ts DEFAULT(SYSUTCDATETIME()),
+        level INT NOT NULL CONSTRAINT DF_jlogs_level DEFAULT(0),
+        status INT NOT NULL CONSTRAINT DF_jlogs_status DEFAULT(0),
+        message NVARCHAR(4000) NOT NULL,
+        exception NVARCHAR(MAX) NULL,
+        CONSTRAINT FK_jlogs_job FOREIGN KEY(job_id)
+            REFERENCES dbo.migration_jobs(job_id) ON DELETE CASCADE,
+        CONSTRAINT FK_jlogs_item FOREIGN KEY(item_id)
+            REFERENCES dbo.migration_job_items(item_id)
+    );
+END;";
+
+        const string createColdStorageIndexesSql = @"
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_migration_job_items_job' AND object_id = OBJECT_ID('dbo.migration_job_items'))
+    CREATE INDEX IX_migration_job_items_job ON dbo.migration_job_items(job_id);
+
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_migration_job_items_sp_url' AND object_id = OBJECT_ID('dbo.migration_job_items'))
+    CREATE INDEX IX_migration_job_items_sp_url ON dbo.migration_job_items(sp_server_relative_url);
+
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_migration_job_items_job_status' AND object_id = OBJECT_ID('dbo.migration_job_items'))
+    CREATE INDEX IX_migration_job_items_job_status ON dbo.migration_job_items(job_id, status);
+
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_migration_job_logs_job_ts' AND object_id = OBJECT_ID('dbo.migration_job_logs'))
+    CREATE INDEX IX_migration_job_logs_job_ts ON dbo.migration_job_logs(job_id, timestamp);
+";
+
+        await context.Database.ExecuteSqlRawAsync(createContainersSql);
+        await context.Database.ExecuteSqlRawAsync(createJobsSql);
+        await context.Database.ExecuteSqlRawAsync(createColdStorageIndexesSql);
     }
 }

@@ -1,0 +1,253 @@
+using Azure;
+using Azure.Storage.Blobs;
+using Entities.Configuration;
+using Microsoft.Extensions.Logging;
+using Migration.Engine.Lifecycle;
+using Migration.Engine.Utils;
+using Microsoft.SharePoint.Client;
+using Models.ColdStorage;
+using System.Text;
+using IOFile = System.IO.File;
+
+namespace Migration.Engine.Restore;
+
+/// <summary>
+/// End-to-end restore pipeline. Reads the placeholder content from
+/// SharePoint, downloads the matching blob from cold storage, uploads it back
+/// to SharePoint at the original (or fallback) location, then removes or
+/// updates the placeholder.
+/// </summary>
+public sealed class SharePointRestorePipeline : BaseComponent
+{
+    private readonly IJobStatusWriter _statusWriter;
+
+    public SharePointRestorePipeline(
+        Config config,
+        ILogger logger,
+        IJobStatusWriter statusWriter) : base(config, logger)
+    {
+        _statusWriter = statusWriter ?? throw new ArgumentNullException(nameof(statusWriter));
+    }
+
+    public async Task<bool> ProcessAsync(ColdStorageBusEnvelope envelope, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(envelope);
+        if (envelope.RestoreTarget is null)
+        {
+            throw new ArgumentException("Restore envelope must include RestoreTarget payload.", nameof(envelope));
+        }
+
+        var target = envelope.RestoreTarget;
+
+        await _statusWriter.TransitionAsync(envelope.ItemId, MigrationLifecycleStatus.Validating,
+            $"Validating placeholder '{target.PlaceholderServerRelativeUrl}'.", cancellationToken: cancellationToken);
+
+        ClientContext? spCtx = null;
+        string? tempFile = null;
+        try
+        {
+            spCtx = await AuthUtils.GetClientContext(_config, target.SiteUrl, _logger, null).ConfigureAwait(false);
+
+            var placeholderFile = spCtx.Web.GetFileByServerRelativeUrl(target.PlaceholderServerRelativeUrl);
+            spCtx.Load(placeholderFile, f => f.Exists, f => f.ServerRelativeUrl, f => f.ListItemAllFields);
+            await spCtx.ExecuteQueryAsync().ConfigureAwait(false);
+            if (!placeholderFile.Exists)
+            {
+                await _statusWriter.TransitionAsync(envelope.ItemId, MigrationLifecycleStatus.ValidationFailed,
+                    "Placeholder not found in SharePoint.", level: LogLevel.Warning, cancellationToken: cancellationToken);
+                return false;
+            }
+
+            var content = await ReadFileContentAsStringAsync(spCtx, placeholderFile, cancellationToken).ConfigureAwait(false);
+            var metadata = PlaceholderFileMetadata.TryParse(content);
+            if (metadata is null)
+            {
+                await _statusWriter.TransitionAsync(envelope.ItemId, MigrationLifecycleStatus.ValidationFailed,
+                    "Placeholder metadata is missing or corrupted; refusing to restore.",
+                    level: LogLevel.Error, cancellationToken: cancellationToken);
+                return false;
+            }
+
+            await _statusWriter.TransitionAsync(envelope.ItemId, MigrationLifecycleStatus.RestoreInProgress,
+                $"Downloading blob '{metadata.ContainerName}/{metadata.BlobPath}'.", cancellationToken: cancellationToken);
+
+            tempFile = Path.Combine(Path.GetTempPath(), "SpoColdStorageRestore", Guid.NewGuid().ToString("N") + ".bin");
+            Directory.CreateDirectory(Path.GetDirectoryName(tempFile)!);
+
+            await DownloadBlobToTempAsync(metadata.ContainerName, metadata.BlobPath, tempFile, cancellationToken).ConfigureAwait(false);
+
+            var destinationUrl = target.OriginalServerRelativeUrl
+                                 ?? metadata.OriginalServerRelativeUrl;
+            var destinationFolder = GetParentFolder(destinationUrl);
+
+            // Conflict handling per envelope.ConflictBehavior.
+            destinationUrl = await ResolveConflictAsync(spCtx, destinationUrl, envelope.ConflictBehavior, envelope.ItemId, cancellationToken).ConfigureAwait(false);
+            if (destinationUrl is null)
+            {
+                return false;
+            }
+
+            using (var fs = IOFile.OpenRead(tempFile))
+            {
+                var folder = spCtx.Web.GetFolderByServerRelativeUrl(destinationFolder);
+                spCtx.Load(folder);
+                await spCtx.ExecuteQueryAsync().ConfigureAwait(false);
+
+                var addInfo = new FileCreationInformation
+                {
+                    ContentStream = fs,
+                    Url = Path.GetFileName(destinationUrl),
+                    Overwrite = envelope.ConflictBehavior == ConflictBehavior.Overwrite,
+                };
+                var uploaded = folder.Files.Add(addInfo);
+                spCtx.Load(uploaded, f => f.ServerRelativeUrl);
+                await spCtx.ExecuteQueryAsync().ConfigureAwait(false);
+                destinationUrl = uploaded.ServerRelativeUrl;
+            }
+
+            await _statusWriter.RecordRestoredAsync(envelope.ItemId, destinationUrl, cancellationToken);
+
+            await _statusWriter.TransitionAsync(envelope.ItemId, MigrationLifecycleStatus.PostRestoreValidation,
+                "Verifying restored file in SharePoint.", cancellationToken: cancellationToken);
+            await VerifyRestoredAsync(spCtx, destinationUrl, cancellationToken).ConfigureAwait(false);
+
+            // Remove placeholder
+            await _statusWriter.TransitionAsync(envelope.ItemId, MigrationLifecycleStatus.PlaceholderRemoving,
+                "Removing placeholder.", cancellationToken: cancellationToken);
+            try
+            {
+                placeholderFile.DeleteObject();
+                await spCtx.ExecuteQueryAsync().ConfigureAwait(false);
+                await _statusWriter.TransitionAsync(envelope.ItemId, MigrationLifecycleStatus.RestoreCompleted,
+                    "Restore completed; placeholder removed.", cancellationToken: cancellationToken);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Restored file but failed to remove placeholder.");
+                await _statusWriter.TransitionAsync(envelope.ItemId, MigrationLifecycleStatus.PlaceholderRemoveFailed,
+                    $"Restored file but could not remove placeholder: {ex.Message}", exception: ex,
+                    level: LogLevel.Warning, cancellationToken: cancellationToken);
+                // Restored content is intact; treat as warning, not failure.
+                return true;
+            }
+
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Restore failed for placeholder '{Url}'.", target.PlaceholderServerRelativeUrl);
+            await _statusWriter.TransitionAsync(envelope.ItemId, MigrationLifecycleStatus.RestoreFailed,
+                $"Restore failed: {ex.Message}", exception: ex, level: LogLevel.Error, cancellationToken: cancellationToken);
+            return false;
+        }
+        finally
+        {
+            spCtx?.Dispose();
+            if (tempFile is not null)
+            {
+                try { IOFile.Delete(tempFile); } catch (IOException ex) { _logger.LogDebug(ex, "Temp delete failed."); }
+            }
+        }
+    }
+
+    private static async Task<string> ReadFileContentAsStringAsync(ClientContext ctx, Microsoft.SharePoint.Client.File spFile, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var streamResult = spFile.OpenBinaryStream();
+        await ctx.ExecuteQueryAsync().ConfigureAwait(false);
+        using var ms = new MemoryStream();
+        await streamResult.Value.CopyToAsync(ms, cancellationToken).ConfigureAwait(false);
+        return Encoding.UTF8.GetString(ms.ToArray());
+    }
+
+    private async Task DownloadBlobToTempAsync(string containerName, string blobPath, string tempFile, CancellationToken cancellationToken)
+    {
+        var serviceClient = BlobServiceClientFactory.Create(_config.ConnectionStrings.Storage, _config);
+        var blob = serviceClient.GetBlobContainerClient(containerName).GetBlobClient(blobPath);
+
+        try
+        {
+            await blob.DownloadToAsync(tempFile, cancellationToken).ConfigureAwait(false);
+        }
+        catch (RequestFailedException ex) when (ex.Status == 404)
+        {
+            throw new InvalidOperationException(
+                $"Cold-storage blob '{containerName}/{blobPath}' not found.", ex);
+        }
+    }
+
+    /// <summary>
+    /// Conflict handling for restore. Returns the chosen destination URL or
+    /// null when the caller asked to fail and a conflict exists.
+    /// </summary>
+    private async Task<string?> ResolveConflictAsync(
+        ClientContext ctx,
+        string destinationUrl,
+        ConflictBehavior behavior,
+        Guid itemId,
+        CancellationToken cancellationToken)
+    {
+        var existing = ctx.Web.GetFileByServerRelativeUrl(destinationUrl);
+        ctx.Load(existing, f => f.Exists);
+        try
+        {
+            await ctx.ExecuteQueryAsync().ConfigureAwait(false);
+        }
+        catch (ServerException)
+        {
+            return destinationUrl;
+        }
+
+        if (!existing.Exists)
+        {
+            return destinationUrl;
+        }
+
+        switch (behavior)
+        {
+            case ConflictBehavior.Overwrite:
+                return destinationUrl;
+            case ConflictBehavior.Rename:
+                var renamed = RenameToAvoidConflict(destinationUrl);
+                await _statusWriter.LogAsync(Guid.Empty, itemId, MigrationLifecycleStatus.RestoreInProgress,
+                    LogLevel.Information, $"Conflict at '{destinationUrl}', restoring as '{renamed}'.", null, cancellationToken);
+                return renamed;
+            default:
+                await _statusWriter.TransitionAsync(itemId, MigrationLifecycleStatus.RestoreFailed,
+                    $"Conflict at '{destinationUrl}' and conflict behavior = Fail.", level: LogLevel.Warning,
+                    cancellationToken: cancellationToken);
+                return null;
+        }
+    }
+
+    private static string RenameToAvoidConflict(string destinationUrl)
+    {
+        var folder = GetParentFolder(destinationUrl);
+        var name = Path.GetFileNameWithoutExtension(destinationUrl);
+        var ext = Path.GetExtension(destinationUrl);
+        var stamp = DateTime.UtcNow.ToString("yyyyMMddHHmmss", System.Globalization.CultureInfo.InvariantCulture);
+        return $"{folder}/{name}.restored-{stamp}{ext}";
+    }
+
+    private static async Task VerifyRestoredAsync(ClientContext ctx, string serverRelativeUrl, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var file = ctx.Web.GetFileByServerRelativeUrl(serverRelativeUrl);
+        ctx.Load(file, f => f.Exists, f => f.Length);
+        await ctx.ExecuteQueryAsync().ConfigureAwait(false);
+        if (!file.Exists)
+        {
+            throw new InvalidOperationException("Restored file not found after upload: " + serverRelativeUrl);
+        }
+    }
+
+    private static string GetParentFolder(string serverRelativeUrl)
+    {
+        var idx = serverRelativeUrl.LastIndexOf('/');
+        if (idx <= 0)
+        {
+            throw new ArgumentException("Cannot derive parent folder from URL: " + serverRelativeUrl, nameof(serverRelativeUrl));
+        }
+        return serverRelativeUrl[..idx];
+    }
+}

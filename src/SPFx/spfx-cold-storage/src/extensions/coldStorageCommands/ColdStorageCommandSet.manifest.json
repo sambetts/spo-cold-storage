@@ -1,0 +1,22 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/spfx/command-set-extension-manifest.schema.json",
+  "id": "c7d2d2f7-3a3a-3a3a-3a3a-3a3a3a3a3a3a",
+  "alias": "ColdStorageCommandSet",
+  "componentType": "Extension",
+  "extensionType": "ListViewCommandSet",
+  "version": "*",
+  "manifestVersion": 2,
+  "requiresCustomScript": false,
+  "items": {
+    "COLDSTORAGE_MIGRATE": {
+      "title": { "default": "Migrate to cold storage" },
+      "iconImageUrl": "icons/migrate.png",
+      "type": "command"
+    },
+    "COLDSTORAGE_RESTORE": {
+      "title": { "default": "Restore from cold storage" },
+      "iconImageUrl": "icons/restore.png",
+      "type": "command"
+    }
+  }
+}

@@ -76,7 +76,7 @@ public class TestFileAnalyticsAdapter : IFileAnalyticsProvider
 
         foreach (var file in files)
         {
-            if (_analyticsData.TryGetValue(file.GraphItemId, out var stats))
+            if (file.GraphItemId is not null && _analyticsData.TryGetValue(file.GraphItemId, out var stats))
             {
                 var response = new ItemAnalyticsResponse { AccessStats = stats };
                 results[file] = response;
@@ -104,7 +104,7 @@ public class TestFileAnalyticsAdapter : IFileAnalyticsProvider
 
         foreach (var file in files)
         {
-            if (_versionData.TryGetValue(file.GraphItemId, out var versionInfo))
+            if (file.GraphItemId is not null && _versionData.TryGetValue(file.GraphItemId, out var versionInfo))
             {
                 results[file] = versionInfo;
                 file.State = SiteFileAnalysisState.Complete;

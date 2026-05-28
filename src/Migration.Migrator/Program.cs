@@ -9,7 +9,14 @@ var config = ConsoleUtils.GetConfigurationWithDefaultBuilder<Program>();
 ConsoleUtils.PrintCommonStartupDetails();
 
 using var loggerFactory = ConsoleUtils.CreateLoggerFactory(config, "Migrator");
-var logger = loggerFactory.CreateLogger<ServiceBusMigrationListener>();
+var logger = loggerFactory.CreateLogger<ColdStorageBusListener>();
 
-var listener = new ServiceBusMigrationListener(config, logger);
-await listener.ListenForFilesToMigrate();
+var listener = new ColdStorageBusListener(config, logger);
+using var cts = new CancellationTokenSource();
+Console.CancelKeyPress += (_, e) =>
+{
+    e.Cancel = true;
+    cts.Cancel();
+};
+await listener.ListenAsync(cts.Token);
+

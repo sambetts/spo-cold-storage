@@ -4,6 +4,7 @@ using Microsoft.EntityFrameworkCore.Design;
 using Microsoft.Extensions.Configuration;
 using Entities.Configuration;
 using Entities.DBEntities;
+using Entities.DBEntities.ColdStorage;
 
 namespace Entities;
 /// <summary>
@@ -48,6 +49,13 @@ public class SPOColdStorageDbContext : DbContext
     public DbSet<FileMigrationErrorLog> FileMigrationErrors { get; set; } = null!;
     public DbSet<FileMigrationCompletedLog> FileMigrationsCompleted { get; set; } = null!;
     public DbSet<DriveDeltaToken> DriveDeltaTokens { get; set; } = null!;
+
+    public DbSet<ColdStorageContainer> ColdStorageContainers { get; set; } = null!;
+    public DbSet<ColdStorageContainerAcl> ColdStorageContainerAcls { get; set; } = null!;
+    public DbSet<MigrationJob> MigrationJobs { get; set; } = null!;
+    public DbSet<MigrationJobItem> MigrationJobItems { get; set; } = null!;
+    public DbSet<MigrationJobLog> MigrationJobLogs { get; set; } = null!;
+
     protected override void OnModelCreating(ModelBuilder builder)
     {
         builder.Entity<SPFile>()
@@ -71,6 +79,29 @@ public class SPOColdStorageDbContext : DbContext
 
         builder.Entity<DriveDeltaToken>()
             .HasIndex(d => d.SiteId);
+
+        builder.Entity<ColdStorageContainer>()
+            .HasIndex(c => c.Name)
+            .IsUnique();
+
+        builder.Entity<ColdStorageContainerAcl>()
+            .HasIndex(a => new { a.ContainerId, a.PrincipalId, a.PrincipalType })
+            .IsUnique();
+
+        builder.Entity<MigrationJobItem>()
+            .HasIndex(i => i.JobId);
+
+        // Look up an in-flight item by SharePoint URL when the SPFx column
+        // refreshes - non-unique because the same path can legitimately be
+        // requeued after a previous job has completed.
+        builder.Entity<MigrationJobItem>()
+            .HasIndex(i => i.SpServerRelativeUrl);
+
+        builder.Entity<MigrationJobItem>()
+            .HasIndex(i => new { i.JobId, i.Status });
+
+        builder.Entity<MigrationJobLog>()
+            .HasIndex(l => new { l.JobId, l.Timestamp });
     }
     protected override void OnConfiguring(DbContextOptionsBuilder options)
         => options.UseSqlServer(_config!.ConnectionStrings.SQLConnectionString, op => op.EnableRetryOnFailure());

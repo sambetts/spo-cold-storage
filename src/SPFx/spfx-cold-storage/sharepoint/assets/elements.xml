@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Elements xmlns="http://schemas.microsoft.com/sharepoint/">
+  <!--
+    Provisions the cold-storage lifecycle status site column. The same column
+    is used by the field customizer to render a colored badge and by the
+    server to surface the per-item status on document libraries.
+  -->
+  <Field
+    ID="{ba3c0a2c-4d4d-4d4d-4d4d-4d4d4d4d4d4d}"
+    Name="ColdStorageStatus"
+    DisplayName="Cold storage status"
+    Type="Text"
+    Required="FALSE"
+    Group="SPO Cold Storage"
+    MaxLength="64"
+    ClientSideComponentId="9d3e1f0b-1a1a-1a1a-1a1a-1a1a1a1a1a1a"
+    ClientSideComponentProperties="" />
+</Elements>

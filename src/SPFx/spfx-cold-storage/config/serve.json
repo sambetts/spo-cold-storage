@@ -1,0 +1,19 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/spfx-build/serve.schema.json",
+  "port": 4321,
+  "https": true,
+  "serveConfigurations": {
+    "default": {
+      "pageUrl": "https://contoso.sharepoint.com/sites/yourSite",
+      "customActions": {
+        "{c7d2d2f7-3a3a-3a3a-3a3a-3a3a3a3a3a3a}": {
+          "location": "ClientSideExtension.ListViewCommandSet.CommandBar",
+          "properties": {
+            "apiBaseUrl": "https://localhost:7099",
+            "apiAppIdUri": "api://localhost/spo-cold-storage"
+          }
+        }
+      }
+    }
+  }
+}
