@@ -682,9 +682,12 @@ function Invoke-Phase-SpfxDeploy {
 
     Connect-Spo -Url $appCatalogUrl
 
-    Write-Info 'Uploading + publishing app (Overwrite + Publish + SkipFeatureDeployment + Force)…'
-    # -Force suppresses the interactive confirmation prompt that otherwise blocks headless runs.
-    $app = Add-PnPApp -Path $sppkg.FullName -Scope Tenant -Overwrite -Publish -SkipFeatureDeployment -Force
+    Write-Info 'Uploading + publishing app (Overwrite + Publish + Force)…'
+    # NOTE: Intentionally NO -SkipFeatureDeployment — we want feature activation per-site
+    # so that Install-PnPApp deploys the elements.xml CustomActions to the site's web.
+    # SharePoint's tenant-wide extensions path (skipFeatureDeployment=true) requires a
+    # different XML schema and isn't reliable for ListView Command Sets.
+    $app = Add-PnPApp -Path $sppkg.FullName -Scope Tenant -Overwrite -Publish -Force
     Write-Ok "App published: id=$($app.Id) title=$($app.Title) version=$($app.AppCatalogVersion)"
 
     if ($targetSiteUrl) {

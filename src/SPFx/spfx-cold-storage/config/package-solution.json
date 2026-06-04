@@ -5,7 +5,7 @@
     "id": "6ba628ed-6a38-404c-9d85-ff342ee31c4b",
     "version": "0.1.0.0",
     "includeClientSideAssets": true,
-    "skipFeatureDeployment": true,
+    "skipFeatureDeployment": false,
     "isDomainIsolated": false,
     "developer": {
       "name": "SPO Cold Storage",
