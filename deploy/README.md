@@ -1,181 +1,190 @@
 # SPO Cold Storage — Deployment
 
-Automated deployment to Azure for the SPO Cold Storage solution.
+Automated end-to-end deployment to a single **Windows App Service** hosting the
+Web.Server (ASP.NET Core API + React SPA) and three workers as WebJobs.
 
-The whole thing runs as a single **Windows App Service** that hosts both the
-Web.Server API/SPA and the worker apps (as WebJobs).
+Two PowerShell orchestrators in this folder:
 
-## Layout
-
-```
-deploy/
-  deploy.ps1                  Azure-side orchestrator (infra + app code)
-  deploy-spo.ps1              SharePoint-side orchestrator (AAD + cert + SPFx)
-  params.example.json         Copy → params.json and fill in (gitignored)
-  params.json                 Real values — NOT tracked
-  README.md                   This file
-  .local/                     Generated cert PFX, etc. — NOT tracked
-  bicep/
-    main.bicep                All Azure resources (single file)
-  scripts/
-    _common.ps1               Shared PowerShell helpers (dot-sourced)
-```
-
-## Two scripts, two scopes
-
-| Script | Scope |
+| Script | Owns |
 |---|---|
-| `deploy.ps1` | Azure resources, Web.Server, WebJobs, app settings, SQL access. |
-| `deploy-spo.ps1` | AAD app registration, certificate (generate/file/KV), SPA env config, SPFx build & deploy to SharePoint App Catalog. |
+| `deploy.ps1` | Azure side &mdash; Bicep infra, Key Vault secrets, SQL access, app publish + zip deploy. |
+| `deploy-spo.ps1` | SharePoint side &mdash; AAD app registration + cert, SPA env config, SPFx build + tenant App Catalog upload. |
 
-You can run them independently. Typical first-time order is:
+Both are **phase-based** and **idempotent** &mdash; re-run safely. Each reads `deploy/params.json` (gitignored).
 
-1. `deploy-spo.ps1 -Phase AadApp` &mdash; creates the AAD app, writes `clientId`/`servicePrincipalObjectId` back into `params.json`.
-2. `deploy.ps1` &mdash; provisions Azure with the now-known AAD identifiers.
-3. `deploy-spo.ps1 -Phase Cert` &mdash; uploads cert to the Key Vault created in step 2.
-4. `deploy-spo.ps1 -Phase SpaConfig` then `deploy.ps1 -Phase App` &mdash; re-publish the SPA with the AAD `clientId` baked into `.env.production`.
-5. `deploy-spo.ps1 -Phase Spfx, SpfxDeploy` &mdash; build + ship the SPFx package to the App Catalog.
+---
 
-## Prerequisites
+## Quick start (first time, end-to-end)
 
-- PowerShell **7.2+**
-- Azure CLI **2.55+** (`az`) — `az login` to the target tenant first
-- .NET SDK **10.0+**
-- Node.js LTS (the Web.Server csproj builds the React SPA)
-- Git
-- A pre-existing Azure AD app registration for the API (see main repo `README.md`).
-  Note its **Client ID**, **Tenant ID**, and the **Service Principal Object ID**.
-- A pre-existing Entra group (recommended) or user that will be SQL Entra admin.
-  Note its **Object ID** and **display name**. You must be a member of this group
-  for the `Sql` phase to be able to grant the Web App MSI db_owner.
-- The AAD app registration's **client secret** value (provided at runtime —
-  never written to params.json).
+### 1. Install prerequisites
 
-## First-time setup
-
-1. Copy the params template:
-
-   ```powershell
-   Copy-Item deploy/params.example.json deploy/params.json
-   ```
-
-2. Edit `deploy/params.json` with your subscription, tenant, region, resource
-   names, and the Entra IDs above.
-
-3. Log in to Azure:
-
-   ```powershell
-   az login --tenant <your-tenant-id>
-   az account set --subscription <subscription-id>
-   ```
-
-4. Run the full deployment:
-
-   ```powershell
-   ./deploy/deploy.ps1
-   ```
-
-   You'll be prompted for the AAD client secret. Alternatively:
-
-   ```powershell
-   $env:SPOCS_AAD_CLIENT_SECRET = '<value>'
-   ./deploy/deploy.ps1 -SkipConfirm
-   ```
-
-## Phases (deploy.ps1 — Azure)
-
-Run a single phase with `-Phase <name>`. Phases are idempotent.
-
-| Phase    | What it does |
-|----------|--------------|
-| Prereqs  | Verifies local tooling versions, az login, registers resource providers. |
-| Validate | Parses + strictly validates `params.json`; checks Azure resource-name rules and global uniqueness. |
-| Infra    | Creates the resource group (if missing), runs `bicep what-if`, deploys `main.bicep`. |
-| Secrets  | Writes the AAD client secret to Key Vault (the other secrets are populated by Bicep itself from listKeys output). |
-| Sql      | Connects to Azure SQL as the Entra admin and grants the Web App MSI `db_owner` on the app DB. |
-| App      | `dotnet publish` Web.Server + the 3 workers, assembles a single zip with `App_Data\jobs\continuous\Migration.Migrator` + `App_Data\jobs\triggered\{Migration.Indexer,Migration.SiteSnapshotBuilder}`, sets App Service app settings (Key Vault references), zip-deploys, restarts. |
-| Smoke    | Probes the web app URL and lists WebJobs / app settings as a sanity check. |
-
-## Phases (deploy-spo.ps1 — SharePoint)
-
-| Phase      | What it does |
-|------------|--------------|
-| Prereqs    | Checks PnP.PowerShell (auto-installs if missing), Node 18.x (SPFx 1.19 requirement). |
-| AadApp     | Creates / updates the AAD app registration. Adds SPA redirect URI = `https://<webApp>.azurewebsites.net`, exposes API scope `access_as_user`, adds Microsoft Graph `User.Read` (delegated) + SharePoint `Sites.FullControl.All` (application) permissions, requests admin consent. Writes the resulting `clientId` + `servicePrincipalObjectId` back into `params.json`. |
-| Cert       | Three modes per `certificate.source`: <br/>• **generate** &mdash; New self-signed cert in `Cert:\CurrentUser\My`, exports to `deploy/.local/<name>.pfx` (gitignored) using a password from `-PfxPassword` / `$env:SPOCS_PFX_PASSWORD` / interactive prompt. <br/>• **file** &mdash; Uses your existing PFX from `certificate.pfxPath`. <br/>• **keyvault** &mdash; Reads an existing cert in the Key Vault under `azureAd.certificateName`. <br/>All modes upload the cert to KV (under `azureAd.certificateName`) and attach the public key to the AAD app's `keyCredentials`. Self-grants the deployer Key Vault Certificates Officer first (RBAC mode). |
-| SpaConfig  | Writes `src/Web/web.client/.env.production` with `VITE_MSAL_*` values resolved from `params.json` + bicep outputs. Re-run `deploy.ps1 -Phase App` afterwards to rebuild the SPA. |
-| Spfx       | `npm install` + `gulp bundle --ship` + `gulp package-solution --ship` in `src/SPFx/spfx-cold-storage`. Produces a `.sppkg` under `sharepoint/solution/`. |
-| SpfxDeploy | PnP.PowerShell login to `sharePoint.appCatalogUrl`, uploads the `.sppkg` with `Add-PnPApp -Scope Tenant -Overwrite -Publish -SkipFeatureDeployment -Force`, then connects to `sharePoint.targetSiteRelativeUrl` and runs `Install-PnPApp`. Auth method is selectable via `-SpfxAuthMode`. |
-
-### SpfxDeploy authentication
-
-The `-SpfxAuthMode` switch controls how PnP authenticates to SharePoint:
-
-| Mode | When to use | How |
+| Tool | Version | Check |
 |---|---|---|
-| `Interactive` (default) | Running from a developer workstation with a browser | Opens a browser sign-in window |
-| `DeviceLogin` | Running headless / over SSH / in CI | Prints a one-time device code; you sign in on a separate machine |
-| `Certificate` | Fully automated / re-runnable | App-only auth using the PFX created by the Cert phase. Requires `SharePoint Sites.FullControl.All` (granted automatically by AadApp). The PFX is expected at `deploy/.local/<azureAd.certificateName>.pfx`. |
+| PowerShell | 7.2+ | `$PSVersionTable.PSVersion` |
+| Azure CLI | 2.55+ | `az version` |
+| .NET SDK | 10.0+ | `dotnet --version` |
+| Node.js | 18.17+ (SPFx 1.22 needs <21) | `node --version` |
+| Git | any | `git --version` |
+
+PnP.PowerShell is auto-installed on first run.
+
+### 2. Sign in to Azure
 
 ```powershell
+az login --tenant <your-tenant-id>
+az account set --subscription <your-subscription-id>
+```
+
+The user you sign in as must:
+* be **Owner** (or have RBAC write rights) on the target subscription / resource group,
+* be a member of the Entra group you'll list as SQL admin in `params.json`,
+* have permission to create AAD apps and grant tenant admin consent (Global Administrator, Privileged Role Administrator, or Application Administrator).
+
+### 3. Create `params.json`
+
+```powershell
+Copy-Item deploy/params.example.json deploy/params.json
+```
+
+Edit `deploy/params.json` and fill in:
+
+| Field | Example | Notes |
+|---|---|---|
+| `subscription.id`, `subscription.tenantId` | GUIDs | `az account show` |
+| `location` | `westus3` | Region where Azure SQL is allowed for your sub |
+| `resourceGroupName` | `rg-spocs-prod` | Created if missing |
+| `naming.*` | see template | Globally-unique names get checked up front |
+| `azureAd.clientId`, `tenantId`, `servicePrincipalObjectId` | leave as zeros | **Auto-populated by step 4 below** |
+| `sql.entraAdminObjectId`, `entraAdminLogin` | your group OID + UPN | The deploying user MUST be a member |
+| `sharePoint.baseServerAddress` | `https://contoso.sharepoint.com` | Your SPO root |
+| `sharePoint.appCatalogUrl` | `https://contoso.sharepoint.com/sites/appcatalog` | Confirm with `Get-PnPTenantAppCatalogUrl` |
+| `sharePoint.targetSiteRelativeUrl` | `/sites/ColdStorage` | Where the SPFx web part installs |
+| `storage.userDataReaders` | `[{ "objectId": "<entra-group-oid>", "type": "Group" }]` | Members get `Storage Blob Data Reader` so the SPA can browse blobs |
+
+### 4. Provision the AAD app + cert
+
+```powershell
+./deploy/deploy-spo.ps1 -Phase AadApp
+./deploy/deploy-spo.ps1 -Phase Cert
+```
+
+`AadApp` creates the app registration, exposes the `access_as_user` API scope, adds Graph `User.Read` + SharePoint `Sites.FullControl.All`, requests admin consent, **generates a 2-year client secret** (saved to `deploy/.local/aad-client-secret.txt`, gitignored), and writes the IDs back into `params.json`.
+
+`Cert` generates a self-signed cert (or uses your own — see [Cert phase](#cert)), uploads it to the (not-yet-existing) Key Vault config, attaches the public key to the AAD app's `keyCredentials`. The PFX lands in `deploy/.local/<certName>.pfx`.
+
+You'll be prompted for a PFX password unless you set `$env:SPOCS_PFX_PASSWORD` first. **Save this password somewhere safe** &mdash; you'll need it again for `SpfxDeploy` with cert auth.
+
+### 5. Provision Azure + deploy the app
+
+```powershell
+./deploy/deploy.ps1
+```
+
+This runs all phases in order: `Prereqs`, `Validate`, `Infra`, `Secrets`, `Sql`, `App`, `Smoke`. The `Secrets` phase picks up the AAD client secret from `deploy/.local/aad-client-secret.txt` automatically.
+
+Takes ~6&ndash;10 minutes the first time (Azure SQL + App Service Plan are the slowest). You'll see a "Deployment plan" summary and one `yes/no` confirmation; add `-SkipConfirm` to skip it.
+
+At the end you'll see:
+
+```
+App URL: https://app-spocs-prod-XXX.azurewebsites.net
+```
+
+### 6. Build + deploy the SPFx solution
+
+```powershell
+./deploy/deploy-spo.ps1 -Phase SpaConfig
+./deploy/deploy.ps1 -Phase App -SkipConfirm   # rebuild SPA with AAD config
+./deploy/deploy-spo.ps1 -Phase Spfx
+./deploy/deploy-spo.ps1 -Phase SpfxDeploy     # uses interactive browser login by default
+```
+
+For an automated / headless `SpfxDeploy`, use the cert from step 4:
+
+```powershell
+$env:SPOCS_PFX_PASSWORD = '<the PFX password from step 4>'
 ./deploy/deploy-spo.ps1 -Phase SpfxDeploy -SpfxAuthMode Certificate -SkipConfirm
 ```
 
-### Important: app catalog URL
+### 7. Two manual steps that can't be automated
 
-The default app catalog URL on a fresh tenant is `https://<tenant>.sharepoint.com/sites/appcatalog` (not `/sites/apps`). Check yours with:
+After `SpfxDeploy` succeeds, two things still need a human in the SharePoint Admin Centre:
 
-```powershell
-Connect-PnPOnline -Url https://<tenant>.sharepoint.com -Interactive
-Get-PnPTenantAppCatalogUrl
-```
-
-### Important: AAD app display name must match `webApiPermissionRequests.resource`
-
-`src/SPFx/spfx-cold-storage/config/package-solution.json` declares:
-
-```json
-"webApiPermissionRequests": [
-  { "resource": "SPO Cold Storage Web API", "scope": "access_as_user" }
-]
-```
-
-For SharePoint to grant the SPFx solution permission to call the API, the `resource` string must exactly match the **display name** of the AAD app's service principal. Keep `aadApp.displayName` in `params.json` set to `"SPO Cold Storage Web API"` (or change the package-solution.json string to match whatever name you want — both files must agree).
-
-Useful flags:
-
-- `-WhatIfPreview` — Infra phase only: shows `az deployment group what-if` output and exits.
-- `-SkipConfirm` — Skip the interactive confirmation prompts.
-- `-ParamsFile path/to/other.json` — Use a non-default params file.
-
-## Post-deploy: manual steps that can't be automated
-
-After every phase has succeeded, two things still need a human:
-
-### 1. Approve the SPFx API permission request
-
-When `SpfxDeploy` uploads the `.sppkg`, the `webApiPermissionRequests` block in `package-solution.json` registers a pending request to call the AAD API ("SPO Cold Storage Web API", scope `access_as_user`). SharePoint will not grant this automatically — a SharePoint Administrator must approve it.
+**a. Approve the SPFx API permission request** &mdash; the SPFx package requested permission to call your Web API. SharePoint won't auto-approve.
 
 ```
 https://<tenant>-admin.sharepoint.com/_layouts/15/online/AdminHome.aspx#/webApiPermissionManagement
 ```
 
-Or via SPO PowerShell:
+Or via PnP:
 
 ```powershell
-# Approve all pending requests for our resource
 Get-PnPTenantServicePrincipalPermissionRequests |
     Where-Object { $_.Resource -eq 'SPO Cold Storage Web API' } |
     ForEach-Object { Approve-PnPTenantServicePrincipalPermissionRequest -RequestId $_.Id -Force }
 ```
 
-Until this is approved, the SPFx Migrate / Restore commands will fail with a 401 when they call the Web API via `AadHttpClient`.
+Without this, SPFx Migrate / Restore commands fail with HTTP 401.
 
-### 2. Grant end-users `Storage Blob Data Reader` on the storage account
+**b. (If you didn't put a group in `storage.userDataReaders`)** &mdash; grant your end-users `Storage Blob Data Reader` on the storage account. The SPA calls Azure Blob Storage **directly** from the browser, so users need data-plane RBAC. See [Grant end-users storage access](#grant-end-users-storage-access) below.
 
-The SPA calls Azure Blob Storage **directly** from the browser using a user-scoped token (scope `https://storage.azure.com/user_impersonation`). Without data-plane RBAC on the storage account, users hit `AuthorizationPermissionMismatch` when trying to browse cold-storage files.
+That's it. Visit the App URL, sign in, add a root SharePoint URL, and verify the WebJobs are running:
 
-**Recommended (declarative)** — list the user/group object IDs in `params.json` and re-run Infra; the Bicep template will create the role assignments:
+```powershell
+az webapp webjob continuous list -g <rg> -n <webApp> -o table
+az webapp webjob triggered  list -g <rg> -n <webApp> -o table
+```
+
+---
+
+## Layout
+
+```
+deploy/
+  deploy.ps1                  Azure orchestrator
+  deploy-spo.ps1              SharePoint orchestrator
+  params.example.json         Copy → params.json
+  params.json                 Real values — NOT tracked
+  README.md                   This file
+  .local/                     Generated secrets, cert PFX — NOT tracked
+  bicep/main.bicep            All Azure resources, one file
+  scripts/_common.ps1         Shared helpers (dot-sourced by both scripts)
+```
+
+## Phase reference
+
+### `deploy.ps1` (Azure)
+
+| Phase | What it does |
+|---|---|
+| `Prereqs` | Verifies local tooling, az login, registers resource providers. |
+| `Validate` | Strict params validation; Azure-name rule checks; global uniqueness pre-flight. |
+| `Infra` | Creates the resource group if missing; runs `bicep what-if`; deploys `main.bicep`. |
+| `Secrets` | Writes the AAD client secret to Key Vault. Other secrets are seeded by Bicep `listKeys`. |
+| `Sql` | Connects to Azure SQL as the Entra admin; grants the Web App MSI `db_owner` via `CREATE USER … FROM EXTERNAL PROVIDER`. |
+| `App` | `dotnet publish` Web.Server + 3 workers; assembles a zip with `App_Data/jobs/continuous/Migration.Migrator` + `App_Data/jobs/triggered/{Migration.Indexer,Migration.SiteSnapshotBuilder}`; sets app settings (Key Vault refs); zip-deploys; restarts. |
+| `Smoke` | HTTP-probes the web app; lists WebJobs. |
+
+Useful flags: `-Phase <name>` (single phase), `-WhatIfPreview` (Infra dry-run), `-SkipConfirm`, `-ParamsFile path/to/other.json`.
+
+### `deploy-spo.ps1` (SharePoint)
+
+| Phase | What it does |
+|---|---|
+| `Prereqs` | Checks PnP.PowerShell (auto-installs CurrentUser scope) + Node version. |
+| `AadApp` | Creates/updates the AAD app registration. Adds SPA redirect = `https://<webApp>.azurewebsites.net`, exposes `access_as_user` API scope, adds Graph `User.Read` + SharePoint `Sites.FullControl.All`, requests admin consent. **Generates a 2-year client secret if none exists** (saved to `deploy/.local/aad-client-secret.txt`). Writes `clientId` + `servicePrincipalObjectId` back to `params.json`. |
+| <a id="cert"></a>`Cert` | Three modes per `certificate.source`: <ul><li>**`generate`** &mdash; New self-signed cert; PFX → `deploy/.local/<name>.pfx`.</li><li>**`file`** &mdash; Uses `certificate.pfxPath` from params.</li><li>**`keyvault`** &mdash; Cert already in KV; just attaches the public key to the AAD app.</li></ul>Self-grants the deployer `Key Vault Certificates Officer` (RBAC) first. PFX password from `-PfxPassword`, `$env:SPOCS_PFX_PASSWORD`, or interactive prompt. |
+| `SpaConfig` | Writes `src/Web/web.client/.env.production` with `VITE_MSAL_*` resolved from `params.json` + bicep outputs. **You must run `deploy.ps1 -Phase App` afterwards to rebuild and re-deploy the SPA.** |
+| `Spfx` | `npm install` + `gulp bundle --ship` + `gulp package-solution --ship` in `src/SPFx/spfx-cold-storage`. Produces `sharepoint/solution/spfx-cold-storage.sppkg`. |
+| `SpfxDeploy` | PnP.PowerShell login → `Add-PnPApp -Scope Tenant -Overwrite -Publish -SkipFeatureDeployment -Force` → `Install-PnPApp` on the target site. Auth via `-SpfxAuthMode Interactive\|DeviceLogin\|Certificate`. |
+
+## Post-deploy notes
+
+### Grant end-users storage access
+
+The SPA calls Azure Blob Storage **directly** with a user-scoped token (`https://storage.azure.com/user_impersonation`). Without RBAC, users see `AuthorizationPermissionMismatch` when browsing cold-storage files.
+
+**Recommended** &mdash; list user/group object IDs in `params.json` and re-run Infra:
 
 ```jsonc
 "storage": {
@@ -189,7 +198,7 @@ The SPA calls Azure Blob Storage **directly** from the browser using a user-scop
 ./deploy/deploy.ps1 -Phase Infra -SkipConfirm
 ```
 
-**Or ad-hoc (one user)**:
+**Ad-hoc one user** (if you didn't pre-populate `userDataReaders`):
 
 ```powershell
 $me = az ad signed-in-user show --query id -o tsv
@@ -199,21 +208,11 @@ az role assignment create `
   --scope '/subscriptions/<sub>/resourceGroups/<rg>/providers/Microsoft.Storage/storageAccounts/<name>'
 ```
 
-After granting the role, **sign out and back in** to refresh the cached token (storage scope tokens last ~1h).
+After granting, **sign out and back in** to the web app to refresh the cached token (storage tokens last ~1h).
 
-### 3. Rebuild + redeploy the web app after `SpaConfig`
+### (Optional) Attach the field customizer to a column
 
-`SpaConfig` writes `src/Web/web.client/.env.production` but **the SPA bundle on the running App Service still has the old values baked in**. Re-run the Azure-side `App` phase to rebuild + zip-deploy:
-
-```powershell
-./deploy/deploy.ps1 -Phase App -SkipConfirm
-```
-
-If you skipped this, the in-browser sign-in flow will try to authenticate against the placeholder client ID and fail with `AADSTS700016`.
-
-### 4. (Optional) Add the field customizer to a column
-
-`Spfx` ships both a ListView Command Set (auto-attaches) and a Field Customizer (does NOT auto-attach to any column). To make the cold-storage status visible on a document library column, run on the target site:
+The Spfx package ships a `ListView Command Set` (auto-attaches) and a `Field Customizer` (does NOT auto-attach). To bind the cold-storage status field customizer to a document-library column:
 
 ```powershell
 Connect-PnPOnline -Url https://<tenant>.sharepoint.com/sites/ColdStorage -Interactive
@@ -222,65 +221,50 @@ Set-PnPField -List 'Documents' -Identity 'ColdStorageStatus' -Values @{
 }
 ```
 
-Replace the GUID with the value of `id` from `src/SPFx/spfx-cold-storage/src/extensions/coldStorageStatusField/ColdStorageStatusFieldCustomizer.manifest.json` if you've regenerated it.
+Use the GUID from `src/SPFx/spfx-cold-storage/src/extensions/coldStorageStatusField/ColdStorageStatusFieldCustomizer.manifest.json`.
 
 ## What gets provisioned
 
 - Log Analytics workspace + Application Insights (workspace-based)
-- Windows App Service Plan + Web App (system-assigned managed identity, AlwaysOn)
-- Storage Account (TLS 1.2, no anonymous blob access) + the blob container, with CORS for the Web App hostname
-- Key Vault (RBAC mode, soft-delete on, purge protection on) seeded with:
-  - `aad-client-secret` (pushed by Secrets phase)
-  - `storage-connection-string`, `servicebus-connection-string`,
-    `search-query-key`, `search-admin-key` (pulled at Bicep deploy via `listKeys`)
-- Service Bus namespace (Standard) + the `filediscovery` queue (5 min lock, max delivery 1000)
+- Windows App Service Plan + Web App (system-assigned MSI, AlwaysOn)
+- Storage Account (TLS 1.2, no anonymous blob access) + blob container, CORS for the Web App
+- Key Vault (RBAC mode, soft-delete on, purge protection on) seeded with: `aad-client-secret`, `storage-connection-string`, `servicebus-connection-string`, `search-query-key`, `search-admin-key`
+- Service Bus namespace + `filediscovery` queue (5 min lock, max delivery 1000)
 - Azure SQL Server (Entra-only auth) + Database
 - Azure AI Search (basic SKU by default)
-- RBAC role assignments for the Web App MSI:
-  - Key Vault Secrets User (so `@Microsoft.KeyVault` references resolve)
-  - Storage Blob Data Contributor
-  - Service Bus Data Sender + Receiver
-  - Search Index Data Contributor + Service Contributor
-- RBAC role assignments for the AAD app registration SP (so workers can pull
-  the SharePoint cert from Key Vault at runtime):
-  - Key Vault Secrets User + Certificates User
+- RBAC for the Web App MSI: Key Vault Secrets User, Storage Blob Data Contributor, Service Bus Sender + Receiver, Search Index Data Contributor + Service Contributor
+- RBAC for the AAD app SP: Key Vault Secrets User + Certificates User
+- RBAC for entries in `storage.userDataReaders`: Storage Blob Data Reader
 
-## Worker layout (WebJobs)
+### Worker layout
 
-| Worker                          | WebJob type | Why |
-|---------------------------------|-------------|-----|
-| `Migration.Migrator`            | continuous  | Listens on Service Bus indefinitely. Marked singleton in `settings.job` so it doesn't spin up multiple instances on scale-out plans. |
-| `Migration.Indexer`             | triggered   | Exits after crawling. Continuous would re-launch in a loop. Run on demand from the portal/Kudu, or via Azure Logic Apps on a schedule. |
-| `Migration.SiteSnapshotBuilder` | triggered   | Same — exits after a snapshot. |
+| Worker | WebJob type | Why |
+|---|---|---|
+| `Migration.Migrator` | continuous | Listens on Service Bus indefinitely. Singleton via `settings.job`. |
+| `Migration.Indexer` | triggered | Exits after crawling. Continuous would re-launch in a loop. |
+| `Migration.SiteSnapshotBuilder` | triggered | Same — exits after a snapshot. |
 
-## Secrets handling
+## Secrets
 
-- **No secrets are written to `params.json`.** `params.json` is gitignored.
-- The AAD client secret is supplied via `-AzureAdClientSecret` (SecureString),
-  `$env:SPOCS_AAD_CLIENT_SECRET`, or an interactive `Read-Host -AsSecureString`
-  prompt.
-- All runtime secrets are stored in Key Vault. The Web App reads them via
-  `@Microsoft.KeyVault(SecretUri=…)` references resolved by its managed identity.
-- The SQL connection string uses `Authentication=Active Directory Default`
-  (no password); the Web App MSI is granted `db_owner` by the `Sql` phase.
+- No secrets in `params.json` (gitignored anyway).
+- AAD client secret &mdash; auto-generated by `deploy-spo.ps1 -Phase AadApp` into `deploy/.local/aad-client-secret.txt`. `deploy.ps1 -Phase Secrets` reads it from there (or from `-AzureAdClientSecret` / `$env:SPOCS_AAD_CLIENT_SECRET`).
+- Storage / Service Bus / Search keys &mdash; pulled by Bicep `listKeys()` straight into Key Vault.
+- SQL &mdash; no password; `Authentication=Active Directory Managed Identity` and the MSI is granted `db_owner` by the `Sql` phase.
+- All runtime app settings reference Key Vault via `@Microsoft.KeyVault(SecretUri=…)`.
 
 ## Troubleshooting
 
-- **Bicep fails on a name collision** — globally unique names (storage, KV,
-  Service Bus, SQL, Search, Web App) were already taken. Edit `naming.*` in
-  `params.json` and re-run `-Phase Infra`.
-- **`Sql` phase: "Login failed for user"** — the deploying user is not a member
-  of the Entra group set as SQL admin. Add yourself (or use a user account that
-  is) and re-run `-Phase Sql`.
-- **App starts but throws ConfigurationMissingException** — a Key Vault
-  reference isn't resolving. In the portal: App Service → Configuration →
-  Application settings, look for red "Key Vault reference" badges. Usually means
-  the Web App MSI doesn't have Key Vault Secrets User (re-run `-Phase Infra`)
-  or the secret hasn't been written yet (re-run `-Phase Secrets`).
-- **WebJobs not visible** — Web App → WebJobs blade, or
-  `az webapp webjob continuous list -g <rg> -n <web>`. If empty, confirm the
-  `dotnet publish` step succeeded and that the zip contains
-  `App_Data\jobs\…\<JobName>\run.cmd`.
+| Symptom | Fix |
+|---|---|
+| Bicep fails with `*AlreadyExists` for a globally-unique name (storage, KV, Search, SQL, Service Bus, Web App) | Edit `naming.*` in `params.json` and re-run `-Phase Infra`. |
+| Bicep fails with `ProvisioningDisabled` for Azure SQL | Your subscription is region-restricted. Switch `location` to one where SQL is allowed (try `westus3`, `northeurope`, etc.). |
+| `Sql` phase: "Login failed for user" | The deploying user isn't a member of the group in `sql.entraAdminObjectId`. Add yourself (or use a user that IS a member) and re-run `-Phase Sql`. |
+| Web app starts but throws `ConfigurationMissingException` | A Key Vault reference isn't resolving. Portal → App Service → Configuration → Application settings, look for red "Key Vault reference" badges. Usually means the Secrets phase wasn't run, or the Web App MSI doesn't yet have Key Vault Secrets User (re-run `-Phase Infra`). |
+| Web app: `AuthorizationPermissionMismatch` when browsing blobs | The signed-in user has no `Storage Blob Data Reader`. See [Grant end-users storage access](#grant-end-users-storage-access). Sign out + back in after granting. |
+| Sign-in fails with `AADSTS700016` | You ran `SpaConfig` but didn't re-run `deploy.ps1 -Phase App`. The deployed SPA bundle still has the old client ID baked in. Re-run the App phase. |
+| `WebJobs not visible` in the portal | `az webapp webjob continuous list -g <rg> -n <webApp> -o table`. If empty, confirm the App phase succeeded; the zip must contain `App_Data\jobs\…\<JobName>\run.cmd`. |
+| SPFx commands return 401 from `AadHttpClient` | The webApiPermissionRequest from the SPFx package needs admin approval — see [step 7a](#7-two-manual-steps-that-cant-be-automated). |
+| `Add-PnPApp` prompts interactively despite `-Overwrite` | Add `-Force`. The script does this; if you're running PnP commands manually, you need it too. |
 
 ## Tearing down
 
@@ -288,9 +272,12 @@ Replace the GUID with the value of `id` from `src/SPFx/spfx-cold-storage/src/ext
 az group delete -n <resourceGroupName> --yes --no-wait
 ```
 
-Key Vault has purge protection enabled and will be soft-deleted for 30 days.
-If you need to reuse the same KV name immediately, purge it:
+Key Vault has purge protection on, so the name is soft-deleted for 30 days &mdash; you cannot purge it before then. **Change `naming.keyVault` in `params.json` if you need to redeploy in the next 30 days**, otherwise wait.
+
+To also clean up the AAD app the SPO script created:
 
 ```powershell
-az keyvault purge -n <keyVaultName>
+$appId = (Get-Content deploy/params.json | ConvertFrom-Json).azureAd.clientId
+az ad app delete --id $appId
+Remove-Item deploy/.local -Recurse -Force
 ```

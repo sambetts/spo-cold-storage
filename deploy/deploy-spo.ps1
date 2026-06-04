@@ -323,6 +323,30 @@ function Invoke-Phase-AadApp {
         'azureAd.tenantId'                  = $p.subscription.tenantId
         'azureAd.servicePrincipalObjectId'  = $spObjectId
     }
+
+    # Generate a client secret if the app has none, and persist it to deploy/.local/
+    # so the Azure-side Secrets phase can pick it up automatically. This avoids the
+    # otherwise easy-to-miss manual step "now go create a secret in the portal".
+    Ensure-LocalDir
+    $secretFile = Join-Path $LocalDir 'aad-client-secret.txt'
+    $existingCreds = (Invoke-Native az 'ad' 'app' 'credential' 'list' `
+        '--id' $clientId '-o' 'json' -Quiet -AllowNonZero) | ConvertFrom-AzJson
+    $hasPasswordCred = $existingCreds | Where-Object { -not $_.PSObject.Properties['type'] -or $_.type -ne 'AsymmetricX509Cert' }
+    if (-not $hasPasswordCred -and -not (Test-Path $secretFile)) {
+        Write-Info "Creating a 2-year client secret for the app (no existing password credential found)…"
+        $cred = (Invoke-Native az 'ad' 'app' 'credential' 'reset' `
+            '--id' $clientId `
+            '--display-name' 'deploy-spo-auto' `
+            '--years' '2' `
+            '--append' `
+            '-o' 'json' -Quiet) | ConvertFrom-AzJson
+        Set-Content -LiteralPath $secretFile -Value $cred.password -NoNewline -Encoding ascii
+        Write-Ok "Client secret written to $secretFile (gitignored). deploy.ps1 -Phase Secrets will read this automatically."
+    } elseif (Test-Path $secretFile) {
+        Write-Ok "Existing client secret found at $secretFile — reusing."
+    } else {
+        Write-Warn2 "App has existing client secrets but $secretFile is missing. deploy.ps1 -Phase Secrets will need -AzureAdClientSecret or `$env:SPOCS_AAD_CLIENT_SECRET."
+    }
 }
 
 # ========================================================
