@@ -204,13 +204,18 @@ function Invoke-AzRestPatch {
 function Invoke-Phase-AadApp {
     Write-Step 'AadApp: create/update AAD app registration + permissions'
     $p = Get-Params
-    Hydrate-Outputs
 
     $displayName = if ($p.PSObject.Properties['aadApp'] -and $p.aadApp.PSObject.Properties['displayName']) {
         $p.aadApp.displayName
     } else { 'spo-coldstorage' }
 
-    $webAppHost = $global:Outputs['webAppHostname']
+    # SPA redirect URI is derived from the planned Web App name in params, NOT from a bicep
+    # output. This lets AadApp run BEFORE the Azure-side Infra phase exists. If the resource
+    # group has been deployed, we also accept the bicep-output hostname (handles renames).
+    $webAppHost = "$($p.naming.webApp).azurewebsites.net"
+    if ($global:Outputs -and $global:Outputs['webAppHostname']) {
+        $webAppHost = $global:Outputs['webAppHostname']
+    }
     $replyUri   = "https://$webAppHost"
     $extraUris  = if ($p.PSObject.Properties['aadApp'] -and $p.aadApp.PSObject.Properties['additionalRedirectUris']) {
         @($p.aadApp.additionalRedirectUris)
@@ -609,27 +614,44 @@ function Invoke-Phase-SpfxDeploy {
     #                    granted by the AadApp phase.
     function Connect-Spo { param([string]$Url)
         Write-Info "Connecting PnP to $Url via $SpfxAuthMode…"
-        switch ($SpfxAuthMode) {
-            'Interactive' {
-                Connect-PnPOnline -Url $Url -Interactive -ClientId $p.azureAd.clientId -ErrorAction Stop
-            }
-            'DeviceLogin' {
-                Connect-PnPOnline -Url $Url -DeviceLogin -ClientId $p.azureAd.clientId -ErrorAction Stop
-            }
-            'Certificate' {
-                $certPath = Join-Path $LocalDir "$($p.azureAd.certificateName).pfx"
-                if (-not (Test-Path $certPath)) {
-                    throw "Certificate auth selected but $certPath does not exist. Re-run -Phase Cert with source=generate or place your PFX there."
+        # Wrap the Connect call in a retry for cert auth — AAD's confidential-client cert
+        # propagation can lag by 30-90s after Cert phase attaches the public key, surfacing
+        # as AADSTS700027 "certificate not registered on application".
+        $maxAttempts = if ($SpfxAuthMode -eq 'Certificate') { 12 } else { 1 }
+        for ($i = 1; $i -le $maxAttempts; $i++) {
+            try {
+                switch ($SpfxAuthMode) {
+                    'Interactive' {
+                        Connect-PnPOnline -Url $Url -Interactive -ClientId $p.azureAd.clientId -ErrorAction Stop
+                    }
+                    'DeviceLogin' {
+                        Connect-PnPOnline -Url $Url -DeviceLogin -ClientId $p.azureAd.clientId -ErrorAction Stop
+                    }
+                    'Certificate' {
+                        $certPath = Join-Path $LocalDir "$($p.azureAd.certificateName).pfx"
+                        if (-not (Test-Path $certPath)) {
+                            throw "Certificate auth selected but $certPath does not exist. Re-run -Phase Cert with source=generate or place your PFX there."
+                        }
+                        $pfxPw = Get-PfxPassword
+                        Connect-PnPOnline -Url $Url `
+                            -ClientId $p.azureAd.clientId `
+                            -Tenant   $p.azureAd.tenantId `
+                            -CertificatePath $certPath `
+                            -CertificatePassword $pfxPw `
+                            -ErrorAction Stop
+                    }
+                    default { throw "Unknown -SpfxAuthMode '$SpfxAuthMode'. Use Interactive|DeviceLogin|Certificate." }
                 }
-                $pfxPw = Get-PfxPassword
-                Connect-PnPOnline -Url $Url `
-                    -ClientId $p.azureAd.clientId `
-                    -Tenant   $p.azureAd.tenantId `
-                    -CertificatePath $certPath `
-                    -CertificatePassword $pfxPw `
-                    -ErrorAction Stop
+                return
+            } catch {
+                $msg = $_.Exception.Message
+                if ($i -lt $maxAttempts -and $msg -match 'AADSTS700027|certificate.*not registered') {
+                    Write-Info "AAD cert not yet propagated (attempt $i/$maxAttempts); waiting 15s…"
+                    Start-Sleep -Seconds 15
+                    continue
+                }
+                throw
             }
-            default { throw "Unknown -SpfxAuthMode '$SpfxAuthMode'. Use Interactive|DeviceLogin|Certificate." }
         }
     }
 

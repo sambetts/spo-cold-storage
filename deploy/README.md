@@ -61,18 +61,15 @@ Edit `deploy/params.json` and fill in:
 | `sharePoint.targetSiteRelativeUrl` | `/sites/ColdStorage` | Where the SPFx web part installs |
 | `storage.userDataReaders` | `[{ "objectId": "<entra-group-oid>", "type": "Group" }]` | Members get `Storage Blob Data Reader` so the SPA can browse blobs |
 
-### 4. Provision the AAD app + cert
+### 4. Provision the AAD app
 
 ```powershell
 ./deploy/deploy-spo.ps1 -Phase AadApp
-./deploy/deploy-spo.ps1 -Phase Cert
 ```
 
 `AadApp` creates the app registration, exposes the `access_as_user` API scope, adds Graph `User.Read` + SharePoint `Sites.FullControl.All`, requests admin consent, **generates a 2-year client secret** (saved to `deploy/.local/aad-client-secret.txt`, gitignored), and writes the IDs back into `params.json`.
 
-`Cert` generates a self-signed cert (or uses your own — see [Cert phase](#cert)), uploads it to the (not-yet-existing) Key Vault config, attaches the public key to the AAD app's `keyCredentials`. The PFX lands in `deploy/.local/<certName>.pfx`.
-
-You'll be prompted for a PFX password unless you set `$env:SPOCS_PFX_PASSWORD` first. **Save this password somewhere safe** &mdash; you'll need it again for `SpfxDeploy` with cert auth.
+The SPA redirect URI is set to `https://<naming.webApp>.azurewebsites.net` &mdash; this URL doesn't have to exist yet (it'll get created in step 5).
 
 ### 5. Provision Azure + deploy the app
 
@@ -90,23 +87,33 @@ At the end you'll see:
 App URL: https://app-spocs-prod-XXX.azurewebsites.net
 ```
 
-### 6. Build + deploy the SPFx solution
+### 6. Upload the SharePoint cert (now that Key Vault exists)
+
+```powershell
+./deploy/deploy-spo.ps1 -Phase Cert
+```
+
+`Cert` generates a self-signed cert (or uses your own &mdash; see [Cert phase](#cert)), uploads it to the Key Vault created in step 5, and attaches the public key to the AAD app's `keyCredentials`. The PFX lands in `deploy/.local/<certName>.pfx`.
+
+You'll be prompted for a PFX password unless you set `$env:SPOCS_PFX_PASSWORD` first. **Save this password somewhere safe** &mdash; you'll need it again for `SpfxDeploy` with cert auth.
+
+### 7. Build + deploy the SPFx solution
 
 ```powershell
 ./deploy/deploy-spo.ps1 -Phase SpaConfig
-./deploy/deploy.ps1 -Phase App -SkipConfirm   # rebuild SPA with AAD config
+./deploy/deploy.ps1 -Phase App -SkipConfirm     # rebuild SPA with AAD config baked in
 ./deploy/deploy-spo.ps1 -Phase Spfx
-./deploy/deploy-spo.ps1 -Phase SpfxDeploy     # uses interactive browser login by default
+./deploy/deploy-spo.ps1 -Phase SpfxDeploy        # uses interactive browser login by default
 ```
 
-For an automated / headless `SpfxDeploy`, use the cert from step 4:
+For an automated / headless `SpfxDeploy`, use the cert from step 6:
 
 ```powershell
-$env:SPOCS_PFX_PASSWORD = '<the PFX password from step 4>'
+$env:SPOCS_PFX_PASSWORD = '<the PFX password from step 6>'
 ./deploy/deploy-spo.ps1 -Phase SpfxDeploy -SpfxAuthMode Certificate -SkipConfirm
 ```
 
-### 7. Two manual steps that can't be automated
+### 8. Two manual steps that can't be automated
 
 After `SpfxDeploy` succeeds, two things still need a human in the SharePoint Admin Centre:
 
@@ -133,6 +140,22 @@ That's it. Visit the App URL, sign in, add a root SharePoint URL, and verify the
 ```powershell
 az webapp webjob continuous list -g <rg> -n <webApp> -o table
 az webapp webjob triggered  list -g <rg> -n <webApp> -o table
+```
+
+---
+
+## TL;DR (one-shot script form)
+
+```powershell
+Copy-Item deploy/params.example.json deploy/params.json   # edit it
+./deploy/deploy-spo.ps1 -Phase AadApp -SkipConfirm        # 1 min
+./deploy/deploy.ps1                       -SkipConfirm    # 6-10 min
+./deploy/deploy-spo.ps1 -Phase Cert       -SkipConfirm    # 1 min
+./deploy/deploy-spo.ps1 -Phase SpaConfig  -SkipConfirm    # instant
+./deploy/deploy.ps1 -Phase App            -SkipConfirm    # 3-5 min (rebuild SPA)
+./deploy/deploy-spo.ps1 -Phase Spfx       -SkipConfirm    # 2-3 min
+./deploy/deploy-spo.ps1 -Phase SpfxDeploy -SkipConfirm    # 1 min (interactive sign-in)
+# … then the two manual SP Admin steps above
 ```
 
 ---
@@ -265,6 +288,7 @@ Use the GUID from `src/SPFx/spfx-cold-storage/src/extensions/coldStorageStatusFi
 | `WebJobs not visible` in the portal | `az webapp webjob continuous list -g <rg> -n <webApp> -o table`. If empty, confirm the App phase succeeded; the zip must contain `App_Data\jobs\…\<JobName>\run.cmd`. |
 | SPFx commands return 401 from `AadHttpClient` | The webApiPermissionRequest from the SPFx package needs admin approval — see [step 7a](#7-two-manual-steps-that-cant-be-automated). |
 | `Add-PnPApp` prompts interactively despite `-Overwrite` | Add `-Force`. The script does this; if you're running PnP commands manually, you need it too. |
+| `SpfxDeploy` fails with `AADSTS700027: The certificate with identifier used to sign the client assertion is not registered on application` | AAD takes 30&ndash;90s to propagate a newly-registered cert. The script retries automatically (up to 12 × 15s) when using `-SpfxAuthMode Certificate`. If you're invoking PnP manually, just wait a minute and retry. |
 
 ## Tearing down
 
