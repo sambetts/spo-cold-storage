@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  TEMPLATE: This file is the source of truth. The deploy/deploy-spo.ps1 Spfx phase
+  reads this and substitutes {{APP_BASE_URL}} + {{APP_ID_URI}} from params.json +
+  bicep outputs, then writes the final `elements.xml` (gitignored) before invoking
+  gulp. Do not edit `elements.xml` directly — your edits will be overwritten.
+-->
+<Elements xmlns="http://schemas.microsoft.com/sharepoint/">
+
+  <!--
+    Cold-storage lifecycle status site column. The field customizer below
+    renders this column as a colored badge on document libraries.
+  -->
+  <Field
+    ID="{ba3c0a2c-4d4d-4d4d-4d4d-4d4d4d4d4d4d}"
+    Name="ColdStorageStatus"
+    DisplayName="Cold storage status"
+    Type="Text"
+    Required="FALSE"
+    Group="SPO Cold Storage"
+    MaxLength="64"
+    ClientSideComponentId="bcc81765-0e17-4bd7-a1a5-68a72cb5a016"
+    ClientSideComponentProperties="" />
+
+  <!--
+    Registers the ColdStorageCommandSet (Migrate / Restore buttons) on every
+    document library (list template 101) of the site where this app is installed.
+  -->
+  <CustomAction
+    Title="ColdStorageCommandSet"
+    Description="Cold Storage Migrate / Restore commands"
+    Location="ClientSideExtension.ListViewCommandSet.CommandBar"
+    RegistrationType="List"
+    RegistrationId="101"
+    ClientSideComponentId="dac75bc3-f176-4e67-9f0c-4fa7c8549677"
+    ClientSideComponentProperties="{&quot;apiBaseUrl&quot;:&quot;{{APP_BASE_URL}}&quot;,&quot;apiAppIdUri&quot;:&quot;{{APP_ID_URI}}&quot;}" />
+
+</Elements>

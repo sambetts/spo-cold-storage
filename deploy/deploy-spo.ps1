@@ -534,6 +534,31 @@ VITE_TEAMSFX_START_LOGIN_PAGE_URL=https://$webHost/auth-start.html
 function Invoke-Phase-Spfx {
     Write-Step 'Spfx: build .sppkg package'
     if (-not (Test-Path $SpfxDir)) { throw "SPFx dir not found: $SpfxDir" }
+    $p = Get-Params
+
+    # Render elements.xml from elements.xml.template, substituting deployment-specific
+    # values for the ListView CommandSet's ClientSideComponentProperties.
+    $elementsTemplate = Join-Path $SpfxDir 'sharepoint/assets/elements.xml.template'
+    $elementsOut      = Join-Path $SpfxDir 'sharepoint/assets/elements.xml'
+    if (Test-Path $elementsTemplate) {
+        $webHost = if ($global:Outputs -and $global:Outputs['webAppHostname']) {
+            $global:Outputs['webAppHostname']
+        } else {
+            "$($p.naming.webApp).azurewebsites.net"
+        }
+        $apiBaseUrl = "https://$webHost"
+        $apiAppIdUri = "api://$($p.azureAd.clientId)/access_as_user"
+        if (-not $p.azureAd.clientId -or $p.azureAd.clientId -eq '00000000-0000-0000-0000-000000000000') {
+            throw 'azureAd.clientId is not set in params.json. Run -Phase AadApp first.'
+        }
+        $rendered = (Get-Content -LiteralPath $elementsTemplate -Raw) `
+            -replace '\{\{APP_BASE_URL\}\}', $apiBaseUrl `
+            -replace '\{\{APP_ID_URI\}\}',   $apiAppIdUri
+        Set-Content -LiteralPath $elementsOut -Value $rendered -Encoding utf8
+        Write-Ok "Rendered elements.xml: apiBaseUrl=$apiBaseUrl"
+    } else {
+        Write-Warn2 "elements.xml.template not found; using elements.xml as-is."
+    }
 
     Push-Location $SpfxDir
     try {
@@ -670,8 +695,16 @@ function Invoke-Phase-SpfxDeploy {
             Install-PnPApp -Identity $app.Id -ErrorAction Stop
             Write-Ok "Installed on $targetSiteUrl"
         } catch {
-            if ($_.Exception.Message -match 'already installed|InstallInProgress') {
-                Write-Ok 'Already installed (or install in progress).'
+            if ($_.Exception.Message -match 'already installed|InstallInProgress|already exists') {
+                Write-Info 'App already installed on site — upgrading to latest catalog version…'
+                try {
+                    Update-PnPApp -Identity $app.Id -ErrorAction Stop
+                    Write-Ok "Upgraded to latest version on $targetSiteUrl"
+                } catch {
+                    if ($_.Exception.Message -match 'no.+update|already.+latest|nothing to update') {
+                        Write-Ok 'Site already on the latest catalog version.'
+                    } else { throw }
+                }
             } else { throw }
         }
     } else {
