@@ -76,7 +76,7 @@ export const MigrationTargetsConfig: React.FC<{ token: string }> = (props) => {
     const idx = targetMigrationSites.indexOf(selectedSite);
     if (idx > -1) {
       targetMigrationSites.splice(idx);
-      setTargetMigrationSites(s => s.filter((value, i) => i !== idx));
+      setTargetMigrationSites(s => s.filter((_value, i) => i !== idx));
     }
   };
 
@@ -268,7 +268,7 @@ export const MigrationTargetsConfig: React.FC<{ token: string }> = (props) => {
       setLoading(false);
 
     })
-      .catch(err => {
+      .catch(() => {
 
         // alert('Loading storage data failed');
         setLoading(false);

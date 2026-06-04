@@ -23,7 +23,7 @@ export const FolderList: React.FC<Props> = (props) => {
         
         const idx = folders.indexOf(folder);
         if (idx > -1) {
-            setFolders(oldList => oldList.filter((value, i) => i !== idx));
+            setFolders(oldList => oldList.filter((_value, i) => i !== idx));
         }
 
         props.folderRemoved(folder)

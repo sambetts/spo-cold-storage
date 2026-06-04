@@ -54,7 +54,7 @@ export class FindMigrationLog extends React.Component<SearchLogsProps, SearchLog
                     this.setState({ searchLogs: data, loading: false });
                     this.setState({ loading: false });
                 })
-                .catch(err => {
+                .catch(() => {
                     alert('Loading data failed');
                     this.setState({ searchLogs: [], loading: false });
                 });

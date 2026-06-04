@@ -1,6 +1,5 @@
-
 import './NavMenu.css';
-import React from 'react';
+import './NavMenu.css';
 import { SignInButton } from "./SignInButton";
 import { AuthenticatedTemplate, UnauthenticatedTemplate } from "@azure/msal-react";
 

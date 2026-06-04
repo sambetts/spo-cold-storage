@@ -1,5 +1,5 @@
 import { Log } from '@microsoft/sp-core-library';
-import { BaseListViewCommandSet, Command, IListViewCommandSetExecuteEventParameters, ListViewStateChangedEventArgs } from '@microsoft/sp-listview-extensibility';
+import { BaseListViewCommandSet, Command, IListViewCommandSetExecuteEventParameters, IListViewCommandSetListViewUpdatedParameters } from '@microsoft/sp-listview-extensibility';
 import { AadHttpClient } from '@microsoft/sp-http';
 
 import { ColdStorageApiClient, IStartMigrationItem } from '../../common/ColdStorageApiClient';
@@ -32,7 +32,7 @@ export default class ColdStorageCommandSet extends BaseListViewCommandSet<IColdS
       });
   }
 
-  public onListViewUpdated(event: ListViewStateChangedEventArgs): void {
+  public onListViewUpdated(event: IListViewCommandSetListViewUpdatedParameters): void {
     const migrate: Command = this.tryGetCommand('COLDSTORAGE_MIGRATE');
     const restore: Command = this.tryGetCommand('COLDSTORAGE_RESTORE');
     const hasSelection = event.selectedRows.length > 0;

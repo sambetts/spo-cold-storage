@@ -72,7 +72,7 @@ export const SelectedSiteBrowserDiag: React.FC<Props> = (props) => {
 
                     });
                 })
-                .catch(err => {
+                .catch(() => {
                     alert('Got error loading token');
                 });
         }

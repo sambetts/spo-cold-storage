@@ -1,6 +1,6 @@
 {
   "$schema": "https://developer.microsoft.com/json-schemas/spfx/command-set-extension-manifest.schema.json",
-  "id": "c7d2d2f7-3a3a-3a3a-3a3a-3a3a3a3a3a3a",
+  "id": "dac75bc3-f176-4e67-9f0c-4fa7c8549677",
   "alias": "ColdStorageCommandSet",
   "componentType": "Extension",
   "extensionType": "ListViewCommandSet",

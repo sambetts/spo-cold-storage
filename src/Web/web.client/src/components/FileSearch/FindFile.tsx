@@ -66,7 +66,7 @@ export class FindFile extends React.Component<SearchLogsProps, SearchLogsState> 
                     console.log(data);
                     this.setState({ searchLogs: data.value, loading: false });
                 })
-                .catch(err => {
+                .catch(() => {
                     alert('Loading data failed');
                     this.setState({ searchLogs: [], loading: false });
                 });

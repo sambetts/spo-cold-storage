@@ -8,8 +8,7 @@ import {
   Search24Regular, 
   Document24Regular, 
   Settings24Regular,
-  Grid24Regular,
-  Navigation24Regular
+  Grid24Regular
 } from '@fluentui/react-icons';
 
 export class NavMenu extends Component<{}, { collapsed: boolean }> {

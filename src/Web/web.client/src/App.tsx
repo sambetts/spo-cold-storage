@@ -27,7 +27,7 @@ export default function App() {
         // Silently acquires an access token which is then attached to a request for Microsoft Graph data
         instance.acquireTokenSilent(request).then((response) => {
             setAccessToken(response.accessToken);
-        }).catch((e) => {
+        }).catch(() => {
             instance.acquireTokenPopup(request).then((response) => {
                 setAccessToken(response.accessToken);
             });

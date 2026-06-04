@@ -6,7 +6,7 @@
     "default": {
       "pageUrl": "https://contoso.sharepoint.com/sites/yourSite",
       "customActions": {
-        "{c7d2d2f7-3a3a-3a3a-3a3a-3a3a3a3a3a3a}": {
+        "dac75bc3-f176-4e67-9f0c-4fa7c8549677": {
           "location": "ClientSideExtension.ListViewCommandSet.CommandBar",
           "properties": {
             "apiBaseUrl": "https://localhost:7099",

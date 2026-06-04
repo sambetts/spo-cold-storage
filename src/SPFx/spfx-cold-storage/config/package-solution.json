@@ -2,7 +2,7 @@
   "$schema": "https://developer.microsoft.com/json-schemas/spfx-build/package-solution.schema.json",
   "solution": {
     "name": "SPO Cold Storage",
-    "id": "0a4d2d1b-66f2-4d7f-9a7c-3e3a3e3a3e3a",
+    "id": "6ba628ed-6a38-404c-9d85-ff342ee31c4b",
     "version": "0.1.0.0",
     "includeClientSideAssets": true,
     "skipFeatureDeployment": true,
@@ -17,14 +17,14 @@
     "webApiPermissionRequests": [
       {
         "resource": "SPO Cold Storage Web API",
-        "scope": "user_impersonation"
+        "scope": "access_as_user"
       }
     ],
     "features": [
       {
         "title": "Cold Storage Extensions",
         "description": "Adds Migrate / Restore commands and the cold-storage status field to document libraries.",
-        "id": "f1d6e54b-2c2d-4f9b-a52e-3a4b5c6d7e8f",
+        "id": "8b6f23a1-6b92-462f-a9f0-0befa83961ae",
         "version": "0.1.0.0",
         "assets": {
           "elementManifests": [
