@@ -26,6 +26,42 @@ public class Program
         builder.Services.AddEndpointsApiExplorer();
         builder.Services.AddSwaggerGen();
 
+        // CORS for the SPFx command set in SharePoint. SPFx code runs in the user's
+        // browser at the tenant SharePoint origin (https://<tenant>.sharepoint.com)
+        // and calls this API directly with an AAD bearer token, so we need to allow
+        // that origin in the CORS preflight. The React SPA shipped with this same
+        // Web App is served from the same origin and doesn't need CORS.
+        //
+        // Allowed origins come from configuration:
+        //   Cors:AllowedOrigins   (comma- or semicolon-separated list, preferred)
+        //   BaseServerAddress     (fallback - the tenant SharePoint root)
+        // The deploy script writes BaseServerAddress automatically, so the default
+        // setup works without any extra config.
+        const string SpfxCorsPolicy = "SpfxOrigins";
+        var allowedOrigins = new List<string>();
+        var corsConfig = builder.Configuration["Cors:AllowedOrigins"];
+        if (!string.IsNullOrWhiteSpace(corsConfig))
+        {
+            allowedOrigins.AddRange(corsConfig.Split([',', ';'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries));
+        }
+        var baseServerAddress = builder.Configuration["BaseServerAddress"];
+        if (!string.IsNullOrWhiteSpace(baseServerAddress))
+        {
+            allowedOrigins.Add(baseServerAddress.TrimEnd('/'));
+        }
+        allowedOrigins = allowedOrigins.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+
+        builder.Services.AddCors(o => o.AddPolicy(SpfxCorsPolicy, p =>
+        {
+            if (allowedOrigins.Count > 0)
+            {
+                p.WithOrigins(allowedOrigins.ToArray())
+                 .AllowAnyHeader()
+                 .AllowAnyMethod()
+                 .WithExposedHeaders("WWW-Authenticate");
+            }
+        }));
+
         var config = new Config(builder.Configuration);
         builder.Services.AddSingleton(config);
 
@@ -77,6 +113,11 @@ public class Program
             app.UseSwagger();
             app.UseSwaggerUI();
         }
+
+        // UseCors must run after UseRouting (implicit here) and before UseAuthentication /
+        // UseAuthorization / MapControllers so CORS preflight OPTIONS requests aren't
+        // rejected by the auth middleware.
+        app.UseCors(SpfxCorsPolicy);
 
         app.UseAuthorization();
 
