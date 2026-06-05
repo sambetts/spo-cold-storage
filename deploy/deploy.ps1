@@ -642,6 +642,15 @@ function Set-AppSettings {
 
     $sqlConn = "Server=tcp:$($o['sqlServerFqdn']),1433;Initial Catalog=$($o['sqlDatabaseName']);Encrypt=True;TrustServerCertificate=False;Connection Timeout=30;Authentication=Active Directory Managed Identity;"
 
+    # Default cold-storage container seed (used by ColdStorageContainerSeeder on first
+    # startup against a fresh DB). The seeder grants the SQL Entra admin full ACL on a
+    # single default container so the SPFx Migrate / Restore commands work out of the
+    # box; admins can add more containers + ACL rows later via T-SQL or a future UI.
+    $storageAccount = $o['storageAccountName']
+    $sqlAdminOid    = $global:Params.sql.entraAdminObjectId
+    $sqlAdminLogin  = $global:Params.sql.entraAdminLogin
+    $sqlAdminType   = if ($global:Params.sql.entraAdminIsGroup) { '1' } else { '0' }
+
     # Double-underscore convention works on both Windows and Linux.
     $settings = [ordered]@{
         'WEBSITE_LOAD_USER_PROFILE'             = '1'
@@ -671,6 +680,13 @@ function Set-AppSettings {
         'Search__IndexName'                     = $global:Params.naming.searchIndex
         'Search__QueryKey'                      = (& $kvSecretUri 'search-query-key')
         'Search__AdminKey'                      = (& $kvSecretUri 'search-admin-key')
+        # Cold-storage default-container seed (consumed by ColdStorageContainerSeeder
+        # at app startup the first time the DB is empty).
+        'ColdStorage__DefaultContainer__BlobContainerName' = $o['blobContainerName']
+        'ColdStorage__DefaultContainer__StorageAccountUri' = "https://$storageAccount.blob.$((az cloud show --query 'suffixes.storageEndpoint' -o tsv).Trim())"
+        'ColdStorage__InitialAdminPrincipalId'             = $sqlAdminOid
+        'ColdStorage__InitialAdminPrincipalType'           = $sqlAdminType
+        'ColdStorage__InitialAdminPrincipalDisplay'        = $sqlAdminLogin
     }
 
     # Write to a temp JSON file and use az's @file syntax — avoids cmd.exe parsing semicolons

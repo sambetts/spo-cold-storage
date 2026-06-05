@@ -101,6 +101,14 @@ public class Program
             logger.LogInformation($"Using SQL connection-string: {config.ConnectionStrings.SQLConnectionString}");
 
             await DbInitializer.Init(db, config.DevConfig);
+
+            // Auto-seed a default cold-storage container + admin ACL on a fresh DB.
+            // Without this seed step, the SPFx Migrate / Restore commands fail with
+            // "no permission to migrate to any configured cold-storage container"
+            // because container access is gated by the cold_storage_container_acls
+            // table, not by SharePoint permissions or storage RBAC. The seeder is
+            // idempotent and a no-op once at least one container exists.
+            await ColdStorageContainerSeeder.SeedDefaultIfEmptyAsync(db, builder.Configuration, logger);
         }
 
         // https://learn.microsoft.com/en-us/visualstudio/javascript/tutorial-asp-net-core-with-react?view=vs-2022#publish-the-project
