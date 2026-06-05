@@ -537,16 +537,43 @@ function Invoke-Phase-App {
         # App settings (idempotent set)
         Set-AppSettings -ResourceGroup $p.resourceGroupName -WebAppName $global:Outputs['webAppName']
 
-        # Zip-deploy
-        Write-Info 'Deploying zip to App Service…'
-        Invoke-Native az 'webapp' 'deploy' `
-            '--resource-group' $p.resourceGroupName `
-            '--name' $global:Outputs['webAppName'] `
-            '--src-path' $zip `
-            '--type' 'zip' `
-            '--async' 'false' `
-            '-o' 'none' | Out-Null
-        Write-Ok 'Zip deployed.'
+        # Zip-deploy.
+        #
+        # Modern App Services (or tenant policies like MCAPSGov) often turn off basic
+        # publishing credentials on the SCM endpoint, which makes `az webapp deploy`
+        # return HTTP 401. The reliable workaround is to temporarily flip
+        # basicPublishingCredentialsPolicies/scm to allow=true, deploy, then put it
+        # back to whatever it was before. We never leave the policy permanently
+        # weakened — even if the deploy throws, the `finally` restores it.
+        $scmInitial = Get-ScmBasicAuthAllowed -ResourceGroup $p.resourceGroupName -WebAppName $global:Outputs['webAppName']
+        $scmChanged = $false
+        try {
+            if ($scmInitial -eq $false) {
+                Write-Info 'SCM basic auth currently disabled; temporarily enabling for zip-deploy…'
+                if (Set-ScmBasicAuthAllowed -ResourceGroup $p.resourceGroupName -WebAppName $global:Outputs['webAppName'] -Allow $true) {
+                    $scmChanged = $true
+                    Write-Info 'Waiting 15s for App Service to honour the new policy…'
+                    Start-Sleep -Seconds 15
+                } else {
+                    Write-Warn2 'Could not enable SCM basic auth (likely blocked by Azure Policy). The deploy below will probably fail with HTTP 401 — fix the policy first.'
+                }
+            }
+            Write-Info 'Deploying zip to App Service…'
+            Invoke-Native az 'webapp' 'deploy' `
+                '--resource-group' $p.resourceGroupName `
+                '--name' $global:Outputs['webAppName'] `
+                '--src-path' $zip `
+                '--type' 'zip' `
+                '--async' 'false' `
+                '-o' 'none' | Out-Null
+            Write-Ok 'Zip deployed.'
+        }
+        finally {
+            if ($scmChanged) {
+                Write-Info 'Restoring SCM basic auth to its previous state (disabled)…'
+                Set-ScmBasicAuthAllowed -ResourceGroup $p.resourceGroupName -WebAppName $global:Outputs['webAppName'] -Allow $false | Out-Null
+            }
+        }
 
         # Restart to make sure WebJobs pick up the new binaries
         Invoke-Native az 'webapp' 'restart' `
@@ -557,6 +584,49 @@ function Invoke-Phase-App {
     } finally {
         Remove-Item -LiteralPath $publishRoot -Recurse -Force -ErrorAction SilentlyContinue
     }
+}
+
+function Get-ScmBasicAuthAllowed {
+    <#
+    .SYNOPSIS Returns $true / $false / $null (when the resource can't be read).
+              $true = basic auth allowed on SCM (default state).
+              $false = explicitly disabled (e.g. by an Azure Policy or a user).
+              $null = unable to determine — caller should treat as "don't touch".
+    #>
+    param(
+        [Parameter(Mandatory)][string]$ResourceGroup,
+        [Parameter(Mandatory)][string]$WebAppName
+    )
+    $raw = (Invoke-Native az 'resource' 'show' `
+        '--resource-group' $ResourceGroup `
+        '--name' 'scm' `
+        '--namespace' 'Microsoft.Web' `
+        '--resource-type' 'basicPublishingCredentialsPolicies' `
+        '--parent' "sites/$WebAppName" `
+        '--query' 'properties.allow' `
+        '-o' 'tsv' -Quiet -AllowNonZero) -join ''
+    $trimmed = $raw.Trim()
+    if ($trimmed -eq 'true')  { return $true }
+    if ($trimmed -eq 'false') { return $false }
+    return $null
+}
+
+function Set-ScmBasicAuthAllowed {
+    <#
+    .SYNOPSIS Tries to set basicPublishingCredentialsPolicies/scm.allow.
+              Returns $true on success, $false if Azure Policy / RBAC rejects the change.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$ResourceGroup,
+        [Parameter(Mandatory)][string]$WebAppName,
+        [Parameter(Mandatory)][bool]$Allow
+    )
+    $body = (@{ properties = @{ allow = $Allow } } | ConvertTo-Json -Compress)
+    $sub = (az account show --query id -o tsv).Trim()
+    $uri = "https://management.azure.com/subscriptions/$sub/resourceGroups/$ResourceGroup/providers/Microsoft.Web/sites/$WebAppName/basicPublishingCredentialsPolicies/scm?api-version=2023-12-01"
+    $out = (Invoke-Native az 'rest' '--method' 'put' '--uri' $uri '--body' $body '-o' 'none' -Quiet -AllowNonZero) -join ''
+    if ($LASTEXITCODE -ne 0) { return $false }
+    return $true
 }
 
 function Set-AppSettings {

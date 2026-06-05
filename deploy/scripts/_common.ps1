@@ -290,8 +290,14 @@ function Test-AzNameAvailable {
             return $j.nameAvailable -or ($j.reason -eq 'AlreadyExists')
         }
         'keyVault' {
-            $r = (Invoke-Native az 'keyvault' 'check-name' '--name' $Name '-o' 'json' -Quiet) | ConvertFrom-AzJson
-            return $r.nameAvailable -or ($r.reason -eq 'AlreadyExists')
+            # No dedicated `az keyvault check-name` command in the current CLI; call the ARM
+            # checkNameAvailability endpoint directly. If the resource already exists in this
+            # RG (re-deploy), the reason will be "AlreadyExists" which we treat as OK.
+            $sub = (az account show --query id -o tsv).Trim()
+            $body = (@{ name = $Name; type = 'Microsoft.KeyVault/vaults' } | ConvertTo-Json -Compress)
+            $r = (Invoke-Native az 'rest' '--method' 'post' '--uri' "https://management.azure.com/subscriptions/$sub/providers/Microsoft.KeyVault/checkNameAvailability?api-version=2023-07-01" '--body' $body -Quiet -AllowNonZero) | Out-String
+            try { $j = $r | ConvertFrom-Json } catch { return $true }
+            return $j.nameAvailable -or ($j.reason -eq 'AlreadyExists')
         }
         'sqlServer' {
             # No dedicated check; we attempt to read and accept either "exists in our RG" or NotFound.
