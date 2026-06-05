@@ -4,6 +4,17 @@ export const msalConfig = {
   auth: {
     clientId: readConfigVal("MSAL_CLIENT_ID"),
     authority: readConfigVal("MSAL_AUTHORITY"),
+    // Pin the redirect URI to the SPA root so it doesn't drift with deep links
+    // (e.g. /cold-storage/download/:itemId). Without this, MSAL uses the current
+    // page URL as the redirect URI, which means EVERY new route needs a separate
+    // SPA redirect entry on the AAD app registration. Pinning to '/' keeps the
+    // AAD app config minimal.
+    redirectUri: window.location.origin,
+    // After login MSAL redirects to redirectUri. We want the user to land back
+    // on the page they came from (typically the deep download link), so capture
+    // it now and use it as postLogoutRedirectUri / state.
+    postLogoutRedirectUri: window.location.origin,
+    navigateToLoginRequestUrl: true,
   },
   cache: {
     cacheLocation: "sessionStorage", // This configures where your cache will be stored
