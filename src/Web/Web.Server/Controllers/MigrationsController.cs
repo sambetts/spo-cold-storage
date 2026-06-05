@@ -97,6 +97,14 @@ public class MigrationsController(
             // Idempotency: short-circuit if a non-terminal item already exists
             // for the same URL on this container. Avoids duplicate work without
             // silently dropping a legitimate retry of a failed job.
+            //
+            // SELF-HEAL: if the existing row is still `Queued` and was created
+            // more than 5 minutes ago, treat it as an orphan from a previous
+            // publish failure (DB row written, bus publish threw / app crashed
+            // between SaveChanges and SendMessageAsync). Cancel it and let this
+            // request re-create + republish. Without this, a single publish
+            // failure permanently blocks any future retry for that file because
+            // the controller keeps seeing the stuck-Queued row and skipping.
             var existing = await _db.MigrationJobItems
                 .Where(i => i.SpServerRelativeUrl == dto.ServerRelativeUrl
                             && i.ContainerId == container.ID)
@@ -105,8 +113,28 @@ public class MigrationsController(
                 .ConfigureAwait(false);
             if (existing is not null && !existing.Status.IsTerminal())
             {
-                warnings.Add($"'{dto.ServerRelativeUrl}' is already in flight (status {existing.Status}); skipping.");
-                continue;
+                var ageMinutes = (DateTime.UtcNow - existing.UpdatedAt).TotalMinutes;
+                if (existing.Status == MigrationLifecycleStatus.Queued && ageMinutes > 5)
+                {
+                    existing.Status = MigrationLifecycleStatus.Cancelled;
+                    existing.LastError = $"Auto-cancelled by retry: item was {(int)ageMinutes} min old in 'Queued' (likely orphaned by an earlier publish failure).";
+                    existing.UpdatedAt = DateTime.UtcNow;
+                    existing.CompletedAt = DateTime.UtcNow;
+                    _db.MigrationJobLogs.Add(new MigrationJobLog
+                    {
+                        JobId = existing.JobId,
+                        ItemId = existing.ItemId,
+                        Status = MigrationLifecycleStatus.Cancelled,
+                        Level = (int)LogLevel.Warning,
+                        Message = $"Auto-cancelled to unblock retry. Was stuck in Queued for {(int)ageMinutes} min - likely a publish failure on the original submit.",
+                    });
+                    // Fall through and create a fresh item below.
+                }
+                else
+                {
+                    warnings.Add($"'{dto.ServerRelativeUrl}' is already in flight (status {existing.Status}); skipping.");
+                    continue;
+                }
             }
 
             var item = new MigrationJobItem
@@ -194,9 +222,53 @@ public class MigrationsController(
             });
         }
 
+        // Publish each envelope. If a publish fails, mark the corresponding DB row
+        // as CopyToColdStorageFailed with the error text so:
+        //   (1) the SPFx UI sees the failure rather than a row stuck in Queued forever
+        //   (2) the idempotency check above will let the user resubmit immediately
+        //       (failed items are terminal -> the next call creates a fresh row)
+        //   (3) ops can correlate the worker log to the specific item
+        // We use Promise.allSettled-style accounting: keep going even if one fails so
+        // partial submits at least queue the publishable items.
+        var publishFailures = new List<(Guid ItemId, string Error)>();
         foreach (var envelope in queueWork)
         {
-            await _publisher.PublishAsync(envelope, cancellationToken).ConfigureAwait(false);
+            try
+            {
+                await _publisher.PublishAsync(envelope, cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                publishFailures.Add((envelope.ItemId, ex.Message));
+                _logger.LogError(ex, "Failed to publish envelope for item {ItemId} on job {JobId}.", envelope.ItemId, envelope.JobId);
+            }
+        }
+
+        if (publishFailures.Count > 0)
+        {
+            var failedIds = publishFailures.Select(f => f.ItemId).ToHashSet();
+            var failedItems = await _db.MigrationJobItems
+                .Where(i => failedIds.Contains(i.ItemId))
+                .ToListAsync(cancellationToken)
+                .ConfigureAwait(false);
+            foreach (var item in failedItems)
+            {
+                var err = publishFailures.First(f => f.ItemId == item.ItemId).Error;
+                item.Status = MigrationLifecycleStatus.CopyToColdStorageFailed;
+                item.LastError = $"Failed to publish to Service Bus: {err}";
+                item.UpdatedAt = DateTime.UtcNow;
+                item.CompletedAt = DateTime.UtcNow;
+                _db.MigrationJobLogs.Add(new MigrationJobLog
+                {
+                    JobId = item.JobId,
+                    ItemId = item.ItemId,
+                    Status = MigrationLifecycleStatus.CopyToColdStorageFailed,
+                    Level = (int)LogLevel.Error,
+                    Message = item.LastError!,
+                });
+                warnings.Add($"'{item.SpServerRelativeUrl}': publish failed - {err}");
+            }
+            await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
         }
 
         return Accepted(new AcceptedJobResponse
