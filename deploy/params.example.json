@@ -16,7 +16,7 @@
     "owner": "platform-team"
   },
 
-  "_naming_comment": "All names must follow Azure resource naming rules. storageAccount/keyVault/sqlServer/search/serviceBus/webApp are GLOBALLY unique — pick something likely to be free.",
+  "_naming_comment": "All names must follow Azure resource naming rules. storageAccount/keyVault/sqlServer/search/serviceBus/webApp are GLOBALLY unique — pick something likely to be free. vnet is optional; defaults to 'vnet-<webApp>' if omitted.",
   "naming": {
     "appServicePlan": "asp-spocs-prod",
     "webApp": "app-spocs-prod-001",
@@ -30,7 +30,8 @@
     "search": "srch-spocs-prod-001",
     "searchIndex": "spexports",
     "logAnalytics": "log-spocs-prod",
-    "appInsights": "appi-spocs-prod"
+    "appInsights": "appi-spocs-prod",
+    "vnet": "vnet-spocs-prod"
   },
 
   "sku": {
@@ -85,6 +86,10 @@
 
   "network": {
     "_comment": "Set to false to leave the deploy IP in the SQL firewall after Sql phase. Useful for debugging.",
-    "removeDeployIpAfterSqlGrants": true
+    "removeDeployIpAfterSqlGrants": true,
+    "_vnet_comment": "Optional VNet overrides. Bicep adds a /22 VNet with two subnets (snet-app delegated to Microsoft.Web/serverFarms, snet-pe for private endpoints) and 5 private DNS zones + 4 or 5 private endpoints (SQL, Key Vault, Storage blob, AI Search; Service Bus PE is only added when sku.serviceBus is Standard or Premium — Basic doesn't support Private Link). Leave these out to accept the defaults.",
+    "vnetAddressPrefix": "10.50.0.0/22",
+    "subnetAppPrefix":   "10.50.0.0/24",
+    "subnetPePrefix":    "10.50.1.0/24"
   }
 }

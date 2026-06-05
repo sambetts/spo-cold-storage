@@ -84,7 +84,7 @@ $Providers = @(
     'Microsoft.Web', 'Microsoft.Storage', 'Microsoft.KeyVault',
     'Microsoft.ServiceBus', 'Microsoft.Sql', 'Microsoft.Search',
     'Microsoft.Insights', 'Microsoft.OperationalInsights',
-    'Microsoft.Authorization'
+    'Microsoft.Authorization', 'Microsoft.Network'
 )
 
 # --- Load helpers ---
@@ -483,8 +483,10 @@ function Invoke-Phase-App {
             } finally { Pop-Location }
         }
 
-        # Publish Web.Server (framework-dependent against the .NET 10 stack on App Service).
-        Write-Info 'dotnet publish Web.Server (Release, win-x64)…'
+        # Publish Web.Server self-contained (win-x64). Self-contained ships the .NET 10
+        # runtime in the publish output, so it runs regardless of which version the
+        # App Service netFrameworkVersion knob is set to.
+        Write-Info 'dotnet publish Web.Server (Release, win-x64, self-contained)…'
         $webPublish = Join-Path $publishRoot 'web'
         Invoke-Native dotnet 'publish' $WebProject `
             '-c' 'Release' `
@@ -574,6 +576,13 @@ function Set-AppSettings {
     $settings = [ordered]@{
         'WEBSITE_LOAD_USER_PROFILE'             = '1'
         'WEBSITE_RUN_FROM_PACKAGE'              = '0'
+        # Route DNS lookups through the Azure-provided resolver inside the VNet so that
+        # *.database.windows.net, *.blob.core.windows.net, *.vaultcore.azure.net, etc.
+        # resolve to the private endpoint IPs (via the linked privatelink. zones) rather
+        # than the public IPs. Required because vnetRouteAllEnabled is left false (so
+        # internet-bound traffic to AAD / SharePoint Online / App Insights doesn't
+        # need a NAT Gateway).
+        'WEBSITE_DNS_SERVER'                    = '168.63.129.16'
         'ASPNETCORE_ENVIRONMENT'                = 'Production'
         'BaseServerAddress'                     = $o['baseServerAddress']
         'KeyVaultUrl'                           = $o['keyVaultUri'].TrimEnd('/')

@@ -1,13 +1,20 @@
 // SPO Cold Storage — single Windows App Service deployment.
 // Resources:
 //   - Log Analytics + Application Insights (workspace-based)
-//   - Windows App Service Plan + Web App (system-assigned MSI, AlwaysOn)
-//   - Storage Account + blob container (CORS for SPA)
-//   - Key Vault (RBAC mode)
-//   - Service Bus namespace + queue (5 min lock, max delivery 1000)
-//   - Azure SQL Server + Database (Entra-only auth)
-//   - Azure AI Search
+//   - Virtual Network (snet-app delegated to Microsoft.Web/serverFarms, snet-pe for PEs)
+//   - Windows App Service Plan + Web App (system-assigned MSI, AlwaysOn, VNet-integrated)
+//   - Storage Account + blob container (CORS for SPA) + private endpoint
+//   - Key Vault (RBAC mode) + private endpoint
+//   - Service Bus namespace + queue (5 min lock, max delivery 1000) + private endpoint
+//   - Azure SQL Server + Database (Entra-only auth) + private endpoint
+//   - Azure AI Search + private endpoint
+//   - Private DNS zones (privatelink.*) linked to the VNet, A records auto-registered
 //   - Role assignments and Key Vault secrets
+//
+// Public endpoints on data-plane services remain Enabled in this template so the deploy
+// flow (KV secret writes, SQL T-SQL grant, etc.) keeps working. The runtime path is wired
+// through private endpoints so the system continues to function if a subscription /
+// management-group policy later flips publicNetworkAccess to Disabled on any of them.
 
 targetScope = 'resourceGroup'
 
@@ -45,6 +52,120 @@ param storageUserDataReaderTypes array = []
 @secure()
 @description('Azure AD application client secret. Stored as Key Vault secret aad-client-secret.')
 param aadClientSecret string = ''
+
+// ---------- Network configuration (private VNet for private endpoints) ----------
+@description('VNet CIDR. Must contain subnetAppPrefix and subnetPePrefix. Default 10.50.0.0/22.')
+param vnetAddressPrefix string = '10.50.0.0/22'
+
+@description('App Service VNet-integration subnet CIDR. Must be dedicated (delegated to Microsoft.Web/serverFarms). Default 10.50.0.0/24.')
+param subnetAppPrefix string = '10.50.0.0/24'
+
+@description('Private endpoints subnet CIDR. Default 10.50.1.0/24.')
+param subnetPePrefix string = '10.50.1.0/24'
+
+// Derived (allows naming.vnet override without forcing it into existing params.json files).
+var vnetName = naming.?vnet ?? 'vnet-${naming.webApp}'
+
+// ---------- VNet + subnets ----------
+// snet-app is delegated to Microsoft.Web/serverFarms so the Web App can integrate with it.
+// snet-pe holds the private endpoints; PE network policies are Disabled (Azure requirement).
+resource vnet 'Microsoft.Network/virtualNetworks@2024-01-01' = {
+  name: vnetName
+  location: location
+  tags: tags
+  properties: {
+    addressSpace: { addressPrefixes: [ vnetAddressPrefix ] }
+    subnets: [
+      {
+        name: 'snet-app'
+        properties: {
+          addressPrefix: subnetAppPrefix
+          delegations: [ {
+            name: 'serverFarms'
+            properties: { serviceName: 'Microsoft.Web/serverFarms' }
+          } ]
+          privateEndpointNetworkPolicies: 'Disabled'
+        }
+      }
+      {
+        name: 'snet-pe'
+        properties: {
+          addressPrefix: subnetPePrefix
+          privateEndpointNetworkPolicies: 'Disabled'
+        }
+      }
+    ]
+  }
+}
+
+resource snetApp 'Microsoft.Network/virtualNetworks/subnets@2024-01-01' existing = {
+  parent: vnet
+  name: 'snet-app'
+}
+resource snetPe 'Microsoft.Network/virtualNetworks/subnets@2024-01-01' existing = {
+  parent: vnet
+  name: 'snet-pe'
+}
+
+// ---------- Private DNS zones (linked to the VNet, A records auto-registered by PEs) ----------
+// Names are the Microsoft-defined privatelink. zones for public Azure.
+resource pdnsBlob 'Microsoft.Network/privateDnsZones@2024-06-01' = {
+  name: 'privatelink.blob.${environment().suffixes.storage}'
+  location: 'global'
+  tags: tags
+}
+resource pdnsVault 'Microsoft.Network/privateDnsZones@2024-06-01' = {
+  name: 'privatelink.vaultcore.azure.net'
+  location: 'global'
+  tags: tags
+}
+resource pdnsSql 'Microsoft.Network/privateDnsZones@2024-06-01' = {
+  // environment().suffixes.sqlServerHostname is ".database.windows.net" with a leading dot.
+  name: 'privatelink${environment().suffixes.sqlServerHostname}'
+  location: 'global'
+  tags: tags
+}
+resource pdnsSb 'Microsoft.Network/privateDnsZones@2024-06-01' = {
+  name: 'privatelink.servicebus.windows.net'
+  location: 'global'
+  tags: tags
+}
+resource pdnsSearch 'Microsoft.Network/privateDnsZones@2024-06-01' = {
+  name: 'privatelink.search.windows.net'
+  location: 'global'
+  tags: tags
+}
+
+resource pdnsLinkBlob 'Microsoft.Network/privateDnsZones/virtualNetworkLinks@2024-06-01' = {
+  parent: pdnsBlob
+  name: 'link-${vnet.name}'
+  location: 'global'
+  properties: { virtualNetwork: { id: vnet.id }, registrationEnabled: false }
+}
+resource pdnsLinkVault 'Microsoft.Network/privateDnsZones/virtualNetworkLinks@2024-06-01' = {
+  parent: pdnsVault
+  name: 'link-${vnet.name}'
+  location: 'global'
+  properties: { virtualNetwork: { id: vnet.id }, registrationEnabled: false }
+}
+resource pdnsLinkSql 'Microsoft.Network/privateDnsZones/virtualNetworkLinks@2024-06-01' = {
+  parent: pdnsSql
+  name: 'link-${vnet.name}'
+  location: 'global'
+  properties: { virtualNetwork: { id: vnet.id }, registrationEnabled: false }
+}
+resource pdnsLinkSb 'Microsoft.Network/privateDnsZones/virtualNetworkLinks@2024-06-01' = {
+  parent: pdnsSb
+  name: 'link-${vnet.name}'
+  location: 'global'
+  properties: { virtualNetwork: { id: vnet.id }, registrationEnabled: false }
+}
+resource pdnsLinkSearch 'Microsoft.Network/privateDnsZones/virtualNetworkLinks@2024-06-01' = {
+  parent: pdnsSearch
+  name: 'link-${vnet.name}'
+  location: 'global'
+  properties: { virtualNetwork: { id: vnet.id }, registrationEnabled: false }
+}
 
 // ---------- Log Analytics + App Insights ----------
 resource law 'Microsoft.OperationalInsights/workspaces@2023-09-01' = {
@@ -245,6 +366,10 @@ resource web 'Microsoft.Web/sites@2023-12-01' = {
     serverFarmId: asp.id
     httpsOnly: true
     clientAffinityEnabled: false
+    // Regional VNet integration: outbound traffic to RFC1918 addresses (the private
+    // endpoints we provision below) is routed through snet-app. Internet-bound traffic
+    // continues to use the App Service platform outbound, so we don't need a NAT Gateway.
+    virtualNetworkSubnetId: snetApp.id
     siteConfig: {
       alwaysOn: true
       http20Enabled: true
@@ -252,7 +377,8 @@ resource web 'Microsoft.Web/sites@2023-12-01' = {
       minTlsVersion: '1.2'
       use32BitWorkerProcess: false
       webSocketsEnabled: false
-      netFrameworkVersion: 'v9.0'
+      netFrameworkVersion: 'v10.0'
+      vnetRouteAllEnabled: false
     }
   }
 }
@@ -431,6 +557,122 @@ resource raWebSearchService 'Microsoft.Authorization/roleAssignments@2022-04-01'
   }
 }
 
+// ---------- Private endpoints ----------
+// One PE per data-plane service, each wired to its private DNS zone via privateDnsZoneGroups
+// so A records auto-register and refresh. The PEs are reachable from the App Service via
+// snet-app → snet-pe (App Service VNet integration), so when public network access is
+// disabled by policy the runtime path still works.
+
+resource peStorage 'Microsoft.Network/privateEndpoints@2024-01-01' = {
+  name: 'pe-${storage.name}-blob'
+  location: location
+  tags: tags
+  properties: {
+    subnet: { id: snetPe.id }
+    privateLinkServiceConnections: [ {
+      name: 'blob'
+      properties: { privateLinkServiceId: storage.id, groupIds: [ 'blob' ] }
+    } ]
+  }
+}
+resource peStorageDns 'Microsoft.Network/privateEndpoints/privateDnsZoneGroups@2024-01-01' = {
+  parent: peStorage
+  name: 'default'
+  properties: { privateDnsZoneConfigs: [ {
+    name: 'blob'
+    properties: { privateDnsZoneId: pdnsBlob.id }
+  } ] }
+}
+
+resource peKv 'Microsoft.Network/privateEndpoints@2024-01-01' = {
+  name: 'pe-${kv.name}-vault'
+  location: location
+  tags: tags
+  properties: {
+    subnet: { id: snetPe.id }
+    privateLinkServiceConnections: [ {
+      name: 'vault'
+      properties: { privateLinkServiceId: kv.id, groupIds: [ 'vault' ] }
+    } ]
+  }
+}
+resource peKvDns 'Microsoft.Network/privateEndpoints/privateDnsZoneGroups@2024-01-01' = {
+  parent: peKv
+  name: 'default'
+  properties: { privateDnsZoneConfigs: [ {
+    name: 'vault'
+    properties: { privateDnsZoneId: pdnsVault.id }
+  } ] }
+}
+
+resource peSql 'Microsoft.Network/privateEndpoints@2024-01-01' = {
+  name: 'pe-${sqlServer.name}-sqlServer'
+  location: location
+  tags: tags
+  properties: {
+    subnet: { id: snetPe.id }
+    privateLinkServiceConnections: [ {
+      name: 'sqlServer'
+      properties: { privateLinkServiceId: sqlServer.id, groupIds: [ 'sqlServer' ] }
+    } ]
+  }
+}
+resource peSqlDns 'Microsoft.Network/privateEndpoints/privateDnsZoneGroups@2024-01-01' = {
+  parent: peSql
+  name: 'default'
+  properties: { privateDnsZoneConfigs: [ {
+    name: 'sqlServer'
+    properties: { privateDnsZoneId: pdnsSql.id }
+  } ] }
+}
+
+// Service Bus Private Endpoints require Standard or Premium tier (Basic doesn't support
+// Private Link). Skip the PE if the namespace is on Basic so the deployment still
+// succeeds — but the SB control / data plane will then only be reachable via the public
+// endpoint, so a policy that disables that endpoint will break the runtime. Document this
+// limitation in the README; upgrade to Standard if a private path is required.
+resource peSb 'Microsoft.Network/privateEndpoints@2024-01-01' = if (toLower(sku.serviceBus) != 'basic') {
+  name: 'pe-${sb.name}-namespace'
+  location: location
+  tags: tags
+  properties: {
+    subnet: { id: snetPe.id }
+    privateLinkServiceConnections: [ {
+      name: 'namespace'
+      properties: { privateLinkServiceId: sb.id, groupIds: [ 'namespace' ] }
+    } ]
+  }
+}
+resource peSbDns 'Microsoft.Network/privateEndpoints/privateDnsZoneGroups@2024-01-01' = if (toLower(sku.serviceBus) != 'basic') {
+  parent: peSb
+  name: 'default'
+  properties: { privateDnsZoneConfigs: [ {
+    name: 'namespace'
+    properties: { privateDnsZoneId: pdnsSb.id }
+  } ] }
+}
+
+resource peSearch 'Microsoft.Network/privateEndpoints@2024-01-01' = {
+  name: 'pe-${search.name}-search'
+  location: location
+  tags: tags
+  properties: {
+    subnet: { id: snetPe.id }
+    privateLinkServiceConnections: [ {
+      name: 'searchService'
+      properties: { privateLinkServiceId: search.id, groupIds: [ 'searchService' ] }
+    } ]
+  }
+}
+resource peSearchDns 'Microsoft.Network/privateEndpoints/privateDnsZoneGroups@2024-01-01' = {
+  parent: peSearch
+  name: 'default'
+  properties: { privateDnsZoneConfigs: [ {
+    name: 'searchService'
+    properties: { privateDnsZoneId: pdnsSearch.id }
+  } ] }
+}
+
 // ---------- Outputs ----------
 output webAppName string                = web.name
 output webAppHostname string            = web.properties.defaultHostName
@@ -448,6 +690,10 @@ output sqlDatabaseName string           = sqlDb.name
 output searchServiceName string         = search.name
 output searchServiceEndpoint string     = 'https://${search.name}.search.windows.net'
 output appInsightsConnectionString string = appi.properties.ConnectionString
+output vnetName string                  = vnet.name
+output vnetId string                    = vnet.id
+output appSubnetId string               = snetApp.id
+output peSubnetId string                = snetPe.id
 output baseServerAddress string         = sharePoint.baseServerAddress
 output aadClientId string               = azureAd.clientId
 output aadTenantId string               = azureAd.tenantId

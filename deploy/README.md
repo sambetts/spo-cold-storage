@@ -249,7 +249,14 @@ Use the GUID from `src/SPFx/spfx-cold-storage/src/extensions/coldStorageStatusFi
 ## What gets provisioned
 
 - Log Analytics workspace + Application Insights (workspace-based)
-- Windows App Service Plan + Web App (system-assigned MSI, AlwaysOn)
+- **Virtual Network** (/22 by default) with two subnets:
+  - `snet-app` (/24) — delegated to `Microsoft.Web/serverFarms`; the Web App's outbound RFC1918 traffic is routed through it.
+  - `snet-pe` (/24) — hosts the private endpoints; private-endpoint network policies disabled.
+- **Private DNS zones** linked to the VNet so the App Service resolves data-plane hostnames to private IPs:
+  - `privatelink.blob.core.windows.net`, `privatelink.vaultcore.azure.net`, `privatelink.database.windows.net`, `privatelink.servicebus.windows.net`, `privatelink.search.windows.net`
+- **Private endpoints** (one per data-plane service) wired into `snet-pe` and registered into the matching DNS zone via `privateDnsZoneGroups`:
+  - Storage (`blob`), Key Vault (`vault`), Azure SQL (`sqlServer`), AI Search (`searchService`), Service Bus (`namespace` — **only when `sku.serviceBus` ≠ `Basic`**, because Basic doesn't support Private Link).
+- Windows App Service Plan + Web App (system-assigned MSI, AlwaysOn, integrated with `snet-app`; `WEBSITE_DNS_SERVER=168.63.129.16` so DNS resolves the privatelink zones)
 - Storage Account (TLS 1.2, no anonymous blob access) + blob container, CORS for the Web App
 - Key Vault (RBAC mode, soft-delete on, purge protection on) seeded with: `aad-client-secret`, `storage-connection-string`, `servicebus-connection-string`, `search-query-key`, `search-admin-key`
 - Service Bus namespace + `filediscovery` queue (5 min lock, max delivery 1000)
@@ -258,6 +265,16 @@ Use the GUID from `src/SPFx/spfx-cold-storage/src/extensions/coldStorageStatusFi
 - RBAC for the Web App MSI: Key Vault Secrets User, Storage Blob Data Contributor, Service Bus Sender + Receiver, Search Index Data Contributor + Service Contributor
 - RBAC for the AAD app SP: Key Vault Secrets User + Certificates User
 - RBAC for entries in `storage.userDataReaders`: Storage Blob Data Reader
+
+### Network design — why a VNet + private endpoints?
+
+Tenants increasingly run governance policies (Microsoft's own MCAPS, Azure Policy `Deny`/`DeployIfNotExists` initiatives, customer landing-zone baselines, …) that flip `publicNetworkAccess` to `Disabled` on data-plane services minutes after they're created. The Bicep template intentionally **does not** disable those public endpoints itself — but it provisions the VNet, private endpoints, and DNS so that *if* a policy disables a public endpoint later, the Web App and WebJobs continue to reach SQL / Key Vault / Storage / Search via the private endpoint.
+
+The Web App uses **regional VNet integration with `vnetRouteAllEnabled=false`**. This routes only RFC1918 traffic through `snet-app` (so private-endpoint IPs are reachable), while internet-bound traffic (AAD, SharePoint Online, App Insights ingestion) continues to use the App Service platform's outbound IPs. No NAT Gateway needed.
+
+DNS resolution for the privatelink. zones is handled by setting `WEBSITE_DNS_SERVER=168.63.129.16` (Azure's recursive resolver, which honours private DNS zones linked to the VNet the App Service is integrated with). Hostnames like `<sqlServer>.database.windows.net` resolve to the PE's RFC1918 IP, and connections to that IP are routed through `snet-app`.
+
+> **Service Bus on Basic SKU has no private endpoint** because Azure Service Bus only supports Private Link on Standard and Premium tiers. If a governance policy disables Service Bus public access on a Basic namespace, the WebJobs lose Service Bus connectivity. Upgrade `sku.serviceBus` to `Standard` (or higher) in `params.json` to get the private path.
 
 ### Worker layout
 
@@ -282,6 +299,8 @@ Use the GUID from `src/SPFx/spfx-cold-storage/src/extensions/coldStorageStatusFi
 | Bicep fails with `*AlreadyExists` for a globally-unique name (storage, KV, Search, SQL, Service Bus, Web App) | Edit `naming.*` in `params.json` and re-run `-Phase Infra`. |
 | Bicep fails with `ProvisioningDisabled` for Azure SQL | Your subscription is region-restricted. Switch `location` to one where SQL is allowed (try `westus3`, `northeurope`, etc.). |
 | `Sql` phase: "Login failed for user" | The deploying user isn't a member of the group in `sql.entraAdminObjectId`. Add yourself (or use a user that IS a member) and re-run `-Phase Sql`. |
+| Web App returns **HTTP 500.30**, `AppServiceAppLogs` show **SqlException 47073** "Connection was denied because Deny Public Network Access is set to Yes" | A governance/Azure Policy disabled `publicNetworkAccess` on the SQL server after Bicep set it to `Enabled`. The fix is the private endpoint that Bicep already provisions — re-run `-Phase Infra` to make sure the VNet + PE + DNS resources exist, then `-Phase App` to set `WEBSITE_DNS_SERVER=168.63.129.16` and restart. Verify with `nslookup <sqlServer>.database.windows.net` from the Web App's Kudu / SSH console — you should get an RFC1918 IP. The same fix applies to Storage / Key Vault / AI Search / Service Bus (Standard SKU). |
+| Web App returns 500.30, logs show **Service Bus** connectivity errors and `sku.serviceBus` is `Basic` | Basic-tier Service Bus doesn't support Private Link. Either re-enable Service Bus public access on the namespace, or upgrade `sku.serviceBus` to `Standard` and re-run `-Phase Infra` so the SB private endpoint gets provisioned. |
 | Web app starts but throws `ConfigurationMissingException` | A Key Vault reference isn't resolving. Portal → App Service → Configuration → Application settings, look for red "Key Vault reference" badges. Usually means the Secrets phase wasn't run, or the Web App MSI doesn't yet have Key Vault Secrets User (re-run `-Phase Infra`). |
 | Web app: `AuthorizationPermissionMismatch` when browsing blobs | The signed-in user has no `Storage Blob Data Reader`. See [Grant end-users storage access](#grant-end-users-storage-access). Sign out + back in after granting. |
 | Sign-in fails with `AADSTS700016` | You ran `SpaConfig` but didn't re-run `deploy.ps1 -Phase App`. The deployed SPA bundle still has the old client ID baked in. Re-run the App phase. |
