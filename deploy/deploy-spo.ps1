@@ -57,7 +57,7 @@ param(
     [SecureString]$PfxPassword,
 
     [ValidateSet('Interactive','DeviceLogin','Certificate')]
-    [string]$SpfxAuthMode = 'Interactive',
+    [string]$SpfxAuthMode = 'Certificate',
 
     [switch]$SkipConfirm
 )
@@ -660,15 +660,50 @@ function Invoke-Phase-SpfxDeploy {
                     'Certificate' {
                         $certPath = Join-Path $LocalDir "$($p.azureAd.certificateName).pfx"
                         if (-not (Test-Path $certPath)) {
-                            throw "Certificate auth selected but $certPath does not exist. Re-run -Phase Cert with source=generate or place your PFX there."
+                            # Auto-download from the deployment Key Vault. The KV "secret"
+                            # twin of a certificate carries the full PFX (PKCS#12) base64-
+                            # encoded with no password — perfect for headless re-runs on a
+                            # fresh machine that wasn't the one that originally ran -Phase Cert.
+                            $kvName = $null
+                            if ($global:Outputs -and $global:Outputs['keyVaultName']) {
+                                $kvName = $global:Outputs['keyVaultName']
+                            } elseif ($p.naming.PSObject.Properties['keyVault']) {
+                                $kvName = $p.naming.keyVault
+                            }
+                            if ($kvName) {
+                                Write-Info "PFX not found at $certPath — downloading $($p.azureAd.certificateName) from $kvName…"
+                                $b64 = (Invoke-Native az 'keyvault' 'secret' 'show' '--vault-name' $kvName '--name' $p.azureAd.certificateName '--query' 'value' '-o' 'tsv' -Quiet -AllowNonZero) -join ''
+                                if ($b64) {
+                                    New-Item -ItemType Directory -Force (Split-Path $certPath) | Out-Null
+                                    [IO.File]::WriteAllBytes($certPath, [Convert]::FromBase64String($b64.Trim()))
+                                    Write-Ok "Downloaded PFX: $certPath ($((Get-Item $certPath).Length) bytes)"
+                                }
+                            }
+                            if (-not (Test-Path $certPath)) {
+                                throw "Certificate auth selected but $certPath does not exist and could not be downloaded from Key Vault. Run -Phase Cert with source=generate, or place your PFX there manually."
+                            }
                         }
-                        $pfxPw = Get-PfxPassword
-                        Connect-PnPOnline -Url $Url `
-                            -ClientId $p.azureAd.clientId `
-                            -Tenant   $p.azureAd.tenantId `
-                            -CertificatePath $certPath `
-                            -CertificatePassword $pfxPw `
-                            -ErrorAction Stop
+                        # KV-downloaded PFXs have no password; only call Get-PfxPassword
+                        # (which prompts) if the file actually needs one.
+                        $needsPw = $false
+                        try {
+                            $null = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new($certPath, '', [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::EphemeralKeySet)
+                        } catch { $needsPw = $true }
+                        if ($needsPw) {
+                            $pfxPw = Get-PfxPassword
+                            Connect-PnPOnline -Url $Url `
+                                -ClientId $p.azureAd.clientId `
+                                -Tenant   $p.azureAd.tenantId `
+                                -CertificatePath $certPath `
+                                -CertificatePassword $pfxPw `
+                                -ErrorAction Stop
+                        } else {
+                            Connect-PnPOnline -Url $Url `
+                                -ClientId $p.azureAd.clientId `
+                                -Tenant   $p.azureAd.tenantId `
+                                -CertificatePath $certPath `
+                                -ErrorAction Stop
+                        }
                     }
                     default { throw "Unknown -SpfxAuthMode '$SpfxAuthMode'. Use Interactive|DeviceLogin|Certificate." }
                 }
