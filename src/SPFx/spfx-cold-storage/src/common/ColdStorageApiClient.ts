@@ -145,7 +145,12 @@ export class ColdStorageApiClient {
   }
 
   private async getJson<T>(path: string): Promise<T> {
-    const response = await this.aadClient.get(this.url(path), AadHttpClient.configurations.v1);
+    let response: HttpClientResponse;
+    try {
+      response = await this.aadClient.get(this.url(path), AadHttpClient.configurations.v1);
+    } catch (err) {
+      throw ColdStorageApiError.fromTransport(err);
+    }
     return this.parse<T>(response);
   }
 
@@ -154,7 +159,12 @@ export class ColdStorageApiClient {
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(body),
     };
-    const response = await this.aadClient.post(this.url(path), AadHttpClient.configurations.v1, options);
+    let response: HttpClientResponse;
+    try {
+      response = await this.aadClient.post(this.url(path), AadHttpClient.configurations.v1, options);
+    } catch (err) {
+      throw ColdStorageApiError.fromTransport(err);
+    }
     return this.parse<T>(response);
   }
 
@@ -165,8 +175,42 @@ export class ColdStorageApiClient {
   private async parse<T>(response: HttpClientResponse): Promise<T> {
     const text = await response.text();
     if (!response.ok) {
-      throw new Error(`API ${response.status}: ${text || response.statusText}`);
+      throw new ColdStorageApiError(response.status, response.statusText, text);
     }
     return text ? (JSON.parse(text) as T) : ({} as T);
+  }
+}
+
+/**
+ * Error raised by ColdStorageApiClient for any non-2xx HTTP response or
+ * transport failure. Carries the HTTP status so callers (e.g. the progress
+ * dialog) can react differently to auth issues vs throttling vs server errors.
+ *
+ * status === 0 indicates a transport / CORS / network failure where no HTTP
+ * response was received.
+ */
+export class ColdStorageApiError extends Error {
+  public readonly status: number;
+  public readonly statusText: string;
+  public readonly bodyText: string;
+
+  public constructor(status: number, statusText: string, bodyText: string, message?: string) {
+    super(message ?? `API ${status}: ${bodyText || statusText}`);
+    this.name = 'ColdStorageApiError';
+    this.status = status;
+    this.statusText = statusText;
+    this.bodyText = bodyText;
+    // Restore prototype chain (ES5 target loses it when extending built-ins).
+    Object.setPrototypeOf(this, ColdStorageApiError.prototype);
+  }
+
+  public get isUnauthorized(): boolean { return this.status === 401 || this.status === 403; }
+  public get isThrottled(): boolean    { return this.status === 429; }
+  public get isServerError(): boolean  { return this.status >= 500 && this.status <= 599; }
+  public get isTransport(): boolean    { return this.status === 0; }
+
+  public static fromTransport(err: unknown): ColdStorageApiError {
+    const message = err instanceof Error ? err.message : String(err);
+    return new ColdStorageApiError(0, 'Network error', '', `Network error: ${message}`);
   }
 }

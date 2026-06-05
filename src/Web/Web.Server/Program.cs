@@ -16,6 +16,11 @@ public class Program
         builder.Services.AddControllers().AddJsonOptions(options =>
         {
             options.JsonSerializerOptions.ReferenceHandler = System.Text.Json.Serialization.ReferenceHandler.IgnoreCycles;
+            // Serialize enums (MigrationLifecycleStatus, ColdStorageItemKind, ConflictBehavior, MigrationOperationKind)
+            // as their member names rather than ints. The SPFx TypeScript client compares against the string names
+            // ("Queued", "ColdStorageMigrationCompleted", …) so without this converter every status check on the
+            // client silently mismatches.
+            options.JsonSerializerOptions.Converters.Add(new System.Text.Json.Serialization.JsonStringEnumConverter());
         });
 
         builder.Services.AddEndpointsApiExplorer();
