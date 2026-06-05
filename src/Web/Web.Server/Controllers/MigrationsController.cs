@@ -161,13 +161,31 @@ public class MigrationsController(
         if (queueWork.Count == 0)
         {
             // Nothing to do - the job row carries the warnings so the SPFx UI
-            // can render them, but no bus messages are produced.
+            // can render them, but no bus messages are produced. Persist the
+            // accept-time warnings into the job's Summary AND surface them via
+            // a synthetic log row so a GET /api/jobs/{id} after the accept
+            // response is gone still tells the caller why nothing happened.
             job.Status = MigrationLifecycleStatus.CompletedWithWarning;
-            job.Summary = "No eligible items.";
+            job.Summary = warnings.Count > 0
+                ? string.Join(" | ", warnings).Length > 1000
+                    ? string.Join(" | ", warnings)[..1000]
+                    : string.Join(" | ", warnings)
+                : "No eligible items.";
             job.CompletedAt = DateTime.UtcNow;
+
+            foreach (var w in warnings)
+            {
+                _db.MigrationJobLogs.Add(new MigrationJobLog
+                {
+                    JobId = job.JobId,
+                    Status = MigrationLifecycleStatus.CompletedWithWarning,
+                    Level = (int)LogLevel.Warning,
+                    Message = w,
+                });
+            }
             await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
 
-            _logger.LogInformation("Migration job {JobId} accepted but had no queueable items.", job.JobId);
+            _logger.LogInformation("Migration job {JobId} accepted but had no queueable items: {Warnings}", job.JobId, string.Join(" | ", warnings));
             return Accepted(new AcceptedJobResponse
             {
                 JobId = job.JobId,

@@ -306,6 +306,28 @@ export class MigrationProgressDialog {
     }
   }
 
+  /**
+   * Merge accept-time warnings (returned synchronously by /api/migrations/start
+   * or /api/restores/start) with any warnings the server later attaches to the
+   * job. The accept-time list is the only place where "no eligible items"-style
+   * preflight reasons live, so we have to keep showing them after polling
+   * starts or the user is left staring at "Job has no items yet" with no idea
+   * why.
+   */
+  private mergedWarnings(job: ITrackedJob): string[] {
+    const out: string[] = [];
+    const seen = new Set<string>();
+    const push = (m: string | undefined): void => {
+      if (!m) return;
+      if (seen.has(m)) return;
+      seen.add(m);
+      out.push(m);
+    };
+    for (const w of job.acceptResponse?.warnings ?? []) push(w);
+    for (const w of job.lastResponse?.warnings ?? []) push(w);
+    return out;
+  }
+
   private allJobsSucceeded(): boolean {
     for (const job of this.jobs) {
       const items = job.lastResponse?.items ?? [];
@@ -359,18 +381,25 @@ export class MigrationProgressDialog {
     if (items.length === 0) {
       const empty = document.createElement('p');
       Object.assign(empty.style, { margin: '12px', color: '#605e5c', fontSize: '13px' } as CSSStyleDeclaration);
-      empty.textContent = job.lastResponse
-        ? 'Job has no items yet.'
-        : 'Waiting for first status update…';
+      if (job.lastResponse && isTerminal(job.lastResponse.status)) {
+        // Server already finished the job without queuing anything (e.g.
+        // "No eligible items"). The warnings rendered below explain why.
+        empty.textContent = 'No items were queued for this job — see the warnings below for the reason.';
+      } else if (job.lastResponse) {
+        empty.textContent = 'Job has no items yet.';
+      } else {
+        empty.textContent = 'Waiting for first status update…';
+      }
       wrap.appendChild(empty);
     } else {
       wrap.appendChild(this.renderItemsTable(items));
     }
 
+    const warnings = this.mergedWarnings(job);
+    if (warnings.length > 0) {
+      wrap.appendChild(this.renderMessageList('Warnings', warnings, '#797775'));
+    }
     if (job.lastResponse) {
-      if (job.lastResponse.warnings.length > 0) {
-        wrap.appendChild(this.renderMessageList('Warnings', job.lastResponse.warnings, '#797775'));
-      }
       if (job.lastResponse.errors.length > 0) {
         wrap.appendChild(this.renderMessageList('Errors', job.lastResponse.errors, '#a4262c'));
       }

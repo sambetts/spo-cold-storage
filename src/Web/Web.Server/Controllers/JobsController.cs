@@ -51,6 +51,25 @@ public class JobsController(SPOColdStorageDbContext db, ILogger<JobsController> 
             }
         }
 
+        // Also include job-level warning log rows (e.g. the "no eligible items"
+        // accept-time warnings that aren't tied to a specific item). Without
+        // these, a job that was rejected before any item was queued would come
+        // back from GET /api/jobs/{id} with an empty warnings list — leaving
+        // the SPFx UI showing "Job has no items yet" with no explanation.
+        var jobLevelWarnings = await _db.MigrationJobLogs
+            .Where(l => l.JobId == jobId && l.ItemId == null && l.Level == (int)LogLevel.Warning)
+            .OrderBy(l => l.Timestamp)
+            .Select(l => l.Message)
+            .ToListAsync(cancellationToken)
+            .ConfigureAwait(false);
+        foreach (var w in jobLevelWarnings)
+        {
+            if (!warnings.Contains(w))
+            {
+                warnings.Add(w);
+            }
+        }
+
         return new JobStatusResponse
         {
             JobId = job.JobId,
