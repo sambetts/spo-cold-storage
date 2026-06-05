@@ -5,6 +5,19 @@ public class Config(Microsoft.Extensions.Configuration.IConfiguration config) : 
     [ConfigValue]
     public string BaseServerAddress { get; set; } = string.Empty;
 
+    /// <summary>
+    /// Public URL of this web app (e.g. <c>https://app-spocs-clean-4bf5.azurewebsites.net</c>).
+    /// Written by the deploy script from the bicep webAppHostname output. Used by the
+    /// migrator to build the placeholder <c>.url</c> file's redirect target so end users
+    /// who double-click a placeholder are sent to our SPA download route (which handles
+    /// AAD auth + ACL check + redirect to a short-lived blob SAS) rather than to the
+    /// raw blob URL (which would fail the moment storage public network access is
+    /// disabled by policy). Empty means "fall back to writing the blob URL directly",
+    /// for dev convenience.
+    /// </summary>
+    [ConfigValue(true)]
+    public string AppBaseUrl { get; set; } = string.Empty;
+
     public string ServiceBusQueueName => "filediscovery";
 
     /// <summary>

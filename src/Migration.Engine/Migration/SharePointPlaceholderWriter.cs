@@ -27,11 +27,21 @@ public sealed class SharePointPlaceholderWriter(ILogger logger)
     /// Uploads the ".url" file to the same folder as the source. Returns the
     /// server-relative URL of the new placeholder.
     /// </summary>
+    /// <param name="userFacingUrl">
+    /// Optional value for the <c>[InternetShortcut].URL</c> field inside the
+    /// generated .url file. When set (typically a SPA download route), end
+    /// users who double-click the placeholder are sent there for AAD auth +
+    /// ACL check + redirect to a short-lived SAS, instead of trying to hit
+    /// the raw blob URL (which fails when public network access is locked
+    /// down). When null/empty, the metadata's BlobUrl is used (legacy
+    /// behaviour, fine for dev).
+    /// </param>
     public async Task<string> WritePlaceholderAsync(
         ClientContext ctx,
         string originalServerRelativeUrl,
         PlaceholderFileMetadata metadata,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        string? userFacingUrl = null)
     {
         ArgumentNullException.ThrowIfNull(ctx);
         ArgumentNullException.ThrowIfNull(metadata);
@@ -39,7 +49,7 @@ public sealed class SharePointPlaceholderWriter(ILogger logger)
         cancellationToken.ThrowIfCancellationRequested();
 
         var placeholderUrl = BuildPlaceholderServerRelativeUrl(originalServerRelativeUrl);
-        var content = metadata.BuildUrlFileContent();
+        var content = metadata.BuildUrlFileContent(userFacingUrl);
         var bytes = Encoding.UTF8.GetBytes(content);
 
         // Resolve the folder for the source file then upload the .url next to it.

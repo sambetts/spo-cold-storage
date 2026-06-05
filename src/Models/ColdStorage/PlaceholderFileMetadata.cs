@@ -32,11 +32,21 @@ public sealed class PlaceholderFileMetadata
     /// Office and File Explorer while `[ColdStorage]` carries the metadata
     /// the restore worker needs.
     /// </summary>
-    public string BuildUrlFileContent()
+    /// <param name="userFacingUrl">
+    /// Optional override for the <c>[InternetShortcut].URL</c> field. When set,
+    /// this URL is what end users navigate to when they double-click the
+    /// placeholder (typically a route on our own SPA, e.g.
+    /// <c>https://app/cold-storage/download/{itemId}</c>, which then handles
+    /// AAD auth + ACL check + redirect to a short-lived blob SAS). When null
+    /// or empty, the raw <see cref="BlobUrl"/> is written instead (legacy
+    /// behaviour, used by the unit-test round-trip + as a fallback when no
+    /// public app base URL has been configured).
+    /// </param>
+    public string BuildUrlFileContent(string? userFacingUrl = null)
     {
         var sb = new StringBuilder();
         sb.AppendLine("[" + InternetShortcutSection + "]");
-        sb.Append("URL=").AppendLine(BlobUrl);
+        sb.Append("URL=").AppendLine(string.IsNullOrWhiteSpace(userFacingUrl) ? BlobUrl : userFacingUrl);
         sb.AppendLine();
         sb.AppendLine("[" + ColdStorageSection + "]");
         AppendKv(sb, nameof(JobId), JobId.ToString());

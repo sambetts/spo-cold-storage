@@ -5,6 +5,7 @@ import { FileBrowser } from './components/FileBrowser/FileBrowser';
 import { Login } from './components/Login';
 import { FindFile } from './components/FileSearch/FindFile';
 import { FindMigrationLog } from './components/MigrationLogs/FindMigrationLog';
+import { ColdStorageDownload } from './components/ColdStorage/ColdStorageDownload';
 
 import { AuthenticatedTemplate, UnauthenticatedTemplate, useIsAuthenticated, useMsal } from "@azure/msal-react";
 import { loginRequest } from "./authConfig";
@@ -54,6 +55,7 @@ export default function App() {
                                 <Route path='/FindFile' render={() => <FindFile {... { token: accessToken! }} />} />
                                 <Route path='/FindMigrationLog' render={() => <FindMigrationLog {... { token: accessToken! }} />} />
                                 <Route path='/MigrationTargets' render={() => <MigrationTargetsConfig {... { token: accessToken! }} />} />
+                                <Route path='/cold-storage/download/:itemId' render={() => <ColdStorageDownload token={accessToken!} />} />
                             </Switch>
                         </AuthenticatedTemplate>
                         <UnauthenticatedTemplate>

@@ -125,3 +125,15 @@ public class PlaceholderMetadataResponse
     public bool IsEligibleForRestore { get; set; }
     public string? UnavailableReason { get; set; }
 }
+
+/// <summary>
+/// Short-lived signed URL the SPA uses to bounce the user's browser straight
+/// to the blob, returned by <c>GET /api/placeholders/download/{itemId}</c>.
+/// </summary>
+public class DownloadUrlResponse
+{
+    public string Url { get; set; } = string.Empty;
+    public DateTime ExpiresAt { get; set; }
+    public string? FileName { get; set; }
+    public long ContentLength { get; set; }
+}

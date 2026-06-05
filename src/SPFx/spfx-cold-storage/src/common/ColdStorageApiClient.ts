@@ -32,6 +32,7 @@ export enum MigrationLifecycleStatus {
 export type ColdStorageItemKind = 'File' | 'Folder';
 export type ConflictBehavior = 'Fail' | 'Overwrite' | 'Rename';
 export type OperationKind = 'Migrate' | 'Restore';
+export type DialogMode = OperationKind | 'Status';
 
 export interface IContainerResponse {
   name: string;
@@ -137,6 +138,11 @@ export class ColdStorageApiClient {
 
   public async getJob(jobId: string): Promise<IJobStatusResponse> {
     return this.getJson<IJobStatusResponse>(`/api/jobs/${jobId}`);
+  }
+
+  public async listRecentJobs(siteUrl: string, take: number = 20): Promise<IJobStatusResponse[]> {
+    const qs = `siteUrl=${encodeURIComponent(siteUrl)}&take=${encodeURIComponent(String(take))}`;
+    return this.getJson<IJobStatusResponse[]>(`/api/jobs?${qs}`);
   }
 
   public async resolvePlaceholder(serverRelativeUrl: string): Promise<IPlaceholderMetadata> {

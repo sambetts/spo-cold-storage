@@ -180,7 +180,13 @@ public sealed class ColdStorageMigratorPipeline : BaseComponent
             };
 
             var placeholderUrl = await _placeholderWriter.WritePlaceholderAsync(
-                spCtx!, file.ServerRelativeFilePath, metadata, cancellationToken).ConfigureAwait(false);
+                spCtx!, file.ServerRelativeFilePath, metadata, cancellationToken,
+                // If the deployment configured a public app base URL, point the placeholder
+                // at our SPA download route instead of the raw blob URL — see the comment on
+                // Config.AppBaseUrl for why. The SPA route handles MSAL auth + ACL check +
+                // redirect to a short-lived blob SAS so end users get a working download
+                // even when storage public network access is locked down by policy.
+                userFacingUrl: BuildPlaceholderUserFacingUrl(envelope.ItemId)).ConfigureAwait(false);
 
             await _statusWriter.RecordPlaceholderCreatedAsync(envelope.ItemId, placeholderUrl, cancellationToken);
             return true;
@@ -203,6 +209,22 @@ public sealed class ColdStorageMigratorPipeline : BaseComponent
     {
         var serviceClient = BlobServiceClientFactory.Create(_config.ConnectionStrings.Storage, _config);
         return serviceClient.GetBlobContainerClient(containerName);
+    }
+
+    /// <summary>
+    /// Compose the URL that gets written into the placeholder .url file's
+    /// <c>[InternetShortcut].URL=</c> line. When the deployment has configured
+    /// AppBaseUrl this routes through our SPA's <c>/cold-storage/download/{itemId}</c>
+    /// page; otherwise we return null so the writer falls back to the raw
+    /// blob URL (legacy behaviour, only suitable for dev).
+    /// </summary>
+    private string? BuildPlaceholderUserFacingUrl(Guid itemId)
+    {
+        if (string.IsNullOrWhiteSpace(_config.AppBaseUrl))
+        {
+            return null;
+        }
+        return $"{_config.AppBaseUrl.TrimEnd('/')}/cold-storage/download/{itemId}";
     }
 
     private async Task UploadToBlobAsync(

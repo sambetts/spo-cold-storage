@@ -680,6 +680,10 @@ function Set-AppSettings {
         'Search__IndexName'                     = $global:Params.naming.searchIndex
         'Search__QueryKey'                      = (& $kvSecretUri 'search-query-key')
         'Search__AdminKey'                      = (& $kvSecretUri 'search-admin-key')
+        # AppBaseUrl is consumed by the migrator pipeline so the placeholder .url
+        # files point at our SPA download route, which handles MSAL auth + ACL
+        # check + redirect to a short-lived blob SAS — see Config.AppBaseUrl docs.
+        'AppBaseUrl'                            = "https://$($o['webAppHostname'])"
         # Cold-storage default-container seed (consumed by ColdStorageContainerSeeder
         # at app startup the first time the DB is empty).
         'ColdStorage__DefaultContainer__BlobContainerName' = $o['blobContainerName']

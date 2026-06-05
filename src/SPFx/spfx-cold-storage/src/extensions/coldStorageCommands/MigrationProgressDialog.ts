@@ -20,14 +20,14 @@
  * ColdStorageStatusFieldCustomizer.ts. All dynamic text uses textContent to
  * avoid XSS via user-controlled file paths or backend error messages.
  */
-import { ColdStorageApiClient, ColdStorageApiError, IAcceptedJobResponse, IJobItemStatus, IJobStatusResponse, MigrationLifecycleStatus, OperationKind } from '../../common/ColdStorageApiClient';
+import { ColdStorageApiClient, ColdStorageApiError, DialogMode, IAcceptedJobResponse, IJobItemStatus, IJobStatusResponse, MigrationLifecycleStatus } from '../../common/ColdStorageApiClient';
 import { colorFor, formatLabel, isTerminal } from '../../common/statusFormat';
 
 const POLL_INTERVAL_MS = 3000;
 const MAX_POLL_INTERVAL_MS = 30000;
 const POLL_HARD_CAP_MS = 15 * 60 * 1000;
 
-type DialogPhase = 'submitting' | 'polling' | 'terminal' | 'expired' | 'error';
+type DialogPhase = 'submitting' | 'polling' | 'terminal' | 'expired' | 'error' | 'browse';
 
 interface ITrackedJob {
   jobId: string;
@@ -40,7 +40,7 @@ interface ITrackedJob {
 
 export class MigrationProgressDialog {
   private readonly client: ColdStorageApiClient;
-  private readonly operation: OperationKind;
+  private readonly operation: DialogMode;
 
   private backdrop?: HTMLDivElement;
   private card?: HTMLDivElement;
@@ -59,7 +59,7 @@ export class MigrationProgressDialog {
   private escListener?: (e: KeyboardEvent) => void;
   private keydownTrap?: (e: KeyboardEvent) => void;
 
-  public constructor(client: ColdStorageApiClient, operation: OperationKind) {
+  public constructor(client: ColdStorageApiClient, operation: DialogMode) {
     this.client = client;
     this.operation = operation;
   }
@@ -122,6 +122,36 @@ export class MigrationProgressDialog {
     this.render();
   }
 
+  /**
+   * Populate the dialog with a pre-fetched list of jobs (used by the
+   * COLDSTORAGE_STATUS toolbar command - no polling, just a read-only view of
+   * recent activity for the current site). Renders an "Empty" hint when the
+   * server returns no rows.
+   */
+  public showJobList(jobs: IJobStatusResponse[]): void {
+    if (this.closed) return;
+    this.cancelPollTimer();
+    this.jobs = jobs.map((j, idx) => ({
+      jobId: j.jobId,
+      label: this.labelForListedJob(j, idx, jobs.length),
+      lastResponse: j,
+      pollFailures: 0,
+    }));
+    this.phase = 'browse';
+    this.statusMessage = jobs.length === 0
+      ? 'No migration or restore jobs have been submitted from this site yet.'
+      : `Showing ${jobs.length} most recent job${jobs.length === 1 ? '' : 's'} for this site.`;
+    this.render();
+  }
+
+  private labelForListedJob(job: IJobStatusResponse, idx: number, total: number): string {
+    const created = job.items.length > 0
+      ? job.items.map(i => i.spServerRelativeUrl.split('/').pop()).filter(Boolean).slice(0, 2).join(', ')
+      : '';
+    const summary = created ? ` — ${created}${job.items.length > 2 ? `, +${job.items.length - 2} more` : ''}` : '';
+    return `${total - idx}. ${job.operation}${summary}`;
+  }
+
   public close(): void {
     if (this.closed) return;
     this.closed = true;
@@ -177,7 +207,9 @@ export class MigrationProgressDialog {
     } as CSSStyleDeclaration);
     const title = document.createElement('h2');
     title.id = 'cold-storage-dialog-title';
-    title.textContent = this.operation === 'Migrate' ? 'Migrate to cold storage' : 'Restore from cold storage';
+    title.textContent = this.operation === 'Migrate' ? 'Migrate to cold storage'
+                       : this.operation === 'Restore' ? 'Restore from cold storage'
+                       : 'Cold storage status';
     Object.assign(title.style, { margin: '0', fontSize: '18px', fontWeight: '600' } as CSSStyleDeclaration);
     const close = document.createElement('button');
     close.type = 'button';
@@ -267,6 +299,24 @@ export class MigrationProgressDialog {
 
     if (this.phase === 'error') {
       this.bodyEl.appendChild(this.makeErrorBlock(this.errorMessage ?? 'Unknown error.', this.retryHandler));
+      return;
+    }
+
+    if (this.phase === 'browse') {
+      // Browse mode = COLDSTORAGE_STATUS toolbar command. No polling, just a
+      // read-only snapshot of recent jobs for the current site.
+      const banner = document.createElement('div');
+      Object.assign(banner.style, {
+        fontSize: '12px', color: '#605e5c', marginBottom: '8px',
+      } as CSSStyleDeclaration);
+      banner.textContent = this.statusMessage;
+      this.bodyEl.appendChild(banner);
+      if (this.jobs.length === 0) {
+        return; // banner already explains the empty state
+      }
+      for (const job of this.jobs) {
+        this.bodyEl.appendChild(this.renderJobBlock(job));
+      }
       return;
     }
 

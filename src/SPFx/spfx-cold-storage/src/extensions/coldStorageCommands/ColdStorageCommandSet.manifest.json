@@ -10,12 +10,17 @@
   "items": {
     "COLDSTORAGE_MIGRATE": {
       "title": { "default": "Migrate to cold storage" },
-      "iconImageUrl": "icons/migrate.png",
+      "iconImageUrl": "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23323130' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M7 17a4 4 0 0 1-.83-7.92 6 6 0 0 1 11.66 0A4 4 0 0 1 17 17'/%3E%3Cpath d='M12 12v8m-3-5 3-3 3 3'/%3E%3C/svg%3E",
       "type": "command"
     },
     "COLDSTORAGE_RESTORE": {
       "title": { "default": "Restore from cold storage" },
-      "iconImageUrl": "icons/restore.png",
+      "iconImageUrl": "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23323130' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M7 17a4 4 0 0 1-.83-7.92 6 6 0 0 1 11.66 0A4 4 0 0 1 17 17'/%3E%3Cpath d='M12 20v-8m-3 5 3 3 3-3'/%3E%3C/svg%3E",
+      "type": "command"
+    },
+    "COLDSTORAGE_STATUS": {
+      "title": { "default": "Cold storage status" },
+      "iconImageUrl": "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23323130' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='6' y='4' width='12' height='16' rx='2'/%3E%3Cpath d='M9 4h6v3H9z'/%3E%3Cpath d='m9 13 2 2 4-4'/%3E%3C/svg%3E",
       "type": "command"
     }
   }

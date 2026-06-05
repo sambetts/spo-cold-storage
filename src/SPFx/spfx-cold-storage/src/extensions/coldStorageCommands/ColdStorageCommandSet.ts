@@ -42,13 +42,25 @@ export default class ColdStorageCommandSet extends BaseListViewCommandSet<IColdS
   public onListViewUpdated(event: IListViewCommandSetListViewUpdatedParameters): void {
     const migrate: Command = this.tryGetCommand('COLDSTORAGE_MIGRATE');
     const restore: Command = this.tryGetCommand('COLDSTORAGE_RESTORE');
+    const status:  Command = this.tryGetCommand('COLDSTORAGE_STATUS');
     const hasSelection = event.selectedRows.length > 0;
+    const allArePlaceholders = hasSelection
+      && event.selectedRows.every(r => (r.getValueByName('FileLeafRef') as string).endsWith('.url'));
+    const anyArePlaceholders = hasSelection
+      && event.selectedRows.some(r => (r.getValueByName('FileLeafRef') as string).endsWith('.url'));
+
     if (migrate) {
-      migrate.visible = hasSelection && !!this.apiClient;
+      // Hide for placeholder selections - migrating a .url back to cold storage is nonsensical
+      // and the API would either reject or create a confusing nested placeholder.
+      migrate.visible = hasSelection && !!this.apiClient && !anyArePlaceholders;
     }
     if (restore) {
-      restore.visible = hasSelection && !!this.apiClient
-        && event.selectedRows.every(r => (r.getValueByName('FileLeafRef') as string).endsWith('.url'));
+      // Restore only makes sense when EVERY selected row is a cold-storage placeholder.
+      restore.visible = hasSelection && !!this.apiClient && allArePlaceholders;
+    }
+    if (status) {
+      // Always available so users can review past / in-flight jobs without first picking a file.
+      status.visible = !!this.apiClient;
     }
   }
 
@@ -64,6 +76,8 @@ export default class ColdStorageCommandSet extends BaseListViewCommandSet<IColdS
       void this.runMigrate(event);
     } else if (event.itemId === 'COLDSTORAGE_RESTORE') {
       void this.runRestore(event);
+    } else if (event.itemId === 'COLDSTORAGE_STATUS') {
+      void this.runStatus();
     }
   }
 
@@ -178,13 +192,32 @@ export default class ColdStorageCommandSet extends BaseListViewCommandSet<IColdS
     }
   }
 
+  // ---- Status (browse jobs) ----
+
+  private async runStatus(): Promise<void> {
+    const client = this.apiClient;
+    if (!client) return;
+    const dialog = this.openDialog('Status');
+    const siteUrl = this.context.pageContext.site.absoluteUrl;
+    dialog.setStatusMessage('Loading recent cold-storage jobs for this site…');
+    try {
+      const jobs = await client.listRecentJobs(siteUrl, 20);
+      dialog.showJobList(jobs);
+    } catch (err) {
+      dialog.showError(this.describeError(err, 'Could not load cold-storage jobs'), () => this.runStatus());
+    }
+  }
+
   // ---- Helpers ----
 
-  private openDialog(operation: 'Migrate' | 'Restore'): MigrationProgressDialog {
+  private openDialog(operation: 'Migrate' | 'Restore' | 'Status'): MigrationProgressDialog {
     // Close any previous dialog so we never leak overlays / timers.
     this.activeDialog?.close();
     const dialog = new MigrationProgressDialog(this.apiClient!, operation);
-    dialog.open(operation === 'Migrate' ? 'Preparing migration…' : 'Preparing restore…');
+    const opening = operation === 'Migrate' ? 'Preparing migration…'
+                  : operation === 'Restore' ? 'Preparing restore…'
+                  : 'Loading recent jobs…';
+    dialog.open(opening);
     this.activeDialog = dialog;
     return dialog;
   }

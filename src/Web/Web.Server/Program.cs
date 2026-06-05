@@ -134,6 +134,13 @@ public class Program
 
         app.MapControllers();
 
+        // SPA fallback: anything that wasn't matched by static files or a controller
+        // route falls back to index.html so client-side router paths like
+        // /cold-storage/download/:itemId work on a cold navigation (placeholder
+        // .url file double-clicked from SharePoint). Without this, deep links
+        // return 404 because IIS can't find a physical file at that path.
+        app.MapFallbackToFile("index.html");
+
         app.Run();
     }
 }

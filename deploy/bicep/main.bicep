@@ -451,6 +451,7 @@ var roleIds = {
   KeyVaultSecretsUser:          '4633458b-17de-408a-b874-0445c86b69e6'
   KeyVaultCertificatesUser:     'db79e9a7-68ee-4b58-9aeb-b90e7c24fcba'
   StorageBlobDataContributor:   'ba92f5b4-2d11-453d-a403-e96b0029c9fe'
+  StorageBlobDelegator:         'db58b8e5-c6ad-4a2a-8342-4190687cbf4a'
   ServiceBusDataSender:         '69a216fc-b8fb-44d8-bc22-1f3c2cd27a39'
   ServiceBusDataReceiver:       '4f6d3b9b-027b-4f4c-9142-0e5a2a2247e0'
   SearchIndexDataContributor:   '8ebe5a00-799e-43f5-93ac-243d3dce84a7'
@@ -497,6 +498,20 @@ resource raWebStorage 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
     principalId: web.identity.principalId
     principalType: 'ServicePrincipal'
     roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', roleIds.StorageBlobDataContributor)
+  }
+}
+
+// Web App MSI → Storage Blob Delegator
+// Required to issue user-delegation SAS tokens for the placeholder-download endpoint
+// (Storage Blob Data Contributor does NOT include the generateUserDelegationKey/action,
+// only Owner and Delegator do).
+resource raWebStorageDelegator 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  scope: storage
+  name: guid(storage.id, web.id, roleIds.StorageBlobDelegator)
+  properties: {
+    principalId: web.identity.principalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', roleIds.StorageBlobDelegator)
   }
 }
 
