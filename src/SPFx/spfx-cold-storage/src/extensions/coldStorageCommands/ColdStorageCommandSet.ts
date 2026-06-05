@@ -95,7 +95,12 @@ export default class ColdStorageCommandSet extends BaseListViewCommandSet<IColdS
       serverRelativeUrl: row.getValueByName('FileRef') as string,
       itemKind: (row.getValueByName('FSObjType') as string) === '1' ? 'Folder' : 'File',
       fileSize: Number(row.getValueByName('File_x0020_Size')) || undefined,
-      lastModified: row.getValueByName('Modified') as string,
+      // SharePoint's `Modified` field comes back as a locale-formatted display
+      // string (e.g. "12/5/2025 10:29 AM"), not ISO 8601 - System.Text.Json on
+      // the server can't deserialize that into a DateTime?. Try to parse it
+      // into an ISO timestamp; if anything goes wrong just omit the field
+      // (the server treats lastModified as optional metadata anyway).
+      lastModified: ColdStorageCommandSet.tryParseIsoDate(row.getValueByName('Modified')),
     }));
 
     dialog.setStatusMessage(`Submitting migration for ${items.length} item${items.length === 1 ? '' : 's'} to container "${target.displayName ?? target.name}"…`);
@@ -208,5 +213,12 @@ export default class ColdStorageCommandSet extends BaseListViewCommandSet<IColdS
 
   private truncate(s: string, max: number): string {
     return s.length > max ? `${s.substring(0, max - 1)}…` : s;
+  }
+
+  private static tryParseIsoDate(value: unknown): string | undefined {
+    if (value === null || value === undefined || value === '') return undefined;
+    const s = typeof value === 'string' ? value : String(value);
+    const d = new Date(s);
+    return isNaN(d.getTime()) ? undefined : d.toISOString();
   }
 }

@@ -21,6 +21,9 @@ public class Program
             // ("Queued", "ColdStorageMigrationCompleted", …) so without this converter every status check on the
             // client silently mismatches.
             options.JsonSerializerOptions.Converters.Add(new System.Text.Json.Serialization.JsonStringEnumConverter());
+            // Tolerate non-ISO date strings on request bodies (e.g. SharePoint's
+            // locale-formatted Modified display value sent by SPFx). See class docs.
+            options.JsonSerializerOptions.Converters.Add(new Web.Server.Json.LenientNullableDateTimeConverter());
         });
 
         builder.Services.AddEndpointsApiExplorer();
