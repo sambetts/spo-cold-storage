@@ -547,7 +547,12 @@ function Invoke-Phase-Spfx {
             "$($p.naming.webApp).azurewebsites.net"
         }
         $apiBaseUrl = "https://$webHost"
-        $apiAppIdUri = "api://$($p.azureAd.clientId)/access_as_user"
+        # IMPORTANT: aadHttpClientFactory.getClient(resource) expects the AAD app's
+        # *identifierUri* (e.g. `api://<clientId>`) - NOT a scope URL like
+        # `api://<clientId>/access_as_user`. Passing the scope makes AAD reject the
+        # token request with AADSTS500011 / invalid_resource because there is no
+        # service principal whose identifierUris match that string.
+        $apiAppIdUri = "api://$($p.azureAd.clientId)"
         if (-not $p.azureAd.clientId -or $p.azureAd.clientId -eq '00000000-0000-0000-0000-000000000000') {
             throw 'azureAd.clientId is not set in params.json. Run -Phase AadApp first.'
         }
@@ -555,7 +560,7 @@ function Invoke-Phase-Spfx {
             -replace '\{\{APP_BASE_URL\}\}', $apiBaseUrl `
             -replace '\{\{APP_ID_URI\}\}',   $apiAppIdUri
         Set-Content -LiteralPath $elementsOut -Value $rendered -Encoding utf8
-        Write-Ok "Rendered elements.xml: apiBaseUrl=$apiBaseUrl"
+        Write-Ok "Rendered elements.xml: apiBaseUrl=$apiBaseUrl, apiAppIdUri=$apiAppIdUri"
     } else {
         Write-Warn2 "elements.xml.template not found; using elements.xml as-is."
     }
