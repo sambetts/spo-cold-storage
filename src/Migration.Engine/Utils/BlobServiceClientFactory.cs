@@ -4,68 +4,53 @@ using Entities.Configuration;
 
 namespace Migration.Engine.Utils;
 /// <summary>
-/// Factory for creating BlobServiceClient instances with appropriate authentication
+/// Factory for creating BlobServiceClient instances with appropriate authentication.
+///
+/// For production endpoints (https://*.blob.core.windows.net) uses
+/// <see cref="DefaultAzureCredential"/> so the same code works for the App
+/// Service Managed Identity, local CLI / VS auth, and any future workload
+/// identity. The previous implementation used <see cref="ClientSecretCredential"/>
+/// with the AAD app registration's clientId/secret which required granting that
+/// SP Storage RBAC on top of the MSI - and the workers ended up failing with
+/// AuthorizationPermissionMismatch when only the MSI had the role.
+///
+/// Connection strings that carry an AccountKey are still accepted: if no Config
+/// is supplied, the underlying SDK uses the key. Production deployments should
+/// prefer the RBAC path (config != null) over baking storage keys into the
+/// process.
 /// </summary>
 public static class BlobServiceClientFactory
 {
     /// <summary>
-    /// Creates a BlobServiceClient from a connection string, handling both production and development scenarios
+    /// Creates a BlobServiceClient from a connection string or a storage
+    /// endpoint URI.
     /// </summary>
-    /// <param name="connectionString">Azure Storage connection string or endpoint URI</param>
-    /// <param name="config">Application configuration (optional, used for production credentials)</param>
-    /// <returns>Configured BlobServiceClient</returns>
+    /// <param name="connectionString">Either an Azure Storage connection string, an https:// blob endpoint URI, or a UseDevelopmentStorage=true Azurite string.</param>
+    /// <param name="config">When supplied, forces RBAC via DefaultAzureCredential. When null, the connection string's embedded auth (e.g. AccountKey) is used directly.</param>
     public static BlobServiceClient Create(string connectionString, Config? config = null)
     {
-        // Check if this is a development storage connection string
         if (IsDevelopmentStorage(connectionString))
         {
-            // For development storage (Azurite), use the connection string directly without credentials
+            // Azurite / Storage Emulator: connection string carries the well-known dev key.
             return new BlobServiceClient(connectionString);
         }
 
-        // For production scenarios
-        if (connectionString.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+        if (config == null)
         {
-            // Connection string is already a URI endpoint
-            if (config == null)
-            {
-                throw new ArgumentException("Config is required for production storage endpoints", nameof(config));
-            }
-
-            var credential = new ClientSecretCredential(
-                config.AzureAdConfig.TenantId,
-                config.AzureAdConfig.ClientID,
-                config.AzureAdConfig.Secret,
-                new ClientSecretCredentialOptions
-                {
-                    AuthorityHost = AzureAuthorityHosts.AzurePublicCloud
-                });
-
-            return new BlobServiceClient(new Uri(connectionString), credential);
+            // No Config -> trust the connection string (must carry its own auth).
+            return connectionString.StartsWith("https://", StringComparison.OrdinalIgnoreCase)
+                ? throw new ArgumentException("A plain https:// endpoint requires a Config so we can attach a credential. Pass `config` explicitly.", nameof(connectionString))
+                : new BlobServiceClient(connectionString);
         }
 
-        // Parse connection string to extract endpoint and determine if it needs credentials
-        var endpoint = ExtractStorageEndpoint(connectionString);
+        // Production path: use Managed Identity (or the dev tool that DefaultAzureCredential
+        // resolves to locally). Extract the blob endpoint URI from whichever form the caller
+        // supplied so we don't accidentally hand the connection string's AccountKey to the SDK.
+        var endpoint = connectionString.StartsWith("https://", StringComparison.OrdinalIgnoreCase)
+            ? connectionString
+            : ExtractStorageEndpoint(connectionString);
 
-        if (config != null)
-        {
-            // Use credentials for production storage
-            var credential = new ClientSecretCredential(
-                config.AzureAdConfig.TenantId,
-                config.AzureAdConfig.ClientID,
-                config.AzureAdConfig.Secret,
-                new ClientSecretCredentialOptions
-                {
-                    AuthorityHost = AzureAuthorityHosts.AzurePublicCloud
-                });
-
-            return new BlobServiceClient(new Uri(endpoint), credential);
-        }
-        else
-        {
-            // If no config provided, assume connection string has all auth info
-            return new BlobServiceClient(connectionString);
-        }
+        return new BlobServiceClient(new Uri(endpoint), new DefaultAzureCredential());
     }
 
     /// <summary>

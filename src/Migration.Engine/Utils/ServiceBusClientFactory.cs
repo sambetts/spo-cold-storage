@@ -4,36 +4,38 @@ using Entities.Configuration;
 
 namespace Migration.Engine.Utils;
 /// <summary>
-/// Factory for creating ServiceBusClient instances with RBAC authentication
+/// Factory for creating ServiceBusClient instances with RBAC authentication.
+///
+/// Uses <see cref="DefaultAzureCredential"/> so the same code path works for:
+///   - Web.Server / WebJobs running on App Service -> picks up the system-
+///     assigned Managed Identity (which is granted Azure Service Bus Data
+///     Sender + Receiver by bicep).
+///   - Local development -> falls through to AzureCliCredential /
+///     VisualStudioCredential / EnvironmentCredential automatically.
+///
+/// The old implementation used <see cref="ClientSecretCredential"/> with the
+/// AAD app registration's clientId/secret, which required granting the AAD
+/// app SP Service Bus RBAC on top of the MSI - and in this deployment the
+/// SP was missing the role, producing "Send claim(s) are required" 401s.
 /// </summary>
 public static class ServiceBusClientFactory
 {
     /// <summary>
-    /// Creates a ServiceBusClient using RBAC authentication
+    /// Creates a ServiceBusClient using AAD RBAC.
     /// </summary>
-    /// <param name="serviceBusEndpoint">Azure Service Bus endpoint or connection string</param>
-    /// <param name="config">Application configuration for credentials</param>
-    /// <returns>Configured ServiceBusClient</returns>
+    /// <param name="serviceBusEndpoint">SAS connection string OR fully qualified namespace (e.g. <c>sb-X.servicebus.windows.net</c>).</param>
+    /// <param name="config">Application configuration. Reserved for future use; not currently required.</param>
     public static ServiceBusClient Create(string serviceBusEndpoint, Config config)
     {
-        if (config == null)
+        _ = config; // kept for source compat; auth no longer needs an AAD app secret
+
+        if (string.IsNullOrWhiteSpace(serviceBusEndpoint))
         {
-            throw new ArgumentException("Config is required for Service Bus RBAC authentication", nameof(config));
+            throw new ArgumentException("Service Bus endpoint / connection string is required.", nameof(serviceBusEndpoint));
         }
 
-        // Extract the fully qualified namespace from connection string or endpoint
         var fullyQualifiedNamespace = ExtractServiceBusNamespace(serviceBusEndpoint);
-
-        // Use RBAC with ClientSecretCredential
-        var credential = new ClientSecretCredential(
-            config.AzureAdConfig.TenantId,
-            config.AzureAdConfig.ClientID,
-            config.AzureAdConfig.Secret,
-            new ClientSecretCredentialOptions
-            {
-                AuthorityHost = AzureAuthorityHosts.AzurePublicCloud
-            });
-
+        var credential = new DefaultAzureCredential();
         return new ServiceBusClient(fullyQualifiedNamespace, credential);
     }
 
