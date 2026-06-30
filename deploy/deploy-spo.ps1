@@ -45,7 +45,7 @@
 
 .NOTES
     Requirements: PowerShell 7.2+, Azure CLI, PnP.PowerShell module (auto-installed),
-    Node.js >=18 <19 for the SPFx 1.19 build, gulp-cli.
+    Node.js 22 for the SPFx 1.22 build, gulp-cli.
 #>
 [CmdletBinding()]
 param(
@@ -156,14 +156,14 @@ function Invoke-Phase-Prereqs {
     Assert-Tool -Name 'Azure CLI' -Command 'az' -VersionArg 'version' -MinVersion '2.55'
     Assert-Tool -Name 'Node.js'   -Command 'node' -VersionArg '--version'
 
-    # Node 18.x is required for SPFx 1.19 — warn if mismatched (don't block; user may
-    # be using nvm-like shim that auto-switches per directory).
+    # Node 22 is required for SPFx 1.22 — warn if mismatched (don't block; user may
+    # be using an nvm-like shim that auto-switches per directory).
     $nodeVer = (& node --version).Trim().TrimStart('v')
     $majorNode = [int]($nodeVer -split '\.')[0]
-    if ($majorNode -ne 18) {
-        Write-Warn2 "Node $nodeVer detected; SPFx 1.19 requires Node 18.x. The Spfx phase may fail. Consider 'nvm use 18'."
+    if ($majorNode -ne 22) {
+        Write-Warn2 "Node $nodeVer detected; SPFx 1.22 requires Node 22.x. The Spfx phase may fail. Consider 'nvm use 22'."
     } else {
-        Write-Ok "Node $nodeVer (SPFx 1.19-compatible)."
+        Write-Ok "Node $nodeVer (SPFx 1.22-compatible)."
     }
 
     # PnP.PowerShell — auto-install in CurrentUser scope if missing
@@ -576,9 +576,9 @@ function Invoke-Phase-Spfx {
 npm install failed in $SpfxDir.
 
 This usually means the SPFx project pins package versions that no longer exist on the
-public npm registry (e.g. @microsoft/sp-* 1.19.0 was never released — npm jumps from
-1.18 to 1.20). Fix the package.json in src/SPFx/spfx-cold-storage/ to use a published
-SPFx version (current stable: 1.22.2) before re-running this phase.
+public npm registry. The project targets @microsoft/sp-* 1.22.2 (Node 22). Make sure
+package.json in src/SPFx/spfx-cold-storage/ references a published SPFx version before
+re-running this phase.
 
 Original error:
 $($_.Exception.Message)
