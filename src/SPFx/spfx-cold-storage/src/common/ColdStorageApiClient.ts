@@ -27,6 +27,7 @@ export enum MigrationLifecycleStatus {
   CompletedWithWarning = 'CompletedWithWarning',
   RetryScheduled = 'RetryScheduled',
   Cancelled = 'Cancelled',
+  Skipped = 'Skipped',
 }
 
 export type ColdStorageItemKind = 'File' | 'Folder';
@@ -66,6 +67,21 @@ export interface IStartRestoreRequest {
   conflictBehavior: ConflictBehavior;
 }
 
+export interface IStartBatchRestoreRequest {
+  siteUrl: string;
+  webUrl?: string;
+  placeholders: string[];
+  folderServerRelativeUrls: string[];
+  conflictBehavior: ConflictBehavior;
+}
+
+export interface IBatchRestoreResponse {
+  jobId: string;
+  status: MigrationLifecycleStatus;
+  accepted: number;
+  warnings: string[];
+}
+
 export interface IAcceptedJobResponse {
   jobId: string;
   status: MigrationLifecycleStatus;
@@ -80,6 +96,7 @@ export interface IJobItemStatus {
   status: MigrationLifecycleStatus;
   attempts: number;
   lastError?: string;
+  lastErrorDetail?: string;
   copiedAt?: string;
   sourceDeletedAt?: string;
   placeholderCreatedAt?: string;
@@ -134,6 +151,10 @@ export class ColdStorageApiClient {
 
   public async startRestore(request: IStartRestoreRequest): Promise<IAcceptedJobResponse> {
     return this.postJson<IAcceptedJobResponse>('/api/restores/start', request);
+  }
+
+  public async startBatchRestore(request: IStartBatchRestoreRequest): Promise<IBatchRestoreResponse> {
+    return this.postJson<IBatchRestoreResponse>('/api/restores/start-batch', request);
   }
 
   public async getJob(jobId: string): Promise<IJobStatusResponse> {

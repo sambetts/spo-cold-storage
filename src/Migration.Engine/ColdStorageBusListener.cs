@@ -26,6 +26,10 @@ public sealed class ColdStorageBusListener : BaseComponent
     private readonly ServiceBusProcessor _processor;
     private readonly ConcurrentDictionary<Guid, byte> _inFlightItems = new();
     private readonly ConcurrentDictionary<string, byte> _legacyInFlight = new(StringComparer.OrdinalIgnoreCase);
+    // Serialises concurrent restores of the SAME placeholder on this worker so a
+    // second in-flight restore can't double-upload (issue #10). Cross-process
+    // restores are additionally coalesced by the pipeline's DB status guard.
+    private readonly ConcurrentDictionary<string, byte> _inFlightRestorePlaceholders = new(StringComparer.OrdinalIgnoreCase);
 
     public ColdStorageBusListener(Config config, ILogger logger) : base(config, logger)
     {
@@ -89,9 +93,25 @@ public sealed class ColdStorageBusListener : BaseComponent
 
     private async Task ProcessEnvelopeAsync(ColdStorageBusEnvelope envelope, ProcessMessageEventArgs args)
     {
+        // Per-worker placeholder lock for restores: defer a second concurrent
+        // restore of the same placeholder so it can't run alongside the first.
+        var placeholderKey = envelope.Operation == MigrationOperationKind.Restore
+            ? envelope.RestoreTarget?.PlaceholderServerRelativeUrl
+            : null;
+        if (placeholderKey is not null && !_inFlightRestorePlaceholders.TryAdd(placeholderKey, 0))
+        {
+            _logger.LogWarning("Restore for placeholder '{Key}' already in flight on this worker; deferring message.", placeholderKey);
+            await args.AbandonMessageAsync(args.Message).ConfigureAwait(false);
+            return;
+        }
+
         if (!_inFlightItems.TryAdd(envelope.ItemId, 0))
         {
             _logger.LogWarning("Item {ItemId} already in flight on this worker; deferring message.", envelope.ItemId);
+            if (placeholderKey is not null)
+            {
+                _inFlightRestorePlaceholders.TryRemove(placeholderKey, out _);
+            }
             await args.AbandonMessageAsync(args.Message).ConfigureAwait(false);
             return;
         }
@@ -102,7 +122,16 @@ public sealed class ColdStorageBusListener : BaseComponent
             using var db = new SPOColdStorageDbContext(_config);
             var writer = new JobStatusWriter(db, _logger);
 
-            if (envelope.Operation == MigrationOperationKind.Migrate)
+            // Honour admin queue control (issue #16): if the item was cancelled or
+            // already finished after the message was enqueued, do no work and let
+            // the message complete.
+            var current = await writer.FindItemAsync(envelope.ItemId, args.CancellationToken).ConfigureAwait(false);
+            if (current is not null && current.Status.IsTerminal())
+            {
+                _logger.LogInformation("Item {ItemId} is already {Status} (e.g. admin-cancelled); skipping.", envelope.ItemId, current.Status);
+                success = true;
+            }
+            else if (envelope.Operation == MigrationOperationKind.Migrate)
             {
                 var pipeline = new ColdStorageMigratorPipeline(_config, _logger, writer);
                 var app = await AuthUtils.GetNewClientApp(_config).ConfigureAwait(false);
@@ -122,6 +151,10 @@ public sealed class ColdStorageBusListener : BaseComponent
         finally
         {
             _inFlightItems.TryRemove(envelope.ItemId, out _);
+            if (placeholderKey is not null)
+            {
+                _inFlightRestorePlaceholders.TryRemove(placeholderKey, out _);
+            }
         }
 
         if (success)

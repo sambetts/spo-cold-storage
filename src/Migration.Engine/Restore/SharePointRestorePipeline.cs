@@ -3,6 +3,7 @@ using Azure.Storage.Blobs;
 using Entities.Configuration;
 using Microsoft.Extensions.Logging;
 using Migration.Engine.Lifecycle;
+using Migration.Engine.Migration;
 using Migration.Engine.Utils;
 using Microsoft.SharePoint.Client;
 using Models.ColdStorage;
@@ -20,6 +21,8 @@ namespace Migration.Engine.Restore;
 public sealed class SharePointRestorePipeline : BaseComponent
 {
     private readonly IJobStatusWriter _statusWriter;
+    private readonly bool _deleteBlobAfterRestore;
+    private readonly VersionHistoryArchiver? _versionArchiver;
 
     public SharePointRestorePipeline(
         Config config,
@@ -27,6 +30,10 @@ public sealed class SharePointRestorePipeline : BaseComponent
         IJobStatusWriter statusWriter) : base(config, logger)
     {
         _statusWriter = statusWriter ?? throw new ArgumentNullException(nameof(statusWriter));
+        _deleteBlobAfterRestore = config.ColdStorageDeleteBlobAfterRestore > 0;
+        _versionArchiver = config.ColdStorageCaptureVersionHistory > 0
+            ? new VersionHistoryArchiver(config, logger)
+            : null;
     }
 
     public async Task<bool> ProcessAsync(ColdStorageBusEnvelope envelope, CancellationToken cancellationToken = default)
@@ -68,6 +75,19 @@ public sealed class SharePointRestorePipeline : BaseComponent
                 return false;
             }
 
+            // Concurrency guard (issue #10): if another item is already actively
+            // restoring this same placeholder, coalesce this duplicate (no-op) so we
+            // don't double-upload or fight over the destination. Checked before we
+            // claim RestoreInProgress to avoid two duplicates cancelling each other.
+            if (await _statusWriter.IsRestoreInFlightForOtherItemAsync(envelope.ItemId, target.PlaceholderServerRelativeUrl, cancellationToken).ConfigureAwait(false))
+            {
+                _logger.LogWarning("Another restore for '{Url}' is already in progress; coalescing this duplicate.", target.PlaceholderServerRelativeUrl);
+                await _statusWriter.TransitionAsync(envelope.ItemId, MigrationLifecycleStatus.Cancelled,
+                    "Coalesced: another restore for this placeholder is already in progress.",
+                    level: LogLevel.Warning, cancellationToken: cancellationToken);
+                return true;
+            }
+
             await _statusWriter.TransitionAsync(envelope.ItemId, MigrationLifecycleStatus.RestoreInProgress,
                 $"Downloading blob '{metadata.ContainerName}/{metadata.BlobPath}'.", cancellationToken: cancellationToken);
 
@@ -81,10 +101,20 @@ public sealed class SharePointRestorePipeline : BaseComponent
             var destinationFolder = GetParentFolder(destinationUrl);
 
             // Conflict handling per envelope.ConflictBehavior.
-            destinationUrl = await ResolveConflictAsync(spCtx, destinationUrl, envelope.ConflictBehavior, envelope.ItemId, cancellationToken).ConfigureAwait(false);
+            destinationUrl = await ResolveConflictAsync(spCtx, destinationUrl, envelope.ConflictBehavior, envelope.JobId, envelope.ItemId, cancellationToken).ConfigureAwait(false);
             if (destinationUrl is null)
             {
                 return false;
+            }
+
+            // Replay archived prior versions FIRST (oldest-first) so the current
+            // content uploaded next becomes the latest version, rebuilding history
+            // (issue #18). Best-effort; never fails the restore.
+            var replayedVersions = 0;
+            if (_versionArchiver is not null && metadata.VersionCount > 0)
+            {
+                replayedVersions = await _versionArchiver.ReplayAsync(
+                    spCtx, destinationUrl, metadata.BlobPath, metadata.ContainerName, cancellationToken).ConfigureAwait(false);
             }
 
             using (var fs = IOFile.OpenRead(tempFile))
@@ -97,7 +127,9 @@ public sealed class SharePointRestorePipeline : BaseComponent
                 {
                     ContentStream = fs,
                     Url = Path.GetFileName(destinationUrl),
-                    Overwrite = envelope.ConflictBehavior == ConflictBehavior.Overwrite,
+                    // Overwrite when explicitly requested, or when we just replayed
+                    // versions onto the destination (the current content is the latest).
+                    Overwrite = envelope.ConflictBehavior == ConflictBehavior.Overwrite || replayedVersions > 0,
                 };
                 var uploaded = folder.Files.Add(addInfo);
                 spCtx.Load(uploaded, f => f.ServerRelativeUrl);
@@ -110,6 +142,16 @@ public sealed class SharePointRestorePipeline : BaseComponent
             await _statusWriter.TransitionAsync(envelope.ItemId, MigrationLifecycleStatus.PostRestoreValidation,
                 "Verifying restored file in SharePoint.", cancellationToken: cancellationToken);
             await VerifyRestoredAsync(spCtx, destinationUrl, cancellationToken).ConfigureAwait(false);
+
+            // Verified post-restore cleanup (issue #4): only now that the restored
+            // file is confirmed present do we optionally delete the cold-storage
+            // blob, so the file never lives in both places. Mirrors the migrate
+            // invariant (never delete a copy until the other side is verified); a
+            // delete failure is logged but never fails the restore.
+            if (_deleteBlobAfterRestore)
+            {
+                await TryDeleteBlobAsync(envelope.JobId, envelope.ItemId, metadata.ContainerName, metadata.BlobPath, cancellationToken).ConfigureAwait(false);
+            }
 
             // Remove placeholder
             await _statusWriter.TransitionAsync(envelope.ItemId, MigrationLifecycleStatus.PlaceholderRemoving,
@@ -150,6 +192,123 @@ public sealed class SharePointRestorePipeline : BaseComponent
         }
     }
 
+    /// <summary>
+    /// Break-glass restore (issue #6): pushes a cold-storage blob straight back to
+    /// a target SharePoint location WITHOUT reading or requiring a placeholder and
+    /// WITHOUT going through the bus queue. For admins when normal self-service
+    /// restore can't run. Reuses the same download → conflict-resolve → upload →
+    /// verify steps as the queued path, with full lifecycle/audit logging.
+    /// </summary>
+    public async Task<bool> ForceRestoreFromBlobAsync(
+        Guid jobId,
+        Guid itemId,
+        string siteUrl,
+        string containerName,
+        string blobPath,
+        string targetServerRelativeUrl,
+        ConflictBehavior conflictBehavior,
+        string? placeholderServerRelativeUrl,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrEmpty(siteUrl) || string.IsNullOrEmpty(containerName)
+            || string.IsNullOrEmpty(blobPath) || string.IsNullOrEmpty(targetServerRelativeUrl))
+        {
+            throw new ArgumentException("siteUrl, containerName, blobPath and targetServerRelativeUrl are all required.");
+        }
+
+        await _statusWriter.TransitionAsync(itemId, MigrationLifecycleStatus.RestoreInProgress,
+            $"Break-glass restore of '{containerName}/{blobPath}' to '{targetServerRelativeUrl}'.", cancellationToken: cancellationToken);
+
+        ClientContext? spCtx = null;
+        string? tempFile = null;
+        try
+        {
+            spCtx = await AuthUtils.GetClientContext(_config, siteUrl, _logger, null).ConfigureAwait(false);
+
+            tempFile = Path.Combine(Path.GetTempPath(), "SpoColdStorageRestore", Guid.NewGuid().ToString("N") + ".bin");
+            Directory.CreateDirectory(Path.GetDirectoryName(tempFile)!);
+            await DownloadBlobToTempAsync(containerName, blobPath, tempFile, cancellationToken).ConfigureAwait(false);
+
+            var destinationFolder = GetParentFolder(targetServerRelativeUrl);
+            var destinationUrl = await ResolveConflictAsync(spCtx, targetServerRelativeUrl, conflictBehavior, jobId, itemId, cancellationToken).ConfigureAwait(false);
+            if (destinationUrl is null)
+            {
+                return false; // ResolveConflictAsync already transitioned to RestoreFailed
+            }
+
+            using (var fs = IOFile.OpenRead(tempFile))
+            {
+                var folder = spCtx.Web.GetFolderByServerRelativeUrl(destinationFolder);
+                spCtx.Load(folder);
+                await spCtx.ExecuteQueryAsync().ConfigureAwait(false);
+
+                var addInfo = new FileCreationInformation
+                {
+                    ContentStream = fs,
+                    Url = Path.GetFileName(destinationUrl),
+                    Overwrite = conflictBehavior == ConflictBehavior.Overwrite,
+                };
+                var uploaded = folder.Files.Add(addInfo);
+                spCtx.Load(uploaded, f => f.ServerRelativeUrl);
+                await spCtx.ExecuteQueryAsync().ConfigureAwait(false);
+                destinationUrl = uploaded.ServerRelativeUrl;
+            }
+
+            await _statusWriter.RecordRestoredAsync(itemId, destinationUrl, cancellationToken);
+            await _statusWriter.TransitionAsync(itemId, MigrationLifecycleStatus.PostRestoreValidation,
+                "Verifying restored file in SharePoint.", cancellationToken: cancellationToken);
+            await VerifyRestoredAsync(spCtx, destinationUrl, cancellationToken).ConfigureAwait(false);
+
+            if (_deleteBlobAfterRestore)
+            {
+                await TryDeleteBlobAsync(jobId, itemId, containerName, blobPath, cancellationToken).ConfigureAwait(false);
+            }
+
+            if (!string.IsNullOrEmpty(placeholderServerRelativeUrl))
+            {
+                await TryRemovePlaceholderAsync(spCtx, placeholderServerRelativeUrl, cancellationToken).ConfigureAwait(false);
+            }
+
+            await _statusWriter.TransitionAsync(itemId, MigrationLifecycleStatus.RestoreCompleted,
+                "Break-glass restore completed.", cancellationToken: cancellationToken);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Break-glass restore failed for '{Container}/{Path}'.", containerName, blobPath);
+            await _statusWriter.TransitionAsync(itemId, MigrationLifecycleStatus.RestoreFailed,
+                $"Break-glass restore failed: {ex.Message}", exception: ex, level: LogLevel.Error, cancellationToken: cancellationToken);
+            return false;
+        }
+        finally
+        {
+            spCtx?.Dispose();
+            if (tempFile is not null)
+            {
+                try { IOFile.Delete(tempFile); } catch (IOException ex) { _logger.LogDebug(ex, "Temp delete failed."); }
+            }
+        }
+    }
+
+    private async Task TryRemovePlaceholderAsync(ClientContext ctx, string placeholderServerRelativeUrl, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var ph = ctx.Web.GetFileByServerRelativeUrl(placeholderServerRelativeUrl);
+            ctx.Load(ph, f => f.Exists);
+            await ctx.ExecuteQueryAsync().ConfigureAwait(false);
+            if (ph.Exists)
+            {
+                ph.DeleteObject();
+                await ctx.ExecuteQueryAsync().ConfigureAwait(false);
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "Break-glass restore: could not remove placeholder '{Url}'.", placeholderServerRelativeUrl);
+        }
+    }
+
     private static async Task<string> ReadFileContentAsStringAsync(ClientContext ctx, Microsoft.SharePoint.Client.File spFile, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
@@ -177,6 +336,39 @@ public sealed class SharePointRestorePipeline : BaseComponent
     }
 
     /// <summary>
+    /// Deletes the cold-storage blob after a verified restore (issue #4).
+    /// Best-effort: a failure is logged + audited but never fails the restore,
+    /// since the file is already safely back in SharePoint and a leftover blob is
+    /// only a cost concern (the orphan-reconciliation job will catch it).
+    /// </summary>
+    private async Task TryDeleteBlobAsync(Guid jobId, Guid itemId, string containerName, string blobPath, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var serviceClient = BlobServiceClientFactory.Create(_config.ConnectionStrings.Storage, _config);
+            var blob = serviceClient.GetBlobContainerClient(containerName).GetBlobClient(blobPath);
+            var deleted = await blob.DeleteIfExistsAsync(cancellationToken: cancellationToken).ConfigureAwait(false);
+
+            _logger.LogInformation("Post-restore cleanup: blob '{Container}/{Path}' {Outcome}.",
+                containerName, blobPath, deleted.Value ? "deleted" : "already absent");
+            await _statusWriter.LogAsync(jobId, itemId, MigrationLifecycleStatus.RestoreCompleted,
+                LogLevel.Information,
+                deleted.Value
+                    ? $"Cold-storage blob '{containerName}/{blobPath}' deleted after verified restore."
+                    : $"Cold-storage blob '{containerName}/{blobPath}' was already absent at cleanup.",
+                null, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "Post-restore blob cleanup failed for '{Container}/{Path}'; leaving blob in place.", containerName, blobPath);
+            await _statusWriter.LogAsync(jobId, itemId, MigrationLifecycleStatus.PostRestoreValidation,
+                LogLevel.Warning,
+                $"Post-restore blob cleanup failed for '{containerName}/{blobPath}': {ex.Message}",
+                ex, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
     /// Conflict handling for restore. Returns the chosen destination URL or
     /// null when the caller asked to fail and a conflict exists.
     /// </summary>
@@ -184,6 +376,7 @@ public sealed class SharePointRestorePipeline : BaseComponent
         ClientContext ctx,
         string destinationUrl,
         ConflictBehavior behavior,
+        Guid jobId,
         Guid itemId,
         CancellationToken cancellationToken)
     {
@@ -209,7 +402,7 @@ public sealed class SharePointRestorePipeline : BaseComponent
                 return destinationUrl;
             case ConflictBehavior.Rename:
                 var renamed = RenameToAvoidConflict(destinationUrl);
-                await _statusWriter.LogAsync(Guid.Empty, itemId, MigrationLifecycleStatus.RestoreInProgress,
+                await _statusWriter.LogAsync(jobId, itemId, MigrationLifecycleStatus.RestoreInProgress,
                     LogLevel.Information, $"Conflict at '{destinationUrl}', restoring as '{renamed}'.", null, cancellationToken);
                 return renamed;
             default:

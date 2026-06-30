@@ -52,5 +52,28 @@ public interface IJobStatusWriter
 
     Task RecordSourceDeletedAsync(Guid itemId, CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// Persists the original author/editor/timestamps captured from the source
+    /// SharePoint item at migration time, so they survive the source delete and
+    /// can be surfaced on the placeholder and after a restore.
+    /// </summary>
+    Task RecordSourceMetadataAsync(
+        Guid itemId,
+        string? originalCreatedBy,
+        string? originalModifiedBy,
+        DateTime? originalCreated,
+        DateTime? originalModified,
+        CancellationToken cancellationToken = default);
+
     Task RecordRestoredAsync(Guid itemId, string restoredServerRelativeUrl, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// True if a DIFFERENT item is already actively restoring the same placeholder
+    /// (cross-process concurrency guard for issue #10). Excludes <paramref name="itemId"/>
+    /// itself.
+    /// </summary>
+    Task<bool> IsRestoreInFlightForOtherItemAsync(
+        Guid itemId,
+        string placeholderServerRelativeUrl,
+        CancellationToken cancellationToken = default);
 }

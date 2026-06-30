@@ -29,6 +29,13 @@ public enum MigrationLifecycleStatus
     CompletedWithWarning = 60,
     RetryScheduled = 70,
     Cancelled = 80,
+
+    /// <summary>
+    /// The item was deliberately not archived because it failed an eligibility
+    /// rule (too small, excluded file type, excluded scope, under legal hold,
+    /// still actively read, ...). Terminal and the source is always left intact.
+    /// </summary>
+    Skipped = 81,
 }
 
 public static class MigrationLifecycleStatusExtensions
@@ -49,6 +56,22 @@ public static class MigrationLifecycleStatusExtensions
         MigrationLifecycleStatus.PlaceholderRemoveFailed => true,
         MigrationLifecycleStatus.CompletedWithWarning => true,
         MigrationLifecycleStatus.Cancelled => true,
+        MigrationLifecycleStatus.Skipped => true,
+        _ => false,
+    };
+
+    /// <summary>
+    /// True for the statuses where a restore has actively claimed an item and is
+    /// working on it (past the Queued stage, before a terminal state). Used by the
+    /// concurrency guard to detect a second restore of the same placeholder
+    /// (issue #10).
+    /// </summary>
+    public static bool IsActiveRestore(this MigrationLifecycleStatus status) => status switch
+    {
+        MigrationLifecycleStatus.RestoreInProgress => true,
+        MigrationLifecycleStatus.RestoredToSharePoint => true,
+        MigrationLifecycleStatus.PostRestoreValidation => true,
+        MigrationLifecycleStatus.PlaceholderRemoving => true,
         _ => false,
     };
 

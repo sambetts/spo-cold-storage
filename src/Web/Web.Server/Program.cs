@@ -87,6 +87,18 @@ public class Program
         // Cold-storage services backing the new SPFx-facing API surface.
         builder.Services.AddScoped<ISiteOwnerAuthorizationService, SiteOwnerAuthorizationService>();
         builder.Services.AddScoped<IContainerAccessService, ContainerAccessService>();
+        builder.Services.AddScoped<IColdStorageAdminAuthorizationService, ColdStorageAdminAuthorizationService>();
+        builder.Services.AddSingleton<IPreArchiveNotifier, LoggingPreArchiveNotifier>();
+        builder.Services.AddScoped<PreArchiveNoticeService>();
+        builder.Services.AddSingleton<Migration.Engine.Migration.IArchiveExclusionSource>(sp =>
+            new Migration.Engine.Migration.DbArchiveExclusionSource(
+                sp.GetRequiredService<Config>(),
+                sp.GetRequiredService<ILoggerFactory>().CreateLogger("ArchiveExclusions")));
+        builder.Services.AddSingleton<Migration.Engine.Migration.IFileReadActivitySource>(sp =>
+            new Migration.Engine.Migration.DbFileReadActivitySource(
+                sp.GetRequiredService<Config>(),
+                sp.GetRequiredService<ILoggerFactory>().CreateLogger("ArchiveReadActivity")));
+        builder.Services.AddSingleton<Migration.Engine.Migration.IArchiveEligibilityEvaluator, Migration.Engine.Migration.ArchiveEligibilityEvaluator>();
         builder.Services.AddSingleton<IColdStorageBusPublisher, ColdStorageBusPublisher>();
 
         var app = builder.Build();

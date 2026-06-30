@@ -16,12 +16,29 @@ public sealed class PlaceholderFileMetadata
     public string OriginalFileName { get; set; } = string.Empty;
     public long OriginalFileSize { get; set; }
     public DateTime OriginalLastModified { get; set; } = DateTime.MinValue;
+
+    /// <summary>Display name of the original file's author (Created By).</summary>
+    public string OriginalCreatedBy { get; set; } = string.Empty;
+
+    /// <summary>Display name of the last person to edit the file (Modified By).</summary>
+    public string OriginalModifiedBy { get; set; } = string.Empty;
+
+    /// <summary>Original created timestamp of the source file.</summary>
+    public DateTime OriginalCreated { get; set; } = DateTime.MinValue;
     public string ContainerName { get; set; } = string.Empty;
     public string BlobPath { get; set; } = string.Empty;
     public string BlobUrl { get; set; } = string.Empty;
     public string ContentMd5Base64 { get; set; } = string.Empty;
     public DateTime MigratedAt { get; set; } = DateTime.MinValue;
     public Guid JobId { get; set; } = Guid.Empty;
+
+    /// <summary>
+    /// Number of prior versions archived alongside the current content (issue
+    /// #18). 0 means only the current version was archived. The version blobs +
+    /// manifest live under <see cref="VersionBlobLayout"/> keys derived from
+    /// <see cref="BlobPath"/>.
+    /// </summary>
+    public int VersionCount { get; set; }
 
     private const string InternetShortcutSection = "InternetShortcut";
     private const string ColdStorageSection = "ColdStorage";
@@ -58,8 +75,12 @@ public sealed class PlaceholderFileMetadata
         AppendKv(sb, nameof(OriginalFileName), OriginalFileName);
         AppendKv(sb, nameof(OriginalFileSize), OriginalFileSize.ToString(CultureInfo.InvariantCulture));
         AppendKv(sb, nameof(OriginalLastModified), OriginalLastModified.ToString("O", CultureInfo.InvariantCulture));
+        AppendKv(sb, nameof(OriginalCreatedBy), OriginalCreatedBy);
+        AppendKv(sb, nameof(OriginalModifiedBy), OriginalModifiedBy);
+        AppendKv(sb, nameof(OriginalCreated), OriginalCreated.ToString("O", CultureInfo.InvariantCulture));
         AppendKv(sb, nameof(ContentMd5Base64), ContentMd5Base64);
         AppendKv(sb, nameof(MigratedAt), MigratedAt.ToString("O", CultureInfo.InvariantCulture));
+        AppendKv(sb, nameof(VersionCount), VersionCount.ToString(CultureInfo.InvariantCulture));
         return sb.ToString();
     }
 
@@ -91,6 +112,8 @@ public sealed class PlaceholderFileMetadata
             OriginalWebUrl = meta.GetValueOrDefault(nameof(OriginalWebUrl), string.Empty),
             OriginalServerRelativeUrl = meta.GetValueOrDefault(nameof(OriginalServerRelativeUrl), string.Empty),
             OriginalFileName = meta.GetValueOrDefault(nameof(OriginalFileName), string.Empty),
+            OriginalCreatedBy = meta.GetValueOrDefault(nameof(OriginalCreatedBy), string.Empty),
+            OriginalModifiedBy = meta.GetValueOrDefault(nameof(OriginalModifiedBy), string.Empty),
             ContentMd5Base64 = meta.GetValueOrDefault(nameof(ContentMd5Base64), string.Empty),
         };
 
@@ -112,10 +135,22 @@ public sealed class PlaceholderFileMetadata
             result.OriginalLastModified = lm;
         }
 
+        if (meta.TryGetValue(nameof(OriginalCreated), out var createdRaw)
+            && DateTime.TryParse(createdRaw, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var created))
+        {
+            result.OriginalCreated = created;
+        }
+
         if (meta.TryGetValue(nameof(MigratedAt), out var migratedRaw)
             && DateTime.TryParse(migratedRaw, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var migrated))
         {
             result.MigratedAt = migrated;
+        }
+
+        if (meta.TryGetValue(nameof(VersionCount), out var vcRaw)
+            && int.TryParse(vcRaw, NumberStyles.Integer, CultureInfo.InvariantCulture, out var vc))
+        {
+            result.VersionCount = vc;
         }
 
         if (string.IsNullOrEmpty(result.ContainerName)

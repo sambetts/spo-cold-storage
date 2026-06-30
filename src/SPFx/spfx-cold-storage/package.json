@@ -4,7 +4,7 @@
   "private": true,
   "description": "SharePoint Framework solution for SPO Cold Storage. Adds a ListView Command Set with Migrate / Restore commands plus a status field customizer for the cold storage lifecycle column.",
   "engines": {
-    "node": ">=18.17.1 <21.0.0"
+    "node": ">=22.14.0 <23.0.0"
   },
   "main": "lib/index.js",
   "scripts": {

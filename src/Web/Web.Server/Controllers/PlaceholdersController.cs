@@ -6,6 +6,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using Migration.Engine.Utils;
 using Models.ColdStorage;
+using Web.Authorization;
 using Web.Models.Api;
 using Web.Services;
 
@@ -92,6 +93,9 @@ public class PlaceholdersController(
             OriginalFileName = System.IO.Path.GetFileName(item.SpServerRelativeUrl),
             OriginalFileSize = item.FileSize,
             OriginalLastModified = item.SourceLastModified ?? DateTime.MinValue,
+            OriginalCreatedBy = item.OriginalCreatedBy,
+            OriginalModifiedBy = item.OriginalModifiedBy,
+            OriginalCreated = item.OriginalCreated,
             MigratedAt = item.CopiedAt ?? DateTime.MinValue,
             JobId = item.JobId,
             CurrentStatus = item.Status,
@@ -208,6 +212,19 @@ public class PlaceholdersController(
             _logger.LogInformation(
                 "Issued {Mins}m download SAS for item {ItemId} ({Path}) to {Upn}.",
                 (int)(expiresOn - DateTimeOffset.UtcNow).TotalMinutes, item.ItemId, item.SpServerRelativeUrl, User.Identity?.Name ?? "(unknown)");
+
+            // Audit trail (issue #13): persist who downloaded what, and when.
+            _db.MigrationJobLogs.Add(new Entities.DBEntities.ColdStorage.MigrationJobLog
+            {
+                JobId = item.JobId,
+                ItemId = item.ItemId,
+                Status = item.Status,
+                Level = (int)LogLevel.Information,
+                Message = $"Download link issued for '{item.SpServerRelativeUrl}'.",
+                ActorUpn = User.GetUpn(),
+                Action = "Download",
+            });
+            await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
 
             return new DownloadUrlResponse
             {

@@ -20,6 +20,7 @@ public class MigrationLifecycleStatusTests
     [InlineData(MigrationLifecycleStatus.PlaceholderRemoveFailed, true)]
     [InlineData(MigrationLifecycleStatus.Cancelled, true)]
     [InlineData(MigrationLifecycleStatus.CompletedWithWarning, true)]
+    [InlineData(MigrationLifecycleStatus.Skipped, true)]
     [InlineData(MigrationLifecycleStatus.Queued, false)]
     [InlineData(MigrationLifecycleStatus.Validating, false)]
     [InlineData(MigrationLifecycleStatus.MigrationInProgress, false)]
@@ -47,8 +48,21 @@ public class MigrationLifecycleStatusTests
     [InlineData(MigrationLifecycleStatus.PostCopyValidation, false)]
     [InlineData(MigrationLifecycleStatus.CopyToColdStorageFailed, false)]
     [InlineData(MigrationLifecycleStatus.ValidationFailed, false)]
+    [InlineData(MigrationLifecycleStatus.Skipped, false)]
     public void SourceDeleteAllowed_OnlyAfterCopySuccessVerified(MigrationLifecycleStatus status, bool expected)
         => Assert.Equal(expected, status.SourceDeleteAllowed());
+
+    [Theory]
+    [InlineData(MigrationLifecycleStatus.RestoreInProgress, true)]
+    [InlineData(MigrationLifecycleStatus.RestoredToSharePoint, true)]
+    [InlineData(MigrationLifecycleStatus.PostRestoreValidation, true)]
+    [InlineData(MigrationLifecycleStatus.PlaceholderRemoving, true)]
+    [InlineData(MigrationLifecycleStatus.Queued, false)]
+    [InlineData(MigrationLifecycleStatus.RestoreCompleted, false)]
+    [InlineData(MigrationLifecycleStatus.RestoreFailed, false)]
+    [InlineData(MigrationLifecycleStatus.MigrationInProgress, false)]
+    public void IsActiveRestore_OnlyForInFlightRestoreStates(MigrationLifecycleStatus status, bool expected)
+        => Assert.Equal(expected, status.IsActiveRestore());
 
     /// <summary>
     /// Hard guarantee from requirements.md: if any step before delete failed

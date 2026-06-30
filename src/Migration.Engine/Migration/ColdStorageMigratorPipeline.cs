@@ -26,6 +26,9 @@ public sealed class ColdStorageMigratorPipeline : BaseComponent
     private readonly IJobStatusWriter _statusWriter;
     private readonly SharePointPlaceholderWriter _placeholderWriter;
     private readonly BlobStorageUploader _blobUploader;
+    private readonly IArchiveEligibilityEvaluator _eligibility;
+    private readonly IArchiveHoldDetector? _holdDetector;
+    private readonly VersionHistoryArchiver? _versionArchiver;
 
     public ColdStorageMigratorPipeline(
         Config config,
@@ -35,6 +38,17 @@ public sealed class ColdStorageMigratorPipeline : BaseComponent
         _statusWriter = statusWriter ?? throw new ArgumentNullException(nameof(statusWriter));
         _placeholderWriter = new SharePointPlaceholderWriter(logger);
         _blobUploader = new BlobStorageUploader(config, logger);
+        _eligibility = new ArchiveEligibilityEvaluator(
+            config,
+            new DbArchiveExclusionSource(config, logger),
+            new DbFileReadActivitySource(config, logger));
+        // Only stand up the (per-item, CSOM round-trip) hold detector when enabled.
+        _holdDetector = config.ColdStorageSkipRetentionLabeled > 0
+            ? new RetentionLabelHoldDetector(logger)
+            : null;
+        _versionArchiver = config.ColdStorageCaptureVersionHistory > 0
+            ? new VersionHistoryArchiver(config, logger)
+            : null;
     }
 
     /// <summary>
@@ -68,12 +82,54 @@ public sealed class ColdStorageMigratorPipeline : BaseComponent
             return false;
         }
 
+        // --- Eligibility gate (issue #2) ----------------------------------
+        // Authoritative choke point: even if an ineligible item slips past the
+        // submit-time filter, it is never copied/deleted here. Skipped is a
+        // terminal, source-intact outcome (handled, so the message completes).
+        var eligibility = await _eligibility.EvaluateAsync(new ArchiveCandidate
+        {
+            ServerRelativeUrl = file.ServerRelativeFilePath,
+            SiteUrl = file.SiteUrl,
+            WebUrl = file.WebUrl,
+            FileSizeBytes = file.FileSize,
+            LastModified = file.LastModified,
+            DriveId = file.DriveId,
+            GraphItemId = file.GraphItemId,
+        }, cancellationToken).ConfigureAwait(false);
+        if (!eligibility.IsEligible)
+        {
+            _logger.LogInformation("Skipping '{Url}': {Reason}", file.FullSharePointUrl, eligibility.SkipReason);
+            await _statusWriter.TransitionAsync(envelope.ItemId, MigrationLifecycleStatus.Skipped,
+                $"Skipped: {eligibility.SkipReason}", level: LogLevel.Information, cancellationToken: cancellationToken);
+            return true;
+        }
+
+        // --- Compliance-hold gate (issue #15) -----------------------------
+        // Never copy content under a retention/legal-hold label out to Azure.
+        // Runs before any download so held content never leaves SharePoint.
+        if (_holdDetector is not null)
+        {
+            using var holdCtx = await AuthUtils.GetClientContext(_config, file.SiteUrl, _logger, null).ConfigureAwait(false);
+            var hold = await _holdDetector.CheckAsync(holdCtx, file.ServerRelativeFilePath, cancellationToken).ConfigureAwait(false);
+            if (hold.IsOnHold)
+            {
+                _logger.LogInformation("Skipping '{Url}': {Reason}", file.FullSharePointUrl, hold.Reason);
+                await _statusWriter.TransitionAsync(envelope.ItemId, MigrationLifecycleStatus.Skipped,
+                    $"Skipped: {hold.Reason}", level: LogLevel.Information, cancellationToken: cancellationToken);
+                return true;
+            }
+        }
+
         // --- MigrationInProgress: download + upload -----------------------
         await _statusWriter.TransitionAsync(envelope.ItemId, MigrationLifecycleStatus.MigrationInProgress,
             "Starting download from SharePoint.", cancellationToken: cancellationToken);
 
         var blobContainerName = envelope.ContainerName;
-        var blobPath = file.ServerRelativeFilePath.TrimStart('/');
+        // Collision-safe key: encode the SharePoint host (tenant) + server-relative
+        // path so same-named files in different sites/tenants never overwrite each
+        // other in cold storage. The key is persisted on the item + placeholder and
+        // read back verbatim at restore time, so this stays backward compatible.
+        var blobPath = ColdStorageBlobKey.Build(file.SiteUrl, file.ServerRelativeFilePath);
         string? tempFile = null;
         long size;
         string md5Base64;
@@ -125,6 +181,14 @@ public sealed class ColdStorageMigratorPipeline : BaseComponent
         await _statusWriter.TransitionAsync(envelope.ItemId, MigrationLifecycleStatus.DeletePending,
             "Removing source file from SharePoint.", cancellationToken: cancellationToken);
 
+        // Original authorship captured from the live item before it is deleted so
+        // it survives onto the placeholder + restore (issue #1).
+        string? originalCreatedBy = null;
+        string? originalModifiedBy = null;
+        DateTime? originalCreated = null;
+        DateTime? originalModified = null;
+        var capturedVersionCount = 0;
+
         ClientContext? spCtx = null;
         try
         {
@@ -139,6 +203,16 @@ public sealed class ColdStorageMigratorPipeline : BaseComponent
             }
             else
             {
+                CaptureSourceAuthorship(spFile, ref originalCreatedBy, ref originalModifiedBy, ref originalCreated, ref originalModified);
+
+                // Capture prior version history to cold storage BEFORE the source
+                // is deleted (issue #18). Best-effort; never fails the migration.
+                if (_versionArchiver is not null)
+                {
+                    capturedVersionCount = await _versionArchiver.CaptureAsync(
+                        spCtx, file.ServerRelativeFilePath, blobPath, blobContainerName, cancellationToken).ConfigureAwait(false);
+                }
+
                 if (spFile.CheckOutType != CheckOutType.None)
                 {
                     await _statusWriter.TransitionAsync(envelope.ItemId, MigrationLifecycleStatus.DeleteFailed,
@@ -149,6 +223,7 @@ public sealed class ColdStorageMigratorPipeline : BaseComponent
                 spFile.DeleteObject();
                 await spCtx.ExecuteQueryAsync().ConfigureAwait(false);
             }
+            await _statusWriter.RecordSourceMetadataAsync(envelope.ItemId, originalCreatedBy, originalModifiedBy, originalCreated, originalModified, cancellationToken);
             await _statusWriter.RecordSourceDeletedAsync(envelope.ItemId, cancellationToken);
         }
         catch (Exception ex)
@@ -170,13 +245,17 @@ public sealed class ColdStorageMigratorPipeline : BaseComponent
                 OriginalServerRelativeUrl = file.ServerRelativeFilePath,
                 OriginalFileName = Path.GetFileName(file.ServerRelativeFilePath),
                 OriginalFileSize = size,
-                OriginalLastModified = file.LastModified,
+                OriginalLastModified = originalModified ?? file.LastModified,
+                OriginalCreatedBy = originalCreatedBy ?? string.Empty,
+                OriginalModifiedBy = originalModifiedBy ?? string.Empty,
+                OriginalCreated = originalCreated ?? (file.CreatedDate ?? DateTime.MinValue),
                 ContainerName = blobContainerName,
                 BlobPath = blobPath,
                 BlobUrl = blobUrl,
                 ContentMd5Base64 = md5Base64,
                 MigratedAt = DateTime.UtcNow,
                 JobId = envelope.JobId,
+                VersionCount = capturedVersionCount,
             };
 
             var placeholderUrl = await _placeholderWriter.WritePlaceholderAsync(
@@ -187,6 +266,10 @@ public sealed class ColdStorageMigratorPipeline : BaseComponent
                 // redirect to a short-lived blob SAS so end users get a working download
                 // even when storage public network access is locked down by policy.
                 userFacingUrl: BuildPlaceholderUserFacingUrl(envelope.ItemId)).ConfigureAwait(false);
+
+            // Best-effort: stamp the original authorship onto visible placeholder
+            // columns so the audit trail isn't lost (issue #1). Never fails the migration.
+            await _placeholderWriter.StampOriginalMetadataAsync(spCtx!, placeholderUrl, metadata, cancellationToken).ConfigureAwait(false);
 
             await _statusWriter.RecordPlaceholderCreatedAsync(envelope.ItemId, placeholderUrl, cancellationToken);
             return true;
@@ -209,6 +292,43 @@ public sealed class ColdStorageMigratorPipeline : BaseComponent
     {
         var serviceClient = BlobServiceClientFactory.Create(_config.ConnectionStrings.Storage, _config);
         return serviceClient.GetBlobContainerClient(containerName);
+    }
+
+    /// <summary>
+    /// Reads the original Created By / Modified By / Created / Modified values
+    /// from the live list item before it is deleted. Best-effort: any read
+    /// failure leaves the out values null and is ignored, so capturing the
+    /// authorship trail can never block a migration.
+    /// </summary>
+    private static void CaptureSourceAuthorship(
+        Microsoft.SharePoint.Client.File spFile,
+        ref string? createdBy,
+        ref string? modifiedBy,
+        ref DateTime? created,
+        ref DateTime? modified)
+    {
+        try
+        {
+            var li = spFile.ListItemAllFields;
+            if (li is null)
+            {
+                return;
+            }
+            createdBy = (li["Author"] as FieldUserValue)?.LookupValue;
+            modifiedBy = (li["Editor"] as FieldUserValue)?.LookupValue;
+            if (li["Created"] is DateTime c)
+            {
+                created = c;
+            }
+            if (li["Modified"] is DateTime m)
+            {
+                modified = m;
+            }
+        }
+        catch (Exception)
+        {
+            // Best-effort capture; never block the migration on a metadata read.
+        }
     }
 
     /// <summary>

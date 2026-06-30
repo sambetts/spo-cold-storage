@@ -57,7 +57,14 @@ public sealed class JobStatusWriter(SPOColdStorageDbContext db, ILogger logger) 
 
         if (exception != null)
         {
-            item.LastError = Truncate(exception.Message, 2048);
+            item.LastError = Truncate(FriendlyErrorMapper.ToFriendly(exception, newStatus), 2048);
+            item.LastErrorDetail = Truncate(exception.ToString(), 8000);
+        }
+        else if (IsFailure(newStatus))
+        {
+            // No exception, but a failure/skip message — still show a friendly summary.
+            item.LastError = Truncate(FriendlyErrorMapper.ToFriendly(message, newStatus), 2048);
+            item.LastErrorDetail = Truncate(message, 8000);
         }
 
         await WriteLogAsync(item.JobId, item.ItemId, newStatus, level, message, exception, cancellationToken);
@@ -145,6 +152,31 @@ public sealed class JobStatusWriter(SPOColdStorageDbContext db, ILogger logger) 
     }
 
     /// <inheritdoc />
+    public async Task RecordSourceMetadataAsync(
+        Guid itemId,
+        string? originalCreatedBy,
+        string? originalModifiedBy,
+        DateTime? originalCreated,
+        DateTime? originalModified,
+        CancellationToken cancellationToken = default)
+    {
+        var item = await _db.MigrationJobItems.FirstOrDefaultAsync(i => i.ItemId == itemId, cancellationToken);
+        if (item == null)
+        {
+            return;
+        }
+        item.OriginalCreatedBy = originalCreatedBy is null ? null : Truncate(originalCreatedBy, 256);
+        item.OriginalModifiedBy = originalModifiedBy is null ? null : Truncate(originalModifiedBy, 256);
+        item.OriginalCreated = originalCreated;
+        if (originalModified.HasValue)
+        {
+            item.SourceLastModified = originalModified;
+        }
+        item.UpdatedAt = DateTime.UtcNow;
+        await _db.SaveChangesAsync(cancellationToken);
+    }
+
+    /// <inheritdoc />
     public async Task RecordRestoredAsync(Guid itemId, string restoredServerRelativeUrl, CancellationToken cancellationToken = default)
     {
         var item = await _db.MigrationJobItems.FirstOrDefaultAsync(i => i.ItemId == itemId, cancellationToken);
@@ -161,6 +193,28 @@ public sealed class JobStatusWriter(SPOColdStorageDbContext db, ILogger logger) 
         await _db.SaveChangesAsync(cancellationToken);
     }
 
+    /// <inheritdoc />
+    public async Task<bool> IsRestoreInFlightForOtherItemAsync(
+        Guid itemId,
+        string placeholderServerRelativeUrl,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrEmpty(placeholderServerRelativeUrl))
+        {
+            return false;
+        }
+        // Active-restore statuses can't be expressed in the EF query via the
+        // IsActiveRestore() helper, so enumerate them explicitly here.
+        return await _db.MigrationJobItems
+            .Where(i => i.ItemId != itemId
+                        && i.PlaceholderServerRelativeUrl == placeholderServerRelativeUrl
+                        && (i.Status == MigrationLifecycleStatus.RestoreInProgress
+                            || i.Status == MigrationLifecycleStatus.RestoredToSharePoint
+                            || i.Status == MigrationLifecycleStatus.PostRestoreValidation
+                            || i.Status == MigrationLifecycleStatus.PlaceholderRemoving))
+            .AnyAsync(cancellationToken);
+    }
+
     private void ApplyTransitionInternal(MigrationJobItem item, MigrationLifecycleStatus newStatus, string message)
     {
         var previous = item.Status;
@@ -174,6 +228,7 @@ public sealed class JobStatusWriter(SPOColdStorageDbContext db, ILogger logger) 
         if (newStatus == MigrationLifecycleStatus.RestoreCompleted
             || newStatus == MigrationLifecycleStatus.ColdStorageMigrationCompleted
             || newStatus == MigrationLifecycleStatus.Cancelled
+            || newStatus == MigrationLifecycleStatus.Skipped
             || newStatus == MigrationLifecycleStatus.ValidationFailed
             || newStatus == MigrationLifecycleStatus.CopyToColdStorageFailed)
         {
@@ -237,10 +292,12 @@ public sealed class JobStatusWriter(SPOColdStorageDbContext db, ILogger logger) 
                                 || s == MigrationLifecycleStatus.PlaceholderFailed
                                 || s == MigrationLifecycleStatus.PlaceholderRemoveFailed
                                 || s == MigrationLifecycleStatus.DeleteFailed
-                                || s == MigrationLifecycleStatus.ValidationFailed))
+                                || s == MigrationLifecycleStatus.ValidationFailed
+                                || s == MigrationLifecycleStatus.Skipped))
         {
-            // At least one terminal failure but other items may still be running.
-            // Surface "completed with warning" once every item is terminal, otherwise leave job in-progress.
+            // At least one terminal failure or skip, but other items may still be
+            // running. Surface "completed with warning" once every item is
+            // terminal, otherwise leave the job in-progress.
             if (items.All(s => s.IsTerminal()))
             {
                 job.Status = MigrationLifecycleStatus.CompletedWithWarning;
@@ -263,4 +320,17 @@ public sealed class JobStatusWriter(SPOColdStorageDbContext db, ILogger logger) 
         => string.IsNullOrEmpty(value) || value.Length <= maxLength
             ? value
             : value[..maxLength];
+
+    private static bool IsFailure(MigrationLifecycleStatus status) => status switch
+    {
+        MigrationLifecycleStatus.ValidationFailed => true,
+        MigrationLifecycleStatus.CopyToColdStorageFailed => true,
+        MigrationLifecycleStatus.DeleteFailed => true,
+        MigrationLifecycleStatus.PlaceholderFailed => true,
+        MigrationLifecycleStatus.RestoreFailed => true,
+        MigrationLifecycleStatus.PlaceholderRemoveFailed => true,
+        MigrationLifecycleStatus.Skipped => true,
+        MigrationLifecycleStatus.Cancelled => true,
+        _ => false,
+    };
 }

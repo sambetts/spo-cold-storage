@@ -8,6 +8,7 @@ import {
   Search24Regular, 
   Document24Regular, 
   Settings24Regular,
+  Money24Regular,
   Grid24Regular
 } from '@fluentui/react-icons';
 
@@ -80,6 +81,10 @@ const NavLinks: React.FC = () => {
           <Link to="/MigrationTargets" className={isActive('/MigrationTargets')}>
             <Settings24Regular className="spo-nav-icon" />
             <span>Targets</span>
+          </Link>
+          <Link to="/Savings" className={isActive('/Savings')}>
+            <Money24Regular className="spo-nav-icon" />
+            <span>Savings</span>
           </Link>
         </div>
       </AuthenticatedTemplate>

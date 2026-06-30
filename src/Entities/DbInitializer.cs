@@ -231,6 +231,66 @@ BEGIN
     );
 END;";
 
+        const string addColdStorageItemColumnsSql = @"
+IF COL_LENGTH('dbo.migration_job_items', 'original_created_by') IS NULL
+    ALTER TABLE dbo.migration_job_items ADD original_created_by NVARCHAR(256) NULL;
+
+IF COL_LENGTH('dbo.migration_job_items', 'original_modified_by') IS NULL
+    ALTER TABLE dbo.migration_job_items ADD original_modified_by NVARCHAR(256) NULL;
+
+IF COL_LENGTH('dbo.migration_job_items', 'original_created') IS NULL
+    ALTER TABLE dbo.migration_job_items ADD original_created DATETIME2 NULL;
+
+IF COL_LENGTH('dbo.migration_job_items', 'last_error_detail') IS NULL
+    ALTER TABLE dbo.migration_job_items ADD last_error_detail NVARCHAR(MAX) NULL;
+
+IF COL_LENGTH('dbo.migration_job_items', 'last_reconciled_at') IS NULL
+    ALTER TABLE dbo.migration_job_items ADD last_reconciled_at DATETIME2 NULL;
+
+IF COL_LENGTH('dbo.migration_job_items', 'orphan_detected_at') IS NULL
+    ALTER TABLE dbo.migration_job_items ADD orphan_detected_at DATETIME2 NULL;
+
+IF COL_LENGTH('dbo.migration_job_items', 'priority') IS NULL
+    ALTER TABLE dbo.migration_job_items ADD priority INT NOT NULL CONSTRAINT DF_items_priority DEFAULT(0);
+";
+
+        const string addColdStorageLogColumnsSql = @"
+IF COL_LENGTH('dbo.migration_job_logs', 'actor_upn') IS NULL
+    ALTER TABLE dbo.migration_job_logs ADD actor_upn NVARCHAR(256) NULL;
+
+IF COL_LENGTH('dbo.migration_job_logs', 'action') IS NULL
+    ALTER TABLE dbo.migration_job_logs ADD action NVARCHAR(32) NULL;
+";
+
+        const string createExclusionsSql = @"
+IF OBJECT_ID('dbo.cold_storage_exclusions', 'U') IS NULL
+BEGIN
+    CREATE TABLE dbo.cold_storage_exclusions (
+        id INT IDENTITY(1,1) PRIMARY KEY,
+        site_url NVARCHAR(2048) NULL,
+        server_relative_prefix NVARCHAR(2048) NULL,
+        description NVARCHAR(512) NULL,
+        enabled BIT NOT NULL CONSTRAINT DF_cs_excl_enabled DEFAULT(1),
+        created_by NVARCHAR(256) NULL,
+        created_at DATETIME2 NOT NULL CONSTRAINT DF_cs_excl_created DEFAULT(SYSUTCDATETIME())
+    );
+END;";
+
+        const string createPreArchiveNoticesSql = @"
+IF OBJECT_ID('dbo.pre_archive_notices', 'U') IS NULL
+BEGIN
+    CREATE TABLE dbo.pre_archive_notices (
+        id INT IDENTITY(1,1) PRIMARY KEY,
+        site_url NVARCHAR(2048) NOT NULL,
+        server_relative_url NVARCHAR(2048) NOT NULL,
+        notified_upn NVARCHAR(256) NULL,
+        notified_at DATETIME2 NOT NULL CONSTRAINT DF_pan_notified DEFAULT(SYSUTCDATETIME()),
+        grace_until DATETIME2 NOT NULL,
+        status INT NOT NULL CONSTRAINT DF_pan_status DEFAULT(0),
+        created_at DATETIME2 NOT NULL CONSTRAINT DF_pan_created DEFAULT(SYSUTCDATETIME())
+    );
+END;";
+
         const string createColdStorageIndexesSql = @"
 IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_migration_job_items_job' AND object_id = OBJECT_ID('dbo.migration_job_items'))
     CREATE INDEX IX_migration_job_items_job ON dbo.migration_job_items(job_id);
@@ -243,10 +303,17 @@ IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_migration_job_items_jo
 
 IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_migration_job_logs_job_ts' AND object_id = OBJECT_ID('dbo.migration_job_logs'))
     CREATE INDEX IX_migration_job_logs_job_ts ON dbo.migration_job_logs(job_id, timestamp);
+
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_migration_job_logs_action_ts' AND object_id = OBJECT_ID('dbo.migration_job_logs'))
+    CREATE INDEX IX_migration_job_logs_action_ts ON dbo.migration_job_logs(action, timestamp);
 ";
 
         await context.Database.ExecuteSqlRawAsync(createContainersSql);
         await context.Database.ExecuteSqlRawAsync(createJobsSql);
+        await context.Database.ExecuteSqlRawAsync(createExclusionsSql);
+        await context.Database.ExecuteSqlRawAsync(createPreArchiveNoticesSql);
+        await context.Database.ExecuteSqlRawAsync(addColdStorageItemColumnsSql);
+        await context.Database.ExecuteSqlRawAsync(addColdStorageLogColumnsSql);
         await context.Database.ExecuteSqlRawAsync(createColdStorageIndexesSql);
     }
 }

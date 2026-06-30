@@ -64,6 +64,29 @@ public class MigrationJobItem
     [Column("source_last_modified")]
     public DateTime? SourceLastModified { get; set; }
 
+    /// <summary>
+    /// Display name of the source file's original author (SharePoint "Created By"),
+    /// captured at migration time so it survives the source delete and is visible
+    /// on the placeholder and after a restore.
+    /// </summary>
+    [MaxLength(256)]
+    [Column("original_created_by")]
+    public string? OriginalCreatedBy { get; set; }
+
+    /// <summary>
+    /// Display name of the last person to edit the source file (SharePoint
+    /// "Modified By"), captured at migration time.
+    /// </summary>
+    [MaxLength(256)]
+    [Column("original_modified_by")]
+    public string? OriginalModifiedBy { get; set; }
+
+    /// <summary>
+    /// Original created timestamp of the source file, captured at migration time.
+    /// </summary>
+    [Column("original_created")]
+    public DateTime? OriginalCreated { get; set; }
+
     [ForeignKey(nameof(Container))]
     [Column("container_id")]
     public int? ContainerId { get; set; }
@@ -105,8 +128,23 @@ public class MigrationJobItem
     [Column("last_error")]
     public string? LastError { get; set; }
 
+    /// <summary>
+    /// Raw technical detail (exception text / stack) behind <see cref="LastError"/>,
+    /// kept for support staff while the column shows a friendly summary (issue #5).
+    /// </summary>
+    [Column("last_error_detail")]
+    public string? LastErrorDetail { get; set; }
+
     [Column("attempts")]
     public int Attempts { get; set; }
+
+    /// <summary>
+    /// Admin-set processing priority (issue #16): higher is more urgent.
+    /// Surfaced in the admin queue view and used to order app-side processing /
+    /// display. (The Service Bus queue itself is FIFO; see QueueController.)
+    /// </summary>
+    [Column("priority")]
+    public int Priority { get; set; }
 
     [Column("validated_at")]
     public DateTime? ValidatedAt { get; set; }
@@ -125,6 +163,20 @@ public class MigrationJobItem
 
     [Column("completed_at")]
     public DateTime? CompletedAt { get; set; }
+
+    /// <summary>
+    /// When orphan reconciliation last checked this item (issue #3). Drives
+    /// round-robin coverage so each run checks the least-recently-checked items.
+    /// </summary>
+    [Column("last_reconciled_at")]
+    public DateTime? LastReconciledAt { get; set; }
+
+    /// <summary>
+    /// Set when reconciliation found this item's placeholder/site gone, so the
+    /// orphan isn't reported repeatedly (issue #3).
+    /// </summary>
+    [Column("orphan_detected_at")]
+    public DateTime? OrphanDetectedAt { get; set; }
 
     [Column("created_at")]
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
