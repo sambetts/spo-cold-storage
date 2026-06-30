@@ -68,6 +68,19 @@ public sealed class SharePointRestorePipeline : BaseComponent
                 return false;
             }
 
+            // Concurrency guard (issue #10): if another item is already actively
+            // restoring this same placeholder, coalesce this duplicate (no-op) so we
+            // don't double-upload or fight over the destination. Checked before we
+            // claim RestoreInProgress to avoid two duplicates cancelling each other.
+            if (await _statusWriter.IsRestoreInFlightForOtherItemAsync(envelope.ItemId, target.PlaceholderServerRelativeUrl, cancellationToken).ConfigureAwait(false))
+            {
+                _logger.LogWarning("Another restore for '{Url}' is already in progress; coalescing this duplicate.", target.PlaceholderServerRelativeUrl);
+                await _statusWriter.TransitionAsync(envelope.ItemId, MigrationLifecycleStatus.Cancelled,
+                    "Coalesced: another restore for this placeholder is already in progress.",
+                    level: LogLevel.Warning, cancellationToken: cancellationToken);
+                return true;
+            }
+
             await _statusWriter.TransitionAsync(envelope.ItemId, MigrationLifecycleStatus.RestoreInProgress,
                 $"Downloading blob '{metadata.ContainerName}/{metadata.BlobPath}'.", cancellationToken: cancellationToken);
 
