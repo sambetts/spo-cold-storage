@@ -374,7 +374,8 @@ src/SPO.ColdStorage.Web/ClientApp/src/authConfig - dev.js
 /src/SPFx/spfx-cold-storage/sharepoint/assets/elements.xml
 
 # Deployment — real values live here; only the *.example.json is tracked.
-/deploy/params.json
+/deploy/params*.json
+!/deploy/params.example.json
 /deploy/params.*.local.json
 /deploy/.bicep-cache/
 /deploy/.local/
