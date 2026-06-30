@@ -294,3 +294,35 @@ public class SetPriorityRequest
     public int Priority { get; set; }
 }
 
+/// <summary>
+/// Pre-archive notice workflow DTOs (issue #17).
+/// </summary>
+public class EvaluatePreArchiveRequest
+{
+    public string SiteUrl { get; set; } = string.Empty;
+    public List<PreArchiveCandidateDto> Items { get; set; } = [];
+}
+
+public class PreArchiveCandidateDto
+{
+    public string ServerRelativeUrl { get; set; } = string.Empty;
+    public string? OwnerUpn { get; set; }
+}
+
+public class PreArchiveEvaluationResult
+{
+    public string ServerRelativeUrl { get; set; } = string.Empty;
+    public string Decision { get; set; } = string.Empty;
+}
+
+public class PreArchiveNoticeResponse
+{
+    public int Id { get; set; }
+    public string SiteUrl { get; set; } = string.Empty;
+    public string ServerRelativeUrl { get; set; } = string.Empty;
+    public string? NotifiedUpn { get; set; }
+    public DateTime NotifiedAt { get; set; }
+    public DateTime GraceUntil { get; set; }
+    public string Status { get; set; } = string.Empty;
+}
+
