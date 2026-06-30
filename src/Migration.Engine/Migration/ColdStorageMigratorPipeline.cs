@@ -73,7 +73,11 @@ public sealed class ColdStorageMigratorPipeline : BaseComponent
             "Starting download from SharePoint.", cancellationToken: cancellationToken);
 
         var blobContainerName = envelope.ContainerName;
-        var blobPath = file.ServerRelativeFilePath.TrimStart('/');
+        // Collision-safe key: encode the SharePoint host (tenant) + server-relative
+        // path so same-named files in different sites/tenants never overwrite each
+        // other in cold storage. The key is persisted on the item + placeholder and
+        // read back verbatim at restore time, so this stays backward compatible.
+        var blobPath = ColdStorageBlobKey.Build(file.SiteUrl, file.ServerRelativeFilePath);
         string? tempFile = null;
         long size;
         string md5Base64;
