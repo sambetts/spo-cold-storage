@@ -48,4 +48,22 @@ public class MigrationJobLog : BaseDBObject
 
     [Column("exception")]
     public string? Exception { get; set; }
+
+    /// <summary>
+    /// UPN of the user who initiated a user-facing action (migrate/restore/
+    /// download). Null for system/worker transitions. Backs the audit view
+    /// (issue #13).
+    /// </summary>
+    [MaxLength(256)]
+    [Column("actor_upn")]
+    public string? ActorUpn { get; set; }
+
+    /// <summary>
+    /// Audit action category — "Migrate", "Restore" or "Download" — set on the
+    /// user-initiated rows so the audit view can filter to them. Null for
+    /// ordinary lifecycle log lines.
+    /// </summary>
+    [MaxLength(32)]
+    [Column("action")]
+    public string? Action { get; set; }
 }

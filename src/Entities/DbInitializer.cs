@@ -245,6 +245,14 @@ IF COL_LENGTH('dbo.migration_job_items', 'last_error_detail') IS NULL
     ALTER TABLE dbo.migration_job_items ADD last_error_detail NVARCHAR(MAX) NULL;
 ";
 
+        const string addColdStorageLogColumnsSql = @"
+IF COL_LENGTH('dbo.migration_job_logs', 'actor_upn') IS NULL
+    ALTER TABLE dbo.migration_job_logs ADD actor_upn NVARCHAR(256) NULL;
+
+IF COL_LENGTH('dbo.migration_job_logs', 'action') IS NULL
+    ALTER TABLE dbo.migration_job_logs ADD action NVARCHAR(32) NULL;
+";
+
         const string createExclusionsSql = @"
 IF OBJECT_ID('dbo.cold_storage_exclusions', 'U') IS NULL
 BEGIN
@@ -271,12 +279,16 @@ IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_migration_job_items_jo
 
 IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_migration_job_logs_job_ts' AND object_id = OBJECT_ID('dbo.migration_job_logs'))
     CREATE INDEX IX_migration_job_logs_job_ts ON dbo.migration_job_logs(job_id, timestamp);
+
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_migration_job_logs_action_ts' AND object_id = OBJECT_ID('dbo.migration_job_logs'))
+    CREATE INDEX IX_migration_job_logs_action_ts ON dbo.migration_job_logs(action, timestamp);
 ";
 
         await context.Database.ExecuteSqlRawAsync(createContainersSql);
         await context.Database.ExecuteSqlRawAsync(createJobsSql);
         await context.Database.ExecuteSqlRawAsync(createExclusionsSql);
         await context.Database.ExecuteSqlRawAsync(addColdStorageItemColumnsSql);
+        await context.Database.ExecuteSqlRawAsync(addColdStorageLogColumnsSql);
         await context.Database.ExecuteSqlRawAsync(createColdStorageIndexesSql);
     }
 }

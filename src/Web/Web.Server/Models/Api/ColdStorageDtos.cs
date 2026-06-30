@@ -167,3 +167,19 @@ public class CreateExclusionRequest
     public string? Description { get; set; }
 }
 
+/// <summary>
+/// One row of the cold-storage audit view (issue #13): who did what to which
+/// item, and when.
+/// </summary>
+public class AuditEntryResponse
+{
+    public DateTime Timestamp { get; set; }
+    public string? ActorUpn { get; set; }
+    public string? Action { get; set; }
+    public Guid JobId { get; set; }
+    public Guid? ItemId { get; set; }
+    public string? ItemUrl { get; set; }
+    public string Message { get; set; } = string.Empty;
+    public MigrationLifecycleStatus Status { get; set; }
+}
+
