@@ -128,4 +128,40 @@ public class ArchiveEligibilityEvaluatorTests
         };
         Assert.False((await sut.EvaluateAsync(folder)).IsEligible);
     }
+
+    private sealed class FakeReadActivitySource(int? accessCount) : IFileReadActivitySource
+    {
+        public Task<int?> GetAccessCountAsync(ArchiveCandidate candidate, CancellationToken cancellationToken = default)
+            => Task.FromResult(accessCount);
+    }
+
+    [Fact]
+    public async Task HighReadActivity_AboveThreshold_IsSkipped()
+    {
+        var sut = new ArchiveEligibilityEvaluator(0, null, null, readActivitySource: new FakeReadActivitySource(500), maxAccessCount: 100);
+        var result = await sut.EvaluateAsync(File("/x/popular.docx"));
+        Assert.False(result.IsEligible);
+        Assert.Contains("read activity", result.SkipReason);
+    }
+
+    [Fact]
+    public async Task ReadActivity_AtOrBelowThreshold_IsEligible()
+    {
+        var sut = new ArchiveEligibilityEvaluator(0, null, null, readActivitySource: new FakeReadActivitySource(100), maxAccessCount: 100);
+        Assert.True((await sut.EvaluateAsync(File("/x/a.docx"))).IsEligible);
+    }
+
+    [Fact]
+    public async Task NoReadActivitySignal_DoesNotBlock()
+    {
+        var sut = new ArchiveEligibilityEvaluator(0, null, null, readActivitySource: new FakeReadActivitySource(null), maxAccessCount: 100);
+        Assert.True((await sut.EvaluateAsync(File("/x/a.docx"))).IsEligible);
+    }
+
+    [Fact]
+    public async Task ReadActivityRule_DisabledWhenThresholdZero()
+    {
+        var sut = new ArchiveEligibilityEvaluator(0, null, null, readActivitySource: new FakeReadActivitySource(99_999), maxAccessCount: 0);
+        Assert.True((await sut.EvaluateAsync(File("/x/a.docx"))).IsEligible);
+    }
 }

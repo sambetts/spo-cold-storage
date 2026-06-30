@@ -65,6 +65,16 @@ public class Config(Microsoft.Extensions.Configuration.IConfiguration config) : 
     [ConfigValue(true)]
     public string ColdStorageIncludedExtensions { get; set; } = string.Empty;
 
+    /// <summary>
+    /// Maximum all-time access (read) count a file may have and still be eligible
+    /// for archiving. Files read more than this are skipped so heavily-used
+    /// documents aren't archived just because they're rarely edited (issue #11).
+    /// Uses the access_count the indexer persists on the files table. 0 (default)
+    /// disables the check.
+    /// </summary>
+    [ConfigValue(true)]
+    public int ColdStorageMaxAccessCount { get; set; }
+
     [ConfigSection("AzureAd")]
     public AzureAdConfig AzureAdConfig { get; set; } = null!;
 
