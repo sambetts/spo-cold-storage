@@ -114,6 +114,22 @@ public class Config(Microsoft.Extensions.Configuration.IConfiguration config) : 
     [ConfigValue(true)]
     public int ColdStorageReconcileIntervalHours { get; set; }
 
+    /// <summary>
+    /// Estimated Azure storage price per GB/month for the cold-storage tier, used
+    /// by the cost-savings KPI dashboard (issue #8). String so it can hold a
+    /// decimal; parsed invariant. Default ~Azure Cold tier.
+    /// </summary>
+    [ConfigValue(true)]
+    public string ColdStorageAzurePricePerGbMonth { get; set; } = "0.0198";
+
+    /// <summary>
+    /// Effective value per GB/month of the SharePoint storage reclaimed by
+    /// archiving (what you'd otherwise pay for extra SPO storage), used by the
+    /// KPI dashboard (issue #8). String holding a decimal; parsed invariant.
+    /// </summary>
+    [ConfigValue(true)]
+    public string ColdStorageSpoPricePerGbMonth { get; set; } = "0.20";
+
     [ConfigSection("AzureAd")]
     public AzureAdConfig AzureAdConfig { get; set; } = null!;
 
