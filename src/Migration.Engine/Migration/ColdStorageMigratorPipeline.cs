@@ -28,6 +28,7 @@ public sealed class ColdStorageMigratorPipeline : BaseComponent
     private readonly BlobStorageUploader _blobUploader;
     private readonly IArchiveEligibilityEvaluator _eligibility;
     private readonly IArchiveHoldDetector? _holdDetector;
+    private readonly VersionHistoryArchiver? _versionArchiver;
 
     public ColdStorageMigratorPipeline(
         Config config,
@@ -44,6 +45,9 @@ public sealed class ColdStorageMigratorPipeline : BaseComponent
         // Only stand up the (per-item, CSOM round-trip) hold detector when enabled.
         _holdDetector = config.ColdStorageSkipRetentionLabeled > 0
             ? new RetentionLabelHoldDetector(logger)
+            : null;
+        _versionArchiver = config.ColdStorageCaptureVersionHistory > 0
+            ? new VersionHistoryArchiver(config, logger)
             : null;
     }
 
@@ -183,6 +187,7 @@ public sealed class ColdStorageMigratorPipeline : BaseComponent
         string? originalModifiedBy = null;
         DateTime? originalCreated = null;
         DateTime? originalModified = null;
+        var capturedVersionCount = 0;
 
         ClientContext? spCtx = null;
         try
@@ -199,6 +204,14 @@ public sealed class ColdStorageMigratorPipeline : BaseComponent
             else
             {
                 CaptureSourceAuthorship(spFile, ref originalCreatedBy, ref originalModifiedBy, ref originalCreated, ref originalModified);
+
+                // Capture prior version history to cold storage BEFORE the source
+                // is deleted (issue #18). Best-effort; never fails the migration.
+                if (_versionArchiver is not null)
+                {
+                    capturedVersionCount = await _versionArchiver.CaptureAsync(
+                        spCtx, file.ServerRelativeFilePath, blobPath, blobContainerName, cancellationToken).ConfigureAwait(false);
+                }
 
                 if (spFile.CheckOutType != CheckOutType.None)
                 {
@@ -242,6 +255,7 @@ public sealed class ColdStorageMigratorPipeline : BaseComponent
                 ContentMd5Base64 = md5Base64,
                 MigratedAt = DateTime.UtcNow,
                 JobId = envelope.JobId,
+                VersionCount = capturedVersionCount,
             };
 
             var placeholderUrl = await _placeholderWriter.WritePlaceholderAsync(

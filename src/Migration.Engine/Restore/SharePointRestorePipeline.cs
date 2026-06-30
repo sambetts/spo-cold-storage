@@ -3,6 +3,7 @@ using Azure.Storage.Blobs;
 using Entities.Configuration;
 using Microsoft.Extensions.Logging;
 using Migration.Engine.Lifecycle;
+using Migration.Engine.Migration;
 using Migration.Engine.Utils;
 using Microsoft.SharePoint.Client;
 using Models.ColdStorage;
@@ -21,6 +22,7 @@ public sealed class SharePointRestorePipeline : BaseComponent
 {
     private readonly IJobStatusWriter _statusWriter;
     private readonly bool _deleteBlobAfterRestore;
+    private readonly VersionHistoryArchiver? _versionArchiver;
 
     public SharePointRestorePipeline(
         Config config,
@@ -29,6 +31,9 @@ public sealed class SharePointRestorePipeline : BaseComponent
     {
         _statusWriter = statusWriter ?? throw new ArgumentNullException(nameof(statusWriter));
         _deleteBlobAfterRestore = config.ColdStorageDeleteBlobAfterRestore > 0;
+        _versionArchiver = config.ColdStorageCaptureVersionHistory > 0
+            ? new VersionHistoryArchiver(config, logger)
+            : null;
     }
 
     public async Task<bool> ProcessAsync(ColdStorageBusEnvelope envelope, CancellationToken cancellationToken = default)
@@ -102,6 +107,16 @@ public sealed class SharePointRestorePipeline : BaseComponent
                 return false;
             }
 
+            // Replay archived prior versions FIRST (oldest-first) so the current
+            // content uploaded next becomes the latest version, rebuilding history
+            // (issue #18). Best-effort; never fails the restore.
+            var replayedVersions = 0;
+            if (_versionArchiver is not null && metadata.VersionCount > 0)
+            {
+                replayedVersions = await _versionArchiver.ReplayAsync(
+                    spCtx, destinationUrl, metadata.BlobPath, metadata.ContainerName, cancellationToken).ConfigureAwait(false);
+            }
+
             using (var fs = IOFile.OpenRead(tempFile))
             {
                 var folder = spCtx.Web.GetFolderByServerRelativeUrl(destinationFolder);
@@ -112,7 +127,9 @@ public sealed class SharePointRestorePipeline : BaseComponent
                 {
                     ContentStream = fs,
                     Url = Path.GetFileName(destinationUrl),
-                    Overwrite = envelope.ConflictBehavior == ConflictBehavior.Overwrite,
+                    // Overwrite when explicitly requested, or when we just replayed
+                    // versions onto the destination (the current content is the latest).
+                    Overwrite = envelope.ConflictBehavior == ConflictBehavior.Overwrite || replayedVersions > 0,
                 };
                 var uploaded = folder.Files.Add(addInfo);
                 spCtx.Load(uploaded, f => f.ServerRelativeUrl);

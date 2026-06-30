@@ -139,6 +139,15 @@ public class Config(Microsoft.Extensions.Configuration.IConfiguration config) : 
     [ConfigValue(true)]
     public int ColdStoragePreArchiveGraceHours { get; set; }
 
+    /// <summary>
+    /// When &gt; 0, prior SharePoint versions are captured to cold storage at
+    /// archive time and replayed on restore so version history survives (issue
+    /// #18). 0 (default) archives only the current version. Larger effort + more
+    /// storage; best-effort so it never fails the core migrate/restore.
+    /// </summary>
+    [ConfigValue(true)]
+    public int ColdStorageCaptureVersionHistory { get; set; }
+
     [ConfigSection("AzureAd")]
     public AzureAdConfig AzureAdConfig { get; set; } = null!;
 
