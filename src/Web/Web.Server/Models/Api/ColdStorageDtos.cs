@@ -203,6 +203,24 @@ public class ReconcileSummaryResponse
 }
 
 /// <summary>
+/// Cost &amp; savings KPIs for the cold-storage dashboard (issue #8).
+/// </summary>
+public class SavingsReportResponse
+{
+    public DateTime? From { get; set; }
+    public DateTime? To { get; set; }
+    public long ArchivedItemCount { get; set; }
+    public long ReclaimedBytes { get; set; }
+    public double ReclaimedGb { get; set; }
+    public decimal AzurePricePerGbMonth { get; set; }
+    public decimal SpoPricePerGbMonth { get; set; }
+    public decimal EstimatedAzureCostPerMonth { get; set; }
+    public decimal EstimatedSpoValuePerMonth { get; set; }
+    public decimal EstimatedNetSavingsPerMonth { get; set; }
+    public string Currency { get; set; } = "USD";
+}
+
+/// <summary>
 /// One row of the cold-storage audit view (issue #13): who did what to which
 /// item, and when.
 /// </summary>
