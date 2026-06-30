@@ -86,6 +86,17 @@ public class Config(Microsoft.Extensions.Configuration.IConfiguration config) : 
     [ConfigValue(true)]
     public int ColdStorageSkipRetentionLabeled { get; set; }
 
+    /// <summary>
+    /// When &gt; 0, the cold-storage blob is deleted after a restore has been
+    /// verified (the restored file confirmed present in SharePoint), so a file
+    /// doesn't end up living in both places (issue #4). 0 (default) keeps the
+    /// blob. Deletion mirrors the migrate-side invariant: it only happens AFTER
+    /// post-restore validation succeeds, and a delete failure never fails the
+    /// restore.
+    /// </summary>
+    [ConfigValue(true)]
+    public int ColdStorageDeleteBlobAfterRestore { get; set; }
+
     [ConfigSection("AzureAd")]
     public AzureAdConfig AzureAdConfig { get; set; } = null!;
 
