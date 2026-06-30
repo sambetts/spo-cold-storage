@@ -140,3 +140,29 @@ public class DownloadUrlResponse
     public string? FileName { get; set; }
     public long ContentLength { get; set; }
 }
+
+/// <summary>
+/// An archiving exclusion scope (issue #7) as returned by the admin API.
+/// </summary>
+public class ExclusionResponse
+{
+    public int Id { get; set; }
+    public string? SiteUrl { get; set; }
+    public string? ServerRelativePrefix { get; set; }
+    public string? Description { get; set; }
+    public bool Enabled { get; set; }
+    public string? CreatedBy { get; set; }
+    public DateTime CreatedAt { get; set; }
+}
+
+/// <summary>
+/// Request body for <c>POST /api/exclusions</c>. At least one of
+/// <see cref="SiteUrl"/> or <see cref="ServerRelativePrefix"/> must be set.
+/// </summary>
+public class CreateExclusionRequest
+{
+    public string? SiteUrl { get; set; }
+    public string? ServerRelativePrefix { get; set; }
+    public string? Description { get; set; }
+}
+

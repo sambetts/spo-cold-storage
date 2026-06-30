@@ -36,7 +36,7 @@ public sealed class ColdStorageMigratorPipeline : BaseComponent
         _statusWriter = statusWriter ?? throw new ArgumentNullException(nameof(statusWriter));
         _placeholderWriter = new SharePointPlaceholderWriter(logger);
         _blobUploader = new BlobStorageUploader(config, logger);
-        _eligibility = new ArchiveEligibilityEvaluator(config);
+        _eligibility = new ArchiveEligibilityEvaluator(config, new DbArchiveExclusionSource(config, logger));
     }
 
     /// <summary>
