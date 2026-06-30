@@ -156,6 +156,20 @@ public class MigrationJobItem
     [Column("completed_at")]
     public DateTime? CompletedAt { get; set; }
 
+    /// <summary>
+    /// When orphan reconciliation last checked this item (issue #3). Drives
+    /// round-robin coverage so each run checks the least-recently-checked items.
+    /// </summary>
+    [Column("last_reconciled_at")]
+    public DateTime? LastReconciledAt { get; set; }
+
+    /// <summary>
+    /// Set when reconciliation found this item's placeholder/site gone, so the
+    /// orphan isn't reported repeatedly (issue #3).
+    /// </summary>
+    [Column("orphan_detected_at")]
+    public DateTime? OrphanDetectedAt { get; set; }
+
     [Column("created_at")]
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 

@@ -243,6 +243,12 @@ IF COL_LENGTH('dbo.migration_job_items', 'original_created') IS NULL
 
 IF COL_LENGTH('dbo.migration_job_items', 'last_error_detail') IS NULL
     ALTER TABLE dbo.migration_job_items ADD last_error_detail NVARCHAR(MAX) NULL;
+
+IF COL_LENGTH('dbo.migration_job_items', 'last_reconciled_at') IS NULL
+    ALTER TABLE dbo.migration_job_items ADD last_reconciled_at DATETIME2 NULL;
+
+IF COL_LENGTH('dbo.migration_job_items', 'orphan_detected_at') IS NULL
+    ALTER TABLE dbo.migration_job_items ADD orphan_detected_at DATETIME2 NULL;
 ";
 
         const string addColdStorageLogColumnsSql = @"
