@@ -190,6 +190,19 @@ public class CreateExclusionRequest
 }
 
 /// <summary>
+/// Result of an orphan-reconciliation run (issue #3).
+/// </summary>
+public class ReconcileSummaryResponse
+{
+    public int Checked { get; set; }
+    public int Orphans { get; set; }
+    public int BlobsDeleted { get; set; }
+    public int Quarantined { get; set; }
+    public int Errors { get; set; }
+    public string Policy { get; set; } = string.Empty;
+}
+
+/// <summary>
 /// One row of the cold-storage audit view (issue #13): who did what to which
 /// item, and when.
 /// </summary>

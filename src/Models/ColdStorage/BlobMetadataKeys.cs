@@ -23,4 +23,7 @@ public static class BlobMetadataKeys
 
     /// <summary>Base64-encoded MD5 hash of the source file as observed at migration time.</summary>
     public const string SourceContentMd5 = "spSourceMd5";
+
+    /// <summary>Set by reconciliation when a blob is quarantined as an orphan (issue #3).</summary>
+    public const string OrphanQuarantinedUtc = "spOrphanQuarantinedUtc";
 }

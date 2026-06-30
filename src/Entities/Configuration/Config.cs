@@ -97,6 +97,23 @@ public class Config(Microsoft.Extensions.Configuration.IConfiguration config) : 
     [ConfigValue(true)]
     public int ColdStorageDeleteBlobAfterRestore { get; set; }
 
+    /// <summary>
+    /// What to do with a cold-storage blob whose placeholder/site no longer
+    /// exists (issue #3): <c>report</c> (default — audit only), <c>quarantine</c>
+    /// (flag + tag the blob, keep it for review) or <c>delete</c> (remove the
+    /// blob — permanent, since the source was already deleted at migration).
+    /// </summary>
+    [ConfigValue(true)]
+    public string ColdStorageOrphanPolicy { get; set; } = "report";
+
+    /// <summary>
+    /// How often (hours) the migrator runs orphan reconciliation. 0 (default)
+    /// disables the scheduled loop; reconciliation can still be triggered
+    /// on-demand by an admin via the API.
+    /// </summary>
+    [ConfigValue(true)]
+    public int ColdStorageReconcileIntervalHours { get; set; }
+
     [ConfigSection("AzureAd")]
     public AzureAdConfig AzureAdConfig { get; set; } = null!;
 
