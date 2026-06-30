@@ -23,7 +23,7 @@ Both are **phase-based** and **idempotent** &mdash; re-run safely. Each reads `d
 | PowerShell | 7.2+ | `$PSVersionTable.PSVersion` |
 | Azure CLI | 2.55+ | `az version` |
 | .NET SDK | 10.0+ | `dotnet --version` |
-| Node.js | 18.17+ (SPFx 1.22 needs <21) | `node --version` |
+| Node.js | 22.x (required by SPFx 1.22) | `node --version` |
 | Git | any | `git --version` |
 
 PnP.PowerShell is auto-installed on first run.

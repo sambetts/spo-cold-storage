@@ -1,0 +1,95 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "_comment": "Copy this file to deploy/params.json and fill in values. params.json is gitignored. Do NOT put secrets in this file — secrets (AAD client secret) are prompted at runtime or supplied via the SPOCS_AAD_CLIENT_SECRET environment variable, then stored in Key Vault.",
+
+  "subscription": {
+    "id": "00000000-0000-0000-0000-000000000000",
+    "tenantId": "00000000-0000-0000-0000-000000000000"
+  },
+
+  "location": "westeurope",
+  "resourceGroupName": "rg-spocs-prod",
+
+  "tags": {
+    "application": "spo-cold-storage",
+    "environment": "prod",
+    "owner": "platform-team"
+  },
+
+  "_naming_comment": "All names must follow Azure resource naming rules. storageAccount/keyVault/sqlServer/search/serviceBus/webApp are GLOBALLY unique — pick something likely to be free. vnet is optional; defaults to 'vnet-<webApp>' if omitted.",
+  "naming": {
+    "appServicePlan": "asp-spocs-prod",
+    "webApp": "app-spocs-prod-001",
+    "storageAccount": "stspocsprod001",
+    "blobContainer": "spexports",
+    "keyVault": "kv-spocs-prod-001",
+    "serviceBus": "sb-spocs-prod-001",
+    "serviceBusQueue": "filediscovery",
+    "sqlServer": "sql-spocs-prod-001",
+    "sqlDatabase": "spocoldstorage",
+    "search": "srch-spocs-prod-001",
+    "searchIndex": "spexports",
+    "logAnalytics": "log-spocs-prod",
+    "appInsights": "appi-spocs-prod",
+    "vnet": "vnet-spocs-prod"
+  },
+
+  "sku": {
+    "_comment": "appServicePlan must support AlwaysOn for WebJobs. B2 or above recommended for production.",
+    "appServicePlan": "B2",
+    "sqlDatabase": "S0",
+    "search": "basic",
+    "serviceBus": "Standard"
+  },
+
+  "azureAd": {
+    "_comment": "Used by both scripts. If you run deploy-spo.ps1 AadApp phase first, it will create the AAD app and write clientId + servicePrincipalObjectId back here.",
+    "clientId": "00000000-0000-0000-0000-000000000000",
+    "tenantId": "00000000-0000-0000-0000-000000000000",
+    "certificateName": "AzureAutomationSPOAccess",
+    "_keyVaultObjectId_comment": "Object ID of the service principal for the above app registration. Used to grant it Key Vault Secrets+Certificates User so the workers can pull the cert at runtime.",
+    "servicePrincipalObjectId": "00000000-0000-0000-0000-000000000000"
+  },
+
+  "aadApp": {
+    "_comment": "displayName MUST match the 'resource' string in src/SPFx/spfx-cold-storage/config/package-solution.json (currently 'SPO Cold Storage Web API') so the SPFx webApiPermissionRequest grants succeed.",
+    "displayName": "SPO Cold Storage Web API",
+    "additionalRedirectUris": []
+  },
+
+  "certificate": {
+    "_comment": "Used by deploy-spo.ps1 -Phase Cert. source = 'generate' | 'file' | 'keyvault'. 'generate' creates a self-signed cert in deploy/.local/ (gitignored) and uploads to KV. 'file' uses your existing PFX (set pfxPath, supply password via -PfxPassword or SPOCS_PFX_PASSWORD env var). 'keyvault' assumes the cert already exists in KV under azureAd.certificateName.",
+    "source": "generate",
+    "pfxPath": "",
+    "subject": "CN=AzureAutomationSPOAccess",
+    "validityYears": 2
+  },
+
+  "sql": {
+    "_comment": "Entra-only auth. Provide an Entra group (recommended) or user that will be SQL admin. The deploying user MUST be a member, because the script grants the Web App MSI db_owner via T-SQL post-deploy.",
+    "entraAdminLogin": "sg-spocs-sqladmins",
+    "entraAdminObjectId": "00000000-0000-0000-0000-000000000000",
+    "entraAdminIsGroup": true
+  },
+
+  "sharePoint": {
+    "_comment": "baseServerAddress is the SharePoint Online root (used as the BaseServerAddress app setting). appCatalogUrl + targetSiteRelativeUrl are only needed for deploy-spo.ps1 -Phase SpfxDeploy.",
+    "baseServerAddress": "https://contoso.sharepoint.com",
+    "appCatalogUrl": "https://contoso.sharepoint.com/sites/appcatalog",
+    "targetSiteRelativeUrl": "/sites/ColdStorage"
+  },
+
+  "storage": {
+    "_comment": "userDataReaders: object IDs of end-users (or a group) that should get 'Storage Blob Data Reader' on the storage account. The SPA calls Blob Storage directly with the signed-in user's token, so without this they'll see 'AuthorizationPermissionMismatch'. Each entry can be a bare GUID (defaults to type=User) or {objectId, type} where type is User|Group|ServicePrincipal. Recommended pattern: create one Entra group containing all SPA users, put its objectId here.",
+    "userDataReaders": []
+  },
+
+  "network": {
+    "_comment": "Set to false to leave the deploy IP in the SQL firewall after Sql phase. Useful for debugging.",
+    "removeDeployIpAfterSqlGrants": true,
+    "_vnet_comment": "Optional VNet overrides. Bicep adds a /22 VNet with two subnets (snet-app delegated to Microsoft.Web/serverFarms, snet-pe for private endpoints) and 5 private DNS zones + 4 or 5 private endpoints (SQL, Key Vault, Storage blob, AI Search; Service Bus PE is only added when sku.serviceBus is Standard or Premium — Basic doesn't support Private Link). Leave these out to accept the defaults.",
+    "vnetAddressPrefix": "10.50.0.0/22",
+    "subnetAppPrefix":   "10.50.0.0/24",
+    "subnetPePrefix":    "10.50.1.0/24"
+  }
+}
