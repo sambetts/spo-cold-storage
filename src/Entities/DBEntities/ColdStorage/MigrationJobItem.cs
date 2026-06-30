@@ -128,6 +128,13 @@ public class MigrationJobItem
     [Column("last_error")]
     public string? LastError { get; set; }
 
+    /// <summary>
+    /// Raw technical detail (exception text / stack) behind <see cref="LastError"/>,
+    /// kept for support staff while the column shows a friendly summary (issue #5).
+    /// </summary>
+    [Column("last_error_detail")]
+    public string? LastErrorDetail { get; set; }
+
     [Column("attempts")]
     public int Attempts { get; set; }
 

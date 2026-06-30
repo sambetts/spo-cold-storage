@@ -78,6 +78,7 @@ public class JobItemStatusResponse
     public MigrationLifecycleStatus Status { get; set; }
     public int Attempts { get; set; }
     public string? LastError { get; set; }
+    public string? LastErrorDetail { get; set; }
     public DateTime? ValidatedAt { get; set; }
     public DateTime? CopiedAt { get; set; }
     public DateTime? SourceDeletedAt { get; set; }

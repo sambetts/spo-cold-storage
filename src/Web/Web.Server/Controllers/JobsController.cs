@@ -86,7 +86,9 @@ public class JobsController(SPOColdStorageDbContext db, ILogger<JobsController> 
             if (!string.IsNullOrEmpty(i.LastError))
             {
                 if (i.Status is global::Models.ColdStorage.MigrationLifecycleStatus.CompletedWithWarning
-                             or global::Models.ColdStorage.MigrationLifecycleStatus.PlaceholderRemoveFailed)
+                             or global::Models.ColdStorage.MigrationLifecycleStatus.PlaceholderRemoveFailed
+                             or global::Models.ColdStorage.MigrationLifecycleStatus.Skipped
+                             or global::Models.ColdStorage.MigrationLifecycleStatus.Cancelled)
                 {
                     warnings.Add($"{i.SpServerRelativeUrl}: {i.LastError}");
                 }
@@ -139,6 +141,7 @@ public class JobsController(SPOColdStorageDbContext db, ILogger<JobsController> 
                     Status = i.Status,
                     Attempts = i.Attempts,
                     LastError = i.LastError,
+                    LastErrorDetail = i.LastErrorDetail,
                     ValidatedAt = i.ValidatedAt,
                     CopiedAt = i.CopiedAt,
                     SourceDeletedAt = i.SourceDeletedAt,

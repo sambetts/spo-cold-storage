@@ -57,7 +57,14 @@ public sealed class JobStatusWriter(SPOColdStorageDbContext db, ILogger logger) 
 
         if (exception != null)
         {
-            item.LastError = Truncate(exception.Message, 2048);
+            item.LastError = Truncate(FriendlyErrorMapper.ToFriendly(exception, newStatus), 2048);
+            item.LastErrorDetail = Truncate(exception.ToString(), 8000);
+        }
+        else if (IsFailure(newStatus))
+        {
+            // No exception, but a failure/skip message — still show a friendly summary.
+            item.LastError = Truncate(FriendlyErrorMapper.ToFriendly(message, newStatus), 2048);
+            item.LastErrorDetail = Truncate(message, 8000);
         }
 
         await WriteLogAsync(item.JobId, item.ItemId, newStatus, level, message, exception, cancellationToken);
@@ -291,4 +298,17 @@ public sealed class JobStatusWriter(SPOColdStorageDbContext db, ILogger logger) 
         => string.IsNullOrEmpty(value) || value.Length <= maxLength
             ? value
             : value[..maxLength];
+
+    private static bool IsFailure(MigrationLifecycleStatus status) => status switch
+    {
+        MigrationLifecycleStatus.ValidationFailed => true,
+        MigrationLifecycleStatus.CopyToColdStorageFailed => true,
+        MigrationLifecycleStatus.DeleteFailed => true,
+        MigrationLifecycleStatus.PlaceholderFailed => true,
+        MigrationLifecycleStatus.RestoreFailed => true,
+        MigrationLifecycleStatus.PlaceholderRemoveFailed => true,
+        MigrationLifecycleStatus.Skipped => true,
+        MigrationLifecycleStatus.Cancelled => true,
+        _ => false,
+    };
 }

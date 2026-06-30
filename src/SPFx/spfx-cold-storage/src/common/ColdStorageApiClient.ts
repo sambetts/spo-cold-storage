@@ -81,6 +81,7 @@ export interface IJobItemStatus {
   status: MigrationLifecycleStatus;
   attempts: number;
   lastError?: string;
+  lastErrorDetail?: string;
   copiedAt?: string;
   sourceDeletedAt?: string;
   placeholderCreatedAt?: string;
