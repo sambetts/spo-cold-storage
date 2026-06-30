@@ -42,6 +42,28 @@ public class StartRestoreRequest
 }
 
 /// <summary>
+/// Request body for <c>POST /api/restores/force</c> (admin break-glass, issue #6).
+/// Either supply <see cref="ItemId"/> to resolve the blob/target from an existing
+/// migration record, or supply the explicit blob + target coordinates. Runs
+/// synchronously and bypasses the queue + placeholder.
+/// </summary>
+public class ForceRestoreRequest
+{
+    public Guid? ItemId { get; set; }
+    public string? SiteUrl { get; set; }
+
+    /// <summary>Azure blob container name holding the archived copy.</summary>
+    public string? BlobContainerName { get; set; }
+    public string? BlobPath { get; set; }
+
+    /// <summary>Server-relative URL to restore the file to. Defaults to the item's original location.</summary>
+    public string? TargetServerRelativeUrl { get; set; }
+
+    /// <summary>Break-glass defaults to overwrite so a VIP recovery isn't blocked by an existing file.</summary>
+    public ConflictBehavior ConflictBehavior { get; set; } = ConflictBehavior.Overwrite;
+}
+
+/// <summary>
 /// Common accepted-job response. Mirrors the contract documented in
 /// requirements.md so the SPFx component can show a deterministic message.
 /// </summary>
