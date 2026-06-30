@@ -45,8 +45,7 @@ public class StartRestoreRequest
 }
 
 /// <summary>
-/// Request body for <c>POST /api/restores/force</c> (admin break-glass, issue #6).
-/// Either supply <see cref="ItemId"/> to resolve the blob/target from an existing
+/// Request body for <c>POST /api/restores/force</c> (admin break-glass, issue #6)./// Either supply <see cref="ItemId"/> to resolve the blob/target from an existing
 /// migration record, or supply the explicit blob + target coordinates. Runs
 /// synchronously and bypasses the queue + placeholder.
 /// </summary>
@@ -74,6 +73,32 @@ public class AcceptedJobResponse
 {
     public Guid JobId { get; set; }
     public MigrationLifecycleStatus Status { get; set; }
+    public List<string> Warnings { get; set; } = [];
+}
+
+/// <summary>
+/// Request body for <c>POST /api/restores/start-batch</c> (issue #9). Restores
+/// many items in a single job: an explicit list of placeholders and/or folders
+/// to expand server-side to the archived items beneath them.
+/// </summary>
+public class StartBatchRestoreRequest
+{
+    public string SiteUrl { get; set; } = string.Empty;
+    public string WebUrl { get; set; } = string.Empty;
+    public List<string> Placeholders { get; set; } = [];
+    public List<string> FolderServerRelativeUrls { get; set; } = [];
+    public ConflictBehavior ConflictBehavior { get; set; } = ConflictBehavior.Fail;
+}
+
+/// <summary>
+/// Response for a batch restore: the single job plus how many items were queued
+/// and any per-item skip reasons. Poll <c>GET /api/jobs/{jobId}</c> for progress.
+/// </summary>
+public class BatchRestoreResponse
+{
+    public Guid JobId { get; set; }
+    public MigrationLifecycleStatus Status { get; set; }
+    public int Accepted { get; set; }
     public List<string> Warnings { get; set; } = [];
 }
 
