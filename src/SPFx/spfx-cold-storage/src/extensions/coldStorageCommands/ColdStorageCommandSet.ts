@@ -2,8 +2,7 @@ import { Log } from '@microsoft/sp-core-library';
 import { BaseListViewCommandSet, Command, IListViewCommandSetExecuteEventParameters, IListViewCommandSetListViewUpdatedParameters } from '@microsoft/sp-listview-extensibility';
 import { AadHttpClient } from '@microsoft/sp-http';
 
-import { ColdStorageApiClient, ColdStorageApiError, IStartMigrationItem } from '../../common/ColdStorageApiClient';
-import { MigrationProgressDialog } from './MigrationProgressDialog';
+import { ColdStorageApiClient, ColdStorageApiError, IStartMigrationItem } from '../../common/ColdStorageApiClient';import { MigrationProgressDialog } from './MigrationProgressDialog';
 
 export interface IColdStorageCommandSetProperties {
   apiBaseUrl: string;
@@ -44,10 +43,10 @@ export default class ColdStorageCommandSet extends BaseListViewCommandSet<IColdS
     const restore: Command = this.tryGetCommand('COLDSTORAGE_RESTORE');
     const status:  Command = this.tryGetCommand('COLDSTORAGE_STATUS');
     const hasSelection = event.selectedRows.length > 0;
-    const allArePlaceholders = hasSelection
-      && event.selectedRows.every(r => (r.getValueByName('FileLeafRef') as string).endsWith('.url'));
-    const anyArePlaceholders = hasSelection
-      && event.selectedRows.some(r => (r.getValueByName('FileLeafRef') as string).endsWith('.url'));
+    const isFolderRow = (r: typeof event.selectedRows[number]) => (r.getValueByName('FSObjType') as string) === '1';
+    const isPlaceholderRow = (r: typeof event.selectedRows[number]) => (r.getValueByName('FileLeafRef') as string).endsWith('.url');
+    const anyArePlaceholders = hasSelection && event.selectedRows.some(isPlaceholderRow);
+    const anyAreFolders = hasSelection && event.selectedRows.some(isFolderRow);
 
     if (migrate) {
       // Hide for placeholder selections - migrating a .url back to cold storage is nonsensical
@@ -55,8 +54,9 @@ export default class ColdStorageCommandSet extends BaseListViewCommandSet<IColdS
       migrate.visible = hasSelection && !!this.apiClient && !anyArePlaceholders;
     }
     if (restore) {
-      // Restore only makes sense when EVERY selected row is a cold-storage placeholder.
-      restore.visible = hasSelection && !!this.apiClient && allArePlaceholders;
+      // Restore makes sense for cold-storage placeholders, or a folder (expanded
+      // server-side to the archived items beneath it) — issue #9.
+      restore.visible = hasSelection && !!this.apiClient && (anyArePlaceholders || anyAreFolders);
     }
     if (status) {
       // Always available so users can review past / in-flight jobs without first picking a file.
@@ -138,57 +138,51 @@ export default class ColdStorageCommandSet extends BaseListViewCommandSet<IColdS
     const client = this.apiClient;
     if (!client) return;
     const dialog = this.openDialog('Restore');
-    dialog.setStatusMessage(`Resolving ${event.selectedRows.length} placeholder${event.selectedRows.length === 1 ? '' : 's'}…`);
 
     const siteUrl = this.context.pageContext.site.absoluteUrl;
     const webUrl = this.context.pageContext.web.absoluteUrl;
-    const skipped: string[] = [];
-    let submitted = 0;
 
+    // Split the selection into explicit placeholders and folders. Folders are
+    // expanded server-side to the archived items beneath them, and the whole lot
+    // is restored as one job so the user sees aggregated progress (issue #9).
+    const placeholders: string[] = [];
+    const folders: string[] = [];
     for (const row of event.selectedRows) {
-      if (!dialog.isOpen) return; // user closed the dialog - stop submitting
-      const placeholder = row.getValueByName('FileRef') as string;
-      dialog.setStatusMessage(`Resolving ${placeholder}…`);
-
-      let metadata;
-      try {
-        metadata = await client.resolvePlaceholder(placeholder);
-      } catch (err) {
-        skipped.push(`${placeholder}: ${this.describeError(err, 'resolve failed')}`);
-        continue;
-      }
-
-      if (!metadata.isEligibleForRestore) {
-        skipped.push(`${placeholder}: ${metadata.unavailableReason ?? 'not eligible for restore'}`);
-        continue;
-      }
-
-      dialog.setStatusMessage(`Submitting restore for ${placeholder}…`);
-      try {
-        const response = await client.startRestore({
-          siteUrl, webUrl,
-          placeholderServerRelativeUrl: placeholder,
-          originalServerRelativeUrl: metadata.originalServerRelativeUrl,
-          conflictBehavior: 'Fail',
-        });
-        const baseName = placeholder.substring(placeholder.lastIndexOf('/') + 1);
-        dialog.addAcceptedJob(response.jobId, response, `Restore: ${baseName}`);
-        submitted++;
-      } catch (err) {
-        skipped.push(`${placeholder}: ${this.describeError(err, 'submit failed')}`);
+      const ref = row.getValueByName('FileRef') as string;
+      if ((row.getValueByName('FSObjType') as string) === '1') {
+        folders.push(ref);
+      } else if (ref.endsWith('.url')) {
+        placeholders.push(ref);
       }
     }
 
-    if (submitted === 0) {
-      dialog.showError(
-        skipped.length > 0
-          ? `No restores were submitted:\n${skipped.join('\n')}`
-          : 'No restores were submitted.',
-      );
-    } else if (skipped.length > 0) {
-      // Continue polling the submitted jobs but inform the user about the
-      // skipped items via the status banner.
-      dialog.setStatusMessage(`Submitted ${submitted} restore${submitted === 1 ? '' : 's'}; skipped ${skipped.length}: ${skipped.join('; ')}`);
+    if (placeholders.length === 0 && folders.length === 0) {
+      dialog.showError('Select one or more cold-storage placeholders, or a folder, to restore.');
+      return;
+    }
+
+    dialog.setStatusMessage(
+      folders.length > 0
+        ? `Submitting bulk restore (${placeholders.length} file${placeholders.length === 1 ? '' : 's'} + ${folders.length} folder${folders.length === 1 ? '' : 's'})…`
+        : `Submitting restore for ${placeholders.length} item${placeholders.length === 1 ? '' : 's'}…`,
+    );
+
+    try {
+      const response = await client.startBatchRestore({
+        siteUrl,
+        webUrl,
+        placeholders,
+        folderServerRelativeUrls: folders,
+        conflictBehavior: 'Fail',
+      });
+      dialog.addAcceptedJob(response.jobId, response, `Restore (${response.accepted} item${response.accepted === 1 ? '' : 's'})`);
+      if (response.warnings && response.warnings.length > 0) {
+        dialog.setStatusMessage(`Queued ${response.accepted}; skipped ${response.warnings.length}: ${response.warnings.join('; ')}`);
+      } else if (response.accepted === 0) {
+        dialog.showError('No restorable items were found in the selection.');
+      }
+    } catch (err) {
+      dialog.showError(this.describeError(err, 'Failed to submit bulk restore'), () => this.runRestore(event));
     }
   }
 

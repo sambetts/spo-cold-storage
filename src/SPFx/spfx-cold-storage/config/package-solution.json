@@ -3,7 +3,7 @@
   "solution": {
     "name": "SPO Cold Storage",
     "id": "6ba628ed-6a38-404c-9d85-ff342ee31c4b",
-    "version": "0.1.0.4",
+    "version": "0.1.0.5",
     "includeClientSideAssets": true,
     "skipFeatureDeployment": false,
     "isDomainIsolated": false,
@@ -25,7 +25,7 @@
         "title": "Cold Storage Extensions",
         "description": "Adds Migrate / Restore commands and the cold-storage status field to document libraries.",
         "id": "8b6f23a1-6b92-462f-a9f0-0befa83961ae",
-        "version": "0.1.0.4",
+        "version": "0.1.0.5",
         "assets": {
           "elementManifests": [
             "elements.xml"
