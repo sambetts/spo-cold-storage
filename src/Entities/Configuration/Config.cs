@@ -75,6 +75,17 @@ public class Config(Microsoft.Extensions.Configuration.IConfiguration config) : 
     [ConfigValue(true)]
     public int ColdStorageMaxAccessCount { get; set; }
 
+    /// <summary>
+    /// When &gt; 0, items that carry a Purview retention label (a record /
+    /// retention / legal-hold label, read from the SharePoint <c>_ComplianceTag</c>
+    /// field) are skipped rather than archived, to avoid moving content under a
+    /// compliance obligation out to Azure (issue #15). 0 (default) disables the
+    /// check. NOTE: this detects retention LABELS; eDiscovery holds that apply no
+    /// per-item label are not detectable via this API and are not covered.
+    /// </summary>
+    [ConfigValue(true)]
+    public int ColdStorageSkipRetentionLabeled { get; set; }
+
     [ConfigSection("AzureAd")]
     public AzureAdConfig AzureAdConfig { get; set; } = null!;
 

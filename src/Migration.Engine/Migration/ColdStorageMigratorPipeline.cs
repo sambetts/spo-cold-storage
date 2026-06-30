@@ -27,6 +27,7 @@ public sealed class ColdStorageMigratorPipeline : BaseComponent
     private readonly SharePointPlaceholderWriter _placeholderWriter;
     private readonly BlobStorageUploader _blobUploader;
     private readonly IArchiveEligibilityEvaluator _eligibility;
+    private readonly IArchiveHoldDetector? _holdDetector;
 
     public ColdStorageMigratorPipeline(
         Config config,
@@ -40,6 +41,10 @@ public sealed class ColdStorageMigratorPipeline : BaseComponent
             config,
             new DbArchiveExclusionSource(config, logger),
             new DbFileReadActivitySource(config, logger));
+        // Only stand up the (per-item, CSOM round-trip) hold detector when enabled.
+        _holdDetector = config.ColdStorageSkipRetentionLabeled > 0
+            ? new RetentionLabelHoldDetector(logger)
+            : null;
     }
 
     /// <summary>
@@ -93,6 +98,22 @@ public sealed class ColdStorageMigratorPipeline : BaseComponent
             await _statusWriter.TransitionAsync(envelope.ItemId, MigrationLifecycleStatus.Skipped,
                 $"Skipped: {eligibility.SkipReason}", level: LogLevel.Information, cancellationToken: cancellationToken);
             return true;
+        }
+
+        // --- Compliance-hold gate (issue #15) -----------------------------
+        // Never copy content under a retention/legal-hold label out to Azure.
+        // Runs before any download so held content never leaves SharePoint.
+        if (_holdDetector is not null)
+        {
+            using var holdCtx = await AuthUtils.GetClientContext(_config, file.SiteUrl, _logger, null).ConfigureAwait(false);
+            var hold = await _holdDetector.CheckAsync(holdCtx, file.ServerRelativeFilePath, cancellationToken).ConfigureAwait(false);
+            if (hold.IsOnHold)
+            {
+                _logger.LogInformation("Skipping '{Url}': {Reason}", file.FullSharePointUrl, hold.Reason);
+                await _statusWriter.TransitionAsync(envelope.ItemId, MigrationLifecycleStatus.Skipped,
+                    $"Skipped: {hold.Reason}", level: LogLevel.Information, cancellationToken: cancellationToken);
+                return true;
+            }
         }
 
         // --- MigrationInProgress: download + upload -----------------------
