@@ -61,6 +61,21 @@ public static class MigrationLifecycleStatusExtensions
     };
 
     /// <summary>
+    /// True for the statuses where a restore has actively claimed an item and is
+    /// working on it (past the Queued stage, before a terminal state). Used by the
+    /// concurrency guard to detect a second restore of the same placeholder
+    /// (issue #10).
+    /// </summary>
+    public static bool IsActiveRestore(this MigrationLifecycleStatus status) => status switch
+    {
+        MigrationLifecycleStatus.RestoreInProgress => true,
+        MigrationLifecycleStatus.RestoredToSharePoint => true,
+        MigrationLifecycleStatus.PostRestoreValidation => true,
+        MigrationLifecycleStatus.PlaceholderRemoving => true,
+        _ => false,
+    };
+
+    /// <summary>
     /// True if the source SharePoint item has been (or should be) removed by this
     /// point in the lifecycle. Used as the guard so we never delete the source
     /// before a successful copy + post-copy validation.

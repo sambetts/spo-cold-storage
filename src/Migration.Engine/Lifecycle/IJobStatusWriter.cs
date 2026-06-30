@@ -66,4 +66,14 @@ public interface IJobStatusWriter
         CancellationToken cancellationToken = default);
 
     Task RecordRestoredAsync(Guid itemId, string restoredServerRelativeUrl, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// True if a DIFFERENT item is already actively restoring the same placeholder
+    /// (cross-process concurrency guard for issue #10). Excludes <paramref name="itemId"/>
+    /// itself.
+    /// </summary>
+    Task<bool> IsRestoreInFlightForOtherItemAsync(
+        Guid itemId,
+        string placeholderServerRelativeUrl,
+        CancellationToken cancellationToken = default);
 }

@@ -193,6 +193,28 @@ public sealed class JobStatusWriter(SPOColdStorageDbContext db, ILogger logger) 
         await _db.SaveChangesAsync(cancellationToken);
     }
 
+    /// <inheritdoc />
+    public async Task<bool> IsRestoreInFlightForOtherItemAsync(
+        Guid itemId,
+        string placeholderServerRelativeUrl,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrEmpty(placeholderServerRelativeUrl))
+        {
+            return false;
+        }
+        // Active-restore statuses can't be expressed in the EF query via the
+        // IsActiveRestore() helper, so enumerate them explicitly here.
+        return await _db.MigrationJobItems
+            .Where(i => i.ItemId != itemId
+                        && i.PlaceholderServerRelativeUrl == placeholderServerRelativeUrl
+                        && (i.Status == MigrationLifecycleStatus.RestoreInProgress
+                            || i.Status == MigrationLifecycleStatus.RestoredToSharePoint
+                            || i.Status == MigrationLifecycleStatus.PostRestoreValidation
+                            || i.Status == MigrationLifecycleStatus.PlaceholderRemoving))
+            .AnyAsync(cancellationToken);
+    }
+
     private void ApplyTransitionInternal(MigrationJobItem item, MigrationLifecycleStatus newStatus, string message)
     {
         var previous = item.Status;
