@@ -136,6 +136,8 @@ public class RestoresController(
             Status = MigrationLifecycleStatus.Queued,
             Level = (int)LogLevel.Information,
             Message = $"Queued for restore from '{container.Name}'.",
+            ActorUpn = upn,
+            Action = "Restore",
         }, cancellationToken).ConfigureAwait(false);
         await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
 

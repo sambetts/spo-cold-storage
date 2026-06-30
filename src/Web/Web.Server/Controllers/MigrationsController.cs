@@ -202,6 +202,8 @@ public class MigrationsController(
                 Status = MigrationLifecycleStatus.Queued,
                 Level = (int)LogLevel.Information,
                 Message = $"Queued for migration to '{container.Name}'.",
+                ActorUpn = upn,
+                Action = "Migrate",
             }, cancellationToken).ConfigureAwait(false);
         }
 
