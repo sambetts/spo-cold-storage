@@ -249,6 +249,9 @@ IF COL_LENGTH('dbo.migration_job_items', 'last_reconciled_at') IS NULL
 
 IF COL_LENGTH('dbo.migration_job_items', 'orphan_detected_at') IS NULL
     ALTER TABLE dbo.migration_job_items ADD orphan_detected_at DATETIME2 NULL;
+
+IF COL_LENGTH('dbo.migration_job_items', 'priority') IS NULL
+    ALTER TABLE dbo.migration_job_items ADD priority INT NOT NULL CONSTRAINT DF_items_priority DEFAULT(0);
 ";
 
         const string addColdStorageLogColumnsSql = @"

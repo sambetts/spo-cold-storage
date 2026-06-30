@@ -138,6 +138,14 @@ public class MigrationJobItem
     [Column("attempts")]
     public int Attempts { get; set; }
 
+    /// <summary>
+    /// Admin-set processing priority (issue #16): higher is more urgent.
+    /// Surfaced in the admin queue view and used to order app-side processing /
+    /// display. (The Service Bus queue itself is FIFO; see QueueController.)
+    /// </summary>
+    [Column("priority")]
+    public int Priority { get; set; }
+
     [Column("validated_at")]
     public DateTime? ValidatedAt { get; set; }
 
