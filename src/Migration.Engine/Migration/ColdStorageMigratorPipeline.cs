@@ -26,6 +26,7 @@ public sealed class ColdStorageMigratorPipeline : BaseComponent
     private readonly IJobStatusWriter _statusWriter;
     private readonly SharePointPlaceholderWriter _placeholderWriter;
     private readonly BlobStorageUploader _blobUploader;
+    private readonly IArchiveEligibilityEvaluator _eligibility;
 
     public ColdStorageMigratorPipeline(
         Config config,
@@ -35,6 +36,7 @@ public sealed class ColdStorageMigratorPipeline : BaseComponent
         _statusWriter = statusWriter ?? throw new ArgumentNullException(nameof(statusWriter));
         _placeholderWriter = new SharePointPlaceholderWriter(logger);
         _blobUploader = new BlobStorageUploader(config, logger);
+        _eligibility = new ArchiveEligibilityEvaluator(config);
     }
 
     /// <summary>
@@ -66,6 +68,28 @@ public sealed class ColdStorageMigratorPipeline : BaseComponent
             await _statusWriter.TransitionAsync(envelope.ItemId, MigrationLifecycleStatus.ValidationFailed,
                 "Invalid SharePoint file info.", level: LogLevel.Warning, cancellationToken: cancellationToken);
             return false;
+        }
+
+        // --- Eligibility gate (issue #2) ----------------------------------
+        // Authoritative choke point: even if an ineligible item slips past the
+        // submit-time filter, it is never copied/deleted here. Skipped is a
+        // terminal, source-intact outcome (handled, so the message completes).
+        var eligibility = await _eligibility.EvaluateAsync(new ArchiveCandidate
+        {
+            ServerRelativeUrl = file.ServerRelativeFilePath,
+            SiteUrl = file.SiteUrl,
+            WebUrl = file.WebUrl,
+            FileSizeBytes = file.FileSize,
+            LastModified = file.LastModified,
+            DriveId = file.DriveId,
+            GraphItemId = file.GraphItemId,
+        }, cancellationToken).ConfigureAwait(false);
+        if (!eligibility.IsEligible)
+        {
+            _logger.LogInformation("Skipping '{Url}': {Reason}", file.FullSharePointUrl, eligibility.SkipReason);
+            await _statusWriter.TransitionAsync(envelope.ItemId, MigrationLifecycleStatus.Skipped,
+                $"Skipped: {eligibility.SkipReason}", level: LogLevel.Information, cancellationToken: cancellationToken);
+            return true;
         }
 
         // --- MigrationInProgress: download + upload -----------------------

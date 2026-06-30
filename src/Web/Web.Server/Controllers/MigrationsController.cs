@@ -5,6 +5,7 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
+using Migration.Engine.Migration;
 using Models;
 using Models.ColdStorage;
 using Web.Authorization;
@@ -28,6 +29,7 @@ public class MigrationsController(
     ILogger<MigrationsController> logger,
     ISiteOwnerAuthorizationService siteOwners,
     IContainerAccessService containerAccess,
+    IArchiveEligibilityEvaluator eligibility,
     IColdStorageBusPublisher publisher) : ControllerBase
 {
     private readonly SPOColdStorageDbContext _db = db ?? throw new ArgumentNullException(nameof(db));
@@ -35,6 +37,7 @@ public class MigrationsController(
     private readonly ILogger<MigrationsController> _logger = logger ?? throw new ArgumentNullException(nameof(logger));
     private readonly ISiteOwnerAuthorizationService _siteOwners = siteOwners ?? throw new ArgumentNullException(nameof(siteOwners));
     private readonly IContainerAccessService _containerAccess = containerAccess ?? throw new ArgumentNullException(nameof(containerAccess));
+    private readonly IArchiveEligibilityEvaluator _eligibility = eligibility ?? throw new ArgumentNullException(nameof(eligibility));
     private readonly IColdStorageBusPublisher _publisher = publisher ?? throw new ArgumentNullException(nameof(publisher));
 
     [HttpPost("start")]
@@ -135,6 +138,24 @@ public class MigrationsController(
                     warnings.Add($"'{dto.ServerRelativeUrl}' is already in flight (status {existing.Status}); skipping.");
                     continue;
                 }
+            }
+
+            // Eligibility gate (issue #2): skip items that fail the configured
+            // size / file-type rules before queueing, with a clear reason
+            // surfaced to the caller (and persisted via the no-work path below).
+            var eligibility = await _eligibility.EvaluateAsync(new ArchiveCandidate
+            {
+                ServerRelativeUrl = dto.ServerRelativeUrl,
+                SiteUrl = request.SiteUrl,
+                WebUrl = request.WebUrl ?? string.Empty,
+                FileSizeBytes = dto.FileSize,
+                ItemKind = dto.ItemKind,
+                LastModified = dto.LastModified,
+            }, cancellationToken).ConfigureAwait(false);
+            if (!eligibility.IsEligible)
+            {
+                warnings.Add($"'{dto.ServerRelativeUrl}' skipped: {eligibility.SkipReason}");
+                continue;
             }
 
             var item = new MigrationJobItem

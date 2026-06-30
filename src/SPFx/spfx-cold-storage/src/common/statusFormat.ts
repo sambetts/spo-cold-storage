@@ -36,6 +36,7 @@ const NUMERIC_TO_NAME: Record<number, MigrationLifecycleStatus> = {
   60: MigrationLifecycleStatus.CompletedWithWarning,
   70: MigrationLifecycleStatus.RetryScheduled,
   80: MigrationLifecycleStatus.Cancelled,
+  81: MigrationLifecycleStatus.Skipped,
 };
 
 const TERMINAL: ReadonlySet<MigrationLifecycleStatus> = new Set([
@@ -49,6 +50,7 @@ const TERMINAL: ReadonlySet<MigrationLifecycleStatus> = new Set([
   MigrationLifecycleStatus.PlaceholderRemoveFailed,
   MigrationLifecycleStatus.CompletedWithWarning,
   MigrationLifecycleStatus.Cancelled,
+  MigrationLifecycleStatus.Skipped,
 ]);
 
 const FAILED_SUFFIX_REGEX = /Failed$/;
@@ -84,6 +86,7 @@ export function colorFor(value: StatusLike): string {
   }
   if (status === MigrationLifecycleStatus.CompletedWithWarning ||
       status === MigrationLifecycleStatus.RetryScheduled ||
+      status === MigrationLifecycleStatus.Skipped ||
       status === MigrationLifecycleStatus.PlaceholderRemoveFailed) {
     return '#797775';
   }

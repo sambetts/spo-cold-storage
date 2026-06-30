@@ -40,6 +40,31 @@ public class Config(Microsoft.Extensions.Configuration.IConfiguration config) : 
     [ConfigValue(true)]
     public int AnalysisSkipHours { get; set; } = 24;
 
+    /// <summary>
+    /// Minimum source file size (in bytes) eligible for archiving. Files below
+    /// this are skipped with a logged reason. 0 (default) disables the check.
+    /// Archiving very small files can cost more to process than they save, so
+    /// this lets an admin tune the ROI floor without a code change (issue #2).
+    /// </summary>
+    [ConfigValue(true)]
+    public int ColdStorageMinFileSizeBytes { get; set; }
+
+    /// <summary>
+    /// Comma/semicolon-separated list of file extensions that must NEVER be
+    /// archived, e.g. <c>.tmp;.ds_store;.lnk</c>. Leading dots optional, case
+    /// insensitive. Empty (default) excludes nothing (issue #2).
+    /// </summary>
+    [ConfigValue(true)]
+    public string ColdStorageExcludedExtensions { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Optional allow-list of file extensions. When non-empty, ONLY these
+    /// extensions are eligible and everything else is skipped. Empty (default)
+    /// allows all extensions (subject to the exclude list) (issue #2).
+    /// </summary>
+    [ConfigValue(true)]
+    public string ColdStorageIncludedExtensions { get; set; } = string.Empty;
+
     [ConfigSection("AzureAd")]
     public AzureAdConfig AzureAdConfig { get; set; } = null!;
 

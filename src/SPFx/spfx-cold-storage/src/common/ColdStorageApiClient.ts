@@ -27,6 +27,7 @@ export enum MigrationLifecycleStatus {
   CompletedWithWarning = 'CompletedWithWarning',
   RetryScheduled = 'RetryScheduled',
   Cancelled = 'Cancelled',
+  Skipped = 'Skipped',
 }
 
 export type ColdStorageItemKind = 'File' | 'Folder';

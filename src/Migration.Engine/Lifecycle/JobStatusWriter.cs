@@ -199,6 +199,7 @@ public sealed class JobStatusWriter(SPOColdStorageDbContext db, ILogger logger) 
         if (newStatus == MigrationLifecycleStatus.RestoreCompleted
             || newStatus == MigrationLifecycleStatus.ColdStorageMigrationCompleted
             || newStatus == MigrationLifecycleStatus.Cancelled
+            || newStatus == MigrationLifecycleStatus.Skipped
             || newStatus == MigrationLifecycleStatus.ValidationFailed
             || newStatus == MigrationLifecycleStatus.CopyToColdStorageFailed)
         {
@@ -262,10 +263,12 @@ public sealed class JobStatusWriter(SPOColdStorageDbContext db, ILogger logger) 
                                 || s == MigrationLifecycleStatus.PlaceholderFailed
                                 || s == MigrationLifecycleStatus.PlaceholderRemoveFailed
                                 || s == MigrationLifecycleStatus.DeleteFailed
-                                || s == MigrationLifecycleStatus.ValidationFailed))
+                                || s == MigrationLifecycleStatus.ValidationFailed
+                                || s == MigrationLifecycleStatus.Skipped))
         {
-            // At least one terminal failure but other items may still be running.
-            // Surface "completed with warning" once every item is terminal, otherwise leave job in-progress.
+            // At least one terminal failure or skip, but other items may still be
+            // running. Surface "completed with warning" once every item is
+            // terminal, otherwise leave the job in-progress.
             if (items.All(s => s.IsTerminal()))
             {
                 job.Status = MigrationLifecycleStatus.CompletedWithWarning;
