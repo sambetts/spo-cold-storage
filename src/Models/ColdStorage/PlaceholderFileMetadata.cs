@@ -32,6 +32,14 @@ public sealed class PlaceholderFileMetadata
     public DateTime MigratedAt { get; set; } = DateTime.MinValue;
     public Guid JobId { get; set; } = Guid.Empty;
 
+    /// <summary>
+    /// Number of prior versions archived alongside the current content (issue
+    /// #18). 0 means only the current version was archived. The version blobs +
+    /// manifest live under <see cref="VersionBlobLayout"/> keys derived from
+    /// <see cref="BlobPath"/>.
+    /// </summary>
+    public int VersionCount { get; set; }
+
     private const string InternetShortcutSection = "InternetShortcut";
     private const string ColdStorageSection = "ColdStorage";
 
@@ -72,6 +80,7 @@ public sealed class PlaceholderFileMetadata
         AppendKv(sb, nameof(OriginalCreated), OriginalCreated.ToString("O", CultureInfo.InvariantCulture));
         AppendKv(sb, nameof(ContentMd5Base64), ContentMd5Base64);
         AppendKv(sb, nameof(MigratedAt), MigratedAt.ToString("O", CultureInfo.InvariantCulture));
+        AppendKv(sb, nameof(VersionCount), VersionCount.ToString(CultureInfo.InvariantCulture));
         return sb.ToString();
     }
 
@@ -136,6 +145,12 @@ public sealed class PlaceholderFileMetadata
             && DateTime.TryParse(migratedRaw, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var migrated))
         {
             result.MigratedAt = migrated;
+        }
+
+        if (meta.TryGetValue(nameof(VersionCount), out var vcRaw)
+            && int.TryParse(vcRaw, NumberStyles.Integer, CultureInfo.InvariantCulture, out var vc))
+        {
+            result.VersionCount = vc;
         }
 
         if (string.IsNullOrEmpty(result.ContainerName)
