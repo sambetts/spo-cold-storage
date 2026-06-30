@@ -231,6 +231,17 @@ BEGIN
     );
 END;";
 
+        const string addColdStorageItemColumnsSql = @"
+IF COL_LENGTH('dbo.migration_job_items', 'original_created_by') IS NULL
+    ALTER TABLE dbo.migration_job_items ADD original_created_by NVARCHAR(256) NULL;
+
+IF COL_LENGTH('dbo.migration_job_items', 'original_modified_by') IS NULL
+    ALTER TABLE dbo.migration_job_items ADD original_modified_by NVARCHAR(256) NULL;
+
+IF COL_LENGTH('dbo.migration_job_items', 'original_created') IS NULL
+    ALTER TABLE dbo.migration_job_items ADD original_created DATETIME2 NULL;
+";
+
         const string createColdStorageIndexesSql = @"
 IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_migration_job_items_job' AND object_id = OBJECT_ID('dbo.migration_job_items'))
     CREATE INDEX IX_migration_job_items_job ON dbo.migration_job_items(job_id);
@@ -247,6 +258,7 @@ IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_migration_job_logs_job
 
         await context.Database.ExecuteSqlRawAsync(createContainersSql);
         await context.Database.ExecuteSqlRawAsync(createJobsSql);
+        await context.Database.ExecuteSqlRawAsync(addColdStorageItemColumnsSql);
         await context.Database.ExecuteSqlRawAsync(createColdStorageIndexesSql);
     }
 }

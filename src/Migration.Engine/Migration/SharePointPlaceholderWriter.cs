@@ -129,6 +129,100 @@ public sealed class SharePointPlaceholderWriter(ILogger logger)
         }
     }
 
+    /// <summary>
+    /// Internal names of the read-only-ish columns stamped onto the placeholder
+    /// list item so the original authorship/edit trail stays visible in the
+    /// library after archiving (issue #1).
+    /// </summary>
+    private const string FieldOriginalAuthor = "ColdStorageOriginalAuthor";
+    private const string FieldOriginalEditor = "ColdStorageOriginalEditor";
+    private const string FieldOriginalModified = "ColdStorageOriginalModified";
+    private const string FieldOriginalCreated = "ColdStorageOriginalCreated";
+
+    /// <summary>
+    /// Ensures the cold-storage "original metadata" columns exist on the
+    /// placeholder's library and stamps the captured author/editor/timestamps
+    /// onto the placeholder list item. Best-effort: a failure here is logged and
+    /// swallowed so it never undoes an otherwise-successful migration (mirrors
+    /// <see cref="CopyRoleAssignmentsAsync"/>).
+    /// </summary>
+    public async Task<bool> StampOriginalMetadataAsync(
+        ClientContext ctx,
+        string placeholderServerRelativeUrl,
+        PlaceholderFileMetadata metadata,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(ctx);
+        ArgumentNullException.ThrowIfNull(metadata);
+        cancellationToken.ThrowIfCancellationRequested();
+
+        try
+        {
+            var phFile = ctx.Web.GetFileByServerRelativeUrl(placeholderServerRelativeUrl);
+            var item = phFile.ListItemAllFields;
+            ctx.Load(item, i => i.ParentList);
+            var list = item.ParentList;
+            ctx.Load(list, l => l.Fields.Include(f => f.InternalName));
+            await ctx.ExecuteQueryAsync().ConfigureAwait(false);
+
+            var existing = new HashSet<string>(
+                list.Fields.Select(f => f.InternalName), StringComparer.OrdinalIgnoreCase);
+
+            EnsureTextField(list, existing, FieldOriginalAuthor, "Original Author");
+            EnsureTextField(list, existing, FieldOriginalEditor, "Original Editor");
+            EnsureDateField(list, existing, FieldOriginalModified, "Original Modified");
+            EnsureDateField(list, existing, FieldOriginalCreated, "Original Created");
+            await ctx.ExecuteQueryAsync().ConfigureAwait(false);
+
+            SetIfPresent(item, FieldOriginalAuthor, metadata.OriginalCreatedBy);
+            SetIfPresent(item, FieldOriginalEditor, metadata.OriginalModifiedBy);
+            if (metadata.OriginalLastModified > DateTime.MinValue)
+            {
+                item[FieldOriginalModified] = metadata.OriginalLastModified;
+            }
+            if (metadata.OriginalCreated > DateTime.MinValue)
+            {
+                item[FieldOriginalCreated] = metadata.OriginalCreated;
+            }
+            item.Update();
+            await ctx.ExecuteQueryAsync().ConfigureAwait(false);
+            return true;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "Failed to stamp original-metadata columns onto placeholder '{Url}'. Continuing.", placeholderServerRelativeUrl);
+            return false;
+        }
+    }
+
+    private static void EnsureTextField(List list, HashSet<string> existing, string internalName, string displayName)
+    {
+        if (existing.Contains(internalName))
+        {
+            return;
+        }
+        var xml = $"<Field Type='Text' DisplayName='{displayName}' Name='{internalName}' StaticName='{internalName}' Group='Cold Storage' />";
+        list.Fields.AddFieldAsXml(xml, true, AddFieldOptions.AddFieldInternalNameHint);
+    }
+
+    private static void EnsureDateField(List list, HashSet<string> existing, string internalName, string displayName)
+    {
+        if (existing.Contains(internalName))
+        {
+            return;
+        }
+        var xml = $"<Field Type='DateTime' Format='DateTime' DisplayName='{displayName}' Name='{internalName}' StaticName='{internalName}' Group='Cold Storage' />";
+        list.Fields.AddFieldAsXml(xml, true, AddFieldOptions.AddFieldInternalNameHint);
+    }
+
+    private static void SetIfPresent(ListItem item, string internalName, string? value)
+    {
+        if (!string.IsNullOrEmpty(value))
+        {
+            item[internalName] = value;
+        }
+    }
+
     private static string GetParentFolder(string serverRelativeUrl)
     {
         var idx = serverRelativeUrl.LastIndexOf('/');

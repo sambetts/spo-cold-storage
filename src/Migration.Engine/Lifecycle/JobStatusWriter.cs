@@ -145,6 +145,31 @@ public sealed class JobStatusWriter(SPOColdStorageDbContext db, ILogger logger) 
     }
 
     /// <inheritdoc />
+    public async Task RecordSourceMetadataAsync(
+        Guid itemId,
+        string? originalCreatedBy,
+        string? originalModifiedBy,
+        DateTime? originalCreated,
+        DateTime? originalModified,
+        CancellationToken cancellationToken = default)
+    {
+        var item = await _db.MigrationJobItems.FirstOrDefaultAsync(i => i.ItemId == itemId, cancellationToken);
+        if (item == null)
+        {
+            return;
+        }
+        item.OriginalCreatedBy = originalCreatedBy is null ? null : Truncate(originalCreatedBy, 256);
+        item.OriginalModifiedBy = originalModifiedBy is null ? null : Truncate(originalModifiedBy, 256);
+        item.OriginalCreated = originalCreated;
+        if (originalModified.HasValue)
+        {
+            item.SourceLastModified = originalModified;
+        }
+        item.UpdatedAt = DateTime.UtcNow;
+        await _db.SaveChangesAsync(cancellationToken);
+    }
+
+    /// <inheritdoc />
     public async Task RecordRestoredAsync(Guid itemId, string restoredServerRelativeUrl, CancellationToken cancellationToken = default)
     {
         var item = await _db.MigrationJobItems.FirstOrDefaultAsync(i => i.ItemId == itemId, cancellationToken);

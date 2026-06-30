@@ -129,6 +129,13 @@ public sealed class ColdStorageMigratorPipeline : BaseComponent
         await _statusWriter.TransitionAsync(envelope.ItemId, MigrationLifecycleStatus.DeletePending,
             "Removing source file from SharePoint.", cancellationToken: cancellationToken);
 
+        // Original authorship captured from the live item before it is deleted so
+        // it survives onto the placeholder + restore (issue #1).
+        string? originalCreatedBy = null;
+        string? originalModifiedBy = null;
+        DateTime? originalCreated = null;
+        DateTime? originalModified = null;
+
         ClientContext? spCtx = null;
         try
         {
@@ -143,6 +150,8 @@ public sealed class ColdStorageMigratorPipeline : BaseComponent
             }
             else
             {
+                CaptureSourceAuthorship(spFile, ref originalCreatedBy, ref originalModifiedBy, ref originalCreated, ref originalModified);
+
                 if (spFile.CheckOutType != CheckOutType.None)
                 {
                     await _statusWriter.TransitionAsync(envelope.ItemId, MigrationLifecycleStatus.DeleteFailed,
@@ -153,6 +162,7 @@ public sealed class ColdStorageMigratorPipeline : BaseComponent
                 spFile.DeleteObject();
                 await spCtx.ExecuteQueryAsync().ConfigureAwait(false);
             }
+            await _statusWriter.RecordSourceMetadataAsync(envelope.ItemId, originalCreatedBy, originalModifiedBy, originalCreated, originalModified, cancellationToken);
             await _statusWriter.RecordSourceDeletedAsync(envelope.ItemId, cancellationToken);
         }
         catch (Exception ex)
@@ -174,7 +184,10 @@ public sealed class ColdStorageMigratorPipeline : BaseComponent
                 OriginalServerRelativeUrl = file.ServerRelativeFilePath,
                 OriginalFileName = Path.GetFileName(file.ServerRelativeFilePath),
                 OriginalFileSize = size,
-                OriginalLastModified = file.LastModified,
+                OriginalLastModified = originalModified ?? file.LastModified,
+                OriginalCreatedBy = originalCreatedBy ?? string.Empty,
+                OriginalModifiedBy = originalModifiedBy ?? string.Empty,
+                OriginalCreated = originalCreated ?? (file.CreatedDate ?? DateTime.MinValue),
                 ContainerName = blobContainerName,
                 BlobPath = blobPath,
                 BlobUrl = blobUrl,
@@ -191,6 +204,10 @@ public sealed class ColdStorageMigratorPipeline : BaseComponent
                 // redirect to a short-lived blob SAS so end users get a working download
                 // even when storage public network access is locked down by policy.
                 userFacingUrl: BuildPlaceholderUserFacingUrl(envelope.ItemId)).ConfigureAwait(false);
+
+            // Best-effort: stamp the original authorship onto visible placeholder
+            // columns so the audit trail isn't lost (issue #1). Never fails the migration.
+            await _placeholderWriter.StampOriginalMetadataAsync(spCtx!, placeholderUrl, metadata, cancellationToken).ConfigureAwait(false);
 
             await _statusWriter.RecordPlaceholderCreatedAsync(envelope.ItemId, placeholderUrl, cancellationToken);
             return true;
@@ -213,6 +230,43 @@ public sealed class ColdStorageMigratorPipeline : BaseComponent
     {
         var serviceClient = BlobServiceClientFactory.Create(_config.ConnectionStrings.Storage, _config);
         return serviceClient.GetBlobContainerClient(containerName);
+    }
+
+    /// <summary>
+    /// Reads the original Created By / Modified By / Created / Modified values
+    /// from the live list item before it is deleted. Best-effort: any read
+    /// failure leaves the out values null and is ignored, so capturing the
+    /// authorship trail can never block a migration.
+    /// </summary>
+    private static void CaptureSourceAuthorship(
+        Microsoft.SharePoint.Client.File spFile,
+        ref string? createdBy,
+        ref string? modifiedBy,
+        ref DateTime? created,
+        ref DateTime? modified)
+    {
+        try
+        {
+            var li = spFile.ListItemAllFields;
+            if (li is null)
+            {
+                return;
+            }
+            createdBy = (li["Author"] as FieldUserValue)?.LookupValue;
+            modifiedBy = (li["Editor"] as FieldUserValue)?.LookupValue;
+            if (li["Created"] is DateTime c)
+            {
+                created = c;
+            }
+            if (li["Modified"] is DateTime m)
+            {
+                modified = m;
+            }
+        }
+        catch (Exception)
+        {
+            // Best-effort capture; never block the migration on a metadata read.
+        }
     }
 
     /// <summary>

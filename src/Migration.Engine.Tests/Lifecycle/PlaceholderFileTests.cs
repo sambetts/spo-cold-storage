@@ -20,6 +20,9 @@ public class PlaceholderFileTests
             OriginalFileName = "Q1 Plan.pptx",
             OriginalFileSize = 24_700_419L,
             OriginalLastModified = new DateTime(2024, 3, 11, 9, 22, 5, DateTimeKind.Utc),
+            OriginalCreatedBy = "Ada Lovelace",
+            OriginalModifiedBy = "Alan Turing",
+            OriginalCreated = new DateTime(2023, 1, 2, 8, 0, 0, DateTimeKind.Utc),
             ContentMd5Base64 = "1B2M2Y8AsgTpgAmY7PhCfg==",
             MigratedAt = new DateTime(2024, 6, 15, 17, 4, 18, DateTimeKind.Utc),
         };
@@ -38,6 +41,9 @@ public class PlaceholderFileTests
         Assert.Equal(original.OriginalFileName, parsed.OriginalFileName);
         Assert.Equal(original.OriginalFileSize, parsed.OriginalFileSize);
         Assert.Equal(original.OriginalLastModified, parsed.OriginalLastModified);
+        Assert.Equal(original.OriginalCreatedBy, parsed.OriginalCreatedBy);
+        Assert.Equal(original.OriginalModifiedBy, parsed.OriginalModifiedBy);
+        Assert.Equal(original.OriginalCreated, parsed.OriginalCreated);
         Assert.Equal(original.ContentMd5Base64, parsed.ContentMd5Base64);
         Assert.Equal(original.MigratedAt, parsed.MigratedAt);
     }
@@ -101,6 +107,26 @@ public class PlaceholderFileTests
         Assert.Equal("c", parsed!.ContainerName);
         Assert.Equal("p", parsed.BlobPath);
         Assert.Equal("/sites/x/y.docx", parsed.OriginalServerRelativeUrl);
+    }
+
+    [Fact]
+    public void TryParse_LegacyPlaceholderWithoutAuthorFields_StillParses()
+    {
+        // Placeholders written before issue #1 have no author/editor/created keys.
+        // They must still parse (fields default to empty) so existing archives stay restorable.
+        const string content =
+            "[InternetShortcut]\r\n" +
+            "URL=https://example.blob.core.windows.net/c/p\r\n" +
+            "[ColdStorage]\r\n" +
+            "ContainerName=c\r\n" +
+            "BlobPath=p\r\n" +
+            "OriginalServerRelativeUrl=/sites/x/y.docx\r\n";
+        var parsed = PlaceholderFileMetadata.TryParse(content);
+
+        Assert.NotNull(parsed);
+        Assert.Equal(string.Empty, parsed!.OriginalCreatedBy);
+        Assert.Equal(string.Empty, parsed.OriginalModifiedBy);
+        Assert.Equal(DateTime.MinValue, parsed.OriginalCreated);
     }
 }
 

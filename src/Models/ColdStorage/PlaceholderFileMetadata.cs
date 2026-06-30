@@ -16,6 +16,15 @@ public sealed class PlaceholderFileMetadata
     public string OriginalFileName { get; set; } = string.Empty;
     public long OriginalFileSize { get; set; }
     public DateTime OriginalLastModified { get; set; } = DateTime.MinValue;
+
+    /// <summary>Display name of the original file's author (Created By).</summary>
+    public string OriginalCreatedBy { get; set; } = string.Empty;
+
+    /// <summary>Display name of the last person to edit the file (Modified By).</summary>
+    public string OriginalModifiedBy { get; set; } = string.Empty;
+
+    /// <summary>Original created timestamp of the source file.</summary>
+    public DateTime OriginalCreated { get; set; } = DateTime.MinValue;
     public string ContainerName { get; set; } = string.Empty;
     public string BlobPath { get; set; } = string.Empty;
     public string BlobUrl { get; set; } = string.Empty;
@@ -58,6 +67,9 @@ public sealed class PlaceholderFileMetadata
         AppendKv(sb, nameof(OriginalFileName), OriginalFileName);
         AppendKv(sb, nameof(OriginalFileSize), OriginalFileSize.ToString(CultureInfo.InvariantCulture));
         AppendKv(sb, nameof(OriginalLastModified), OriginalLastModified.ToString("O", CultureInfo.InvariantCulture));
+        AppendKv(sb, nameof(OriginalCreatedBy), OriginalCreatedBy);
+        AppendKv(sb, nameof(OriginalModifiedBy), OriginalModifiedBy);
+        AppendKv(sb, nameof(OriginalCreated), OriginalCreated.ToString("O", CultureInfo.InvariantCulture));
         AppendKv(sb, nameof(ContentMd5Base64), ContentMd5Base64);
         AppendKv(sb, nameof(MigratedAt), MigratedAt.ToString("O", CultureInfo.InvariantCulture));
         return sb.ToString();
@@ -91,6 +103,8 @@ public sealed class PlaceholderFileMetadata
             OriginalWebUrl = meta.GetValueOrDefault(nameof(OriginalWebUrl), string.Empty),
             OriginalServerRelativeUrl = meta.GetValueOrDefault(nameof(OriginalServerRelativeUrl), string.Empty),
             OriginalFileName = meta.GetValueOrDefault(nameof(OriginalFileName), string.Empty),
+            OriginalCreatedBy = meta.GetValueOrDefault(nameof(OriginalCreatedBy), string.Empty),
+            OriginalModifiedBy = meta.GetValueOrDefault(nameof(OriginalModifiedBy), string.Empty),
             ContentMd5Base64 = meta.GetValueOrDefault(nameof(ContentMd5Base64), string.Empty),
         };
 
@@ -110,6 +124,12 @@ public sealed class PlaceholderFileMetadata
             && DateTime.TryParse(lmRaw, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var lm))
         {
             result.OriginalLastModified = lm;
+        }
+
+        if (meta.TryGetValue(nameof(OriginalCreated), out var createdRaw)
+            && DateTime.TryParse(createdRaw, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var created))
+        {
+            result.OriginalCreated = created;
         }
 
         if (meta.TryGetValue(nameof(MigratedAt), out var migratedRaw)
