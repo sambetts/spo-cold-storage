@@ -60,6 +60,17 @@ public interface IArchiveExclusionSource
 }
 
 /// <summary>
+/// Supplies a file's persisted read-activity signal (all-time access count from
+/// indexer analytics) so heavily-read files can be kept out of cold storage
+/// (issue #11). Returns null when no signal is available — the rule then does
+/// not block, since absence of data must not cause a wrong archive decision.
+/// </summary>
+public interface IFileReadActivitySource
+{
+    Task<int?> GetAccessCountAsync(ArchiveCandidate candidate, CancellationToken cancellationToken = default);
+}
+
+/// <summary>
 /// Config-driven eligibility rules (issue #2): a minimum file-size floor plus
 /// include/exclude file-extension lists. Tunable via app settings with no code
 /// change. This is the foundation that later issues (exclusion scopes, read
@@ -71,26 +82,39 @@ public sealed class ArchiveEligibilityEvaluator : IArchiveEligibilityEvaluator
     private readonly HashSet<string> _excluded;
     private readonly HashSet<string> _included;
     private readonly IArchiveExclusionSource? _exclusionSource;
+    private readonly IFileReadActivitySource? _readActivitySource;
+    private readonly int _maxAccessCount;
 
-    public ArchiveEligibilityEvaluator(Config config, IArchiveExclusionSource? exclusionSource = null)
+    public ArchiveEligibilityEvaluator(Config config, IArchiveExclusionSource? exclusionSource = null, IFileReadActivitySource? readActivitySource = null)
         : this(
             (config ?? throw new ArgumentNullException(nameof(config))).ColdStorageMinFileSizeBytes,
             config.ColdStorageExcludedExtensions,
             config.ColdStorageIncludedExtensions,
-            exclusionSource)
+            exclusionSource,
+            readActivitySource,
+            config.ColdStorageMaxAccessCount)
     {
     }
 
     /// <summary>
     /// Explicit-values constructor (used directly by tests). <paramref name="minSizeBytes"/>
-    /// of 0 or less disables the size floor.
+    /// of 0 or less disables the size floor; <paramref name="maxAccessCount"/> of 0 or
+    /// less disables the read-activity rule.
     /// </summary>
-    public ArchiveEligibilityEvaluator(long minSizeBytes, string? excludedExtensions, string? includedExtensions, IArchiveExclusionSource? exclusionSource = null)
+    public ArchiveEligibilityEvaluator(
+        long minSizeBytes,
+        string? excludedExtensions,
+        string? includedExtensions,
+        IArchiveExclusionSource? exclusionSource = null,
+        IFileReadActivitySource? readActivitySource = null,
+        int maxAccessCount = 0)
     {
         _minSizeBytes = minSizeBytes > 0 ? minSizeBytes : 0;
         _excluded = ParseExtensions(excludedExtensions);
         _included = ParseExtensions(includedExtensions);
         _exclusionSource = exclusionSource;
+        _readActivitySource = readActivitySource;
+        _maxAccessCount = maxAccessCount > 0 ? maxAccessCount : 0;
     }
 
     public async Task<ArchiveEligibilityResult> EvaluateAsync(ArchiveCandidate candidate, CancellationToken cancellationToken = default)
@@ -136,6 +160,19 @@ public sealed class ArchiveEligibilityEvaluator : IArchiveEligibilityEvaluator
         {
             return ArchiveEligibilityResult.Skip(
                 $"file is {candidate.FileSizeBytes:N0} bytes, below the {_minSizeBytes:N0}-byte minimum archive size");
+        }
+
+        // Read-activity rule (issue #11): keep heavily-read documents out of cold
+        // storage even when they're rarely edited. Uses the persisted all-time
+        // access count; absence of a signal never blocks.
+        if (_readActivitySource is not null && _maxAccessCount > 0)
+        {
+            var accessCount = await _readActivitySource.GetAccessCountAsync(candidate, cancellationToken).ConfigureAwait(false);
+            if (accessCount.HasValue && accessCount.Value > _maxAccessCount)
+            {
+                return ArchiveEligibilityResult.Skip(
+                    $"file has high read activity (access count {accessCount.Value} > {_maxAccessCount}); kept available rather than archived");
+            }
         }
 
         return ArchiveEligibilityResult.Eligible;
