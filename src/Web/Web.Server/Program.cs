@@ -87,6 +87,7 @@ public class Program
         // Cold-storage services backing the new SPFx-facing API surface.
         builder.Services.AddScoped<ISiteOwnerAuthorizationService, SiteOwnerAuthorizationService>();
         builder.Services.AddScoped<IContainerAccessService, ContainerAccessService>();
+        builder.Services.AddSingleton<Migration.Engine.Migration.IArchiveEligibilityEvaluator, Migration.Engine.Migration.ArchiveEligibilityEvaluator>();
         builder.Services.AddSingleton<IColdStorageBusPublisher, ColdStorageBusPublisher>();
 
         var app = builder.Build();

@@ -29,6 +29,13 @@ public enum MigrationLifecycleStatus
     CompletedWithWarning = 60,
     RetryScheduled = 70,
     Cancelled = 80,
+
+    /// <summary>
+    /// The item was deliberately not archived because it failed an eligibility
+    /// rule (too small, excluded file type, excluded scope, under legal hold,
+    /// still actively read, ...). Terminal and the source is always left intact.
+    /// </summary>
+    Skipped = 81,
 }
 
 public static class MigrationLifecycleStatusExtensions
@@ -49,6 +56,7 @@ public static class MigrationLifecycleStatusExtensions
         MigrationLifecycleStatus.PlaceholderRemoveFailed => true,
         MigrationLifecycleStatus.CompletedWithWarning => true,
         MigrationLifecycleStatus.Cancelled => true,
+        MigrationLifecycleStatus.Skipped => true,
         _ => false,
     };
 
