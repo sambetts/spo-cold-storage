@@ -130,6 +130,15 @@ public class Config(Microsoft.Extensions.Configuration.IConfiguration config) : 
     [ConfigValue(true)]
     public string ColdStorageSpoPricePerGbMonth { get; set; } = "0.20";
 
+    /// <summary>
+    /// Grace window (hours) a user is given between a pre-archive notice and an
+    /// auto-archive actually moving their file (issue #17). 0 (default) disables
+    /// pre-archive notices — matching today's user-initiated flow, which needs no
+    /// warning. Consumed by the (future) auto-archive trigger via PreArchiveGate.
+    /// </summary>
+    [ConfigValue(true)]
+    public int ColdStoragePreArchiveGraceHours { get; set; }
+
     [ConfigSection("AzureAd")]
     public AzureAdConfig AzureAdConfig { get; set; } = null!;
 

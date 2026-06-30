@@ -88,6 +88,8 @@ public class Program
         builder.Services.AddScoped<ISiteOwnerAuthorizationService, SiteOwnerAuthorizationService>();
         builder.Services.AddScoped<IContainerAccessService, ContainerAccessService>();
         builder.Services.AddScoped<IColdStorageAdminAuthorizationService, ColdStorageAdminAuthorizationService>();
+        builder.Services.AddSingleton<IPreArchiveNotifier, LoggingPreArchiveNotifier>();
+        builder.Services.AddScoped<PreArchiveNoticeService>();
         builder.Services.AddSingleton<Migration.Engine.Migration.IArchiveExclusionSource>(sp =>
             new Migration.Engine.Migration.DbArchiveExclusionSource(
                 sp.GetRequiredService<Config>(),

@@ -276,6 +276,21 @@ BEGIN
     );
 END;";
 
+        const string createPreArchiveNoticesSql = @"
+IF OBJECT_ID('dbo.pre_archive_notices', 'U') IS NULL
+BEGIN
+    CREATE TABLE dbo.pre_archive_notices (
+        id INT IDENTITY(1,1) PRIMARY KEY,
+        site_url NVARCHAR(2048) NOT NULL,
+        server_relative_url NVARCHAR(2048) NOT NULL,
+        notified_upn NVARCHAR(256) NULL,
+        notified_at DATETIME2 NOT NULL CONSTRAINT DF_pan_notified DEFAULT(SYSUTCDATETIME()),
+        grace_until DATETIME2 NOT NULL,
+        status INT NOT NULL CONSTRAINT DF_pan_status DEFAULT(0),
+        created_at DATETIME2 NOT NULL CONSTRAINT DF_pan_created DEFAULT(SYSUTCDATETIME())
+    );
+END;";
+
         const string createColdStorageIndexesSql = @"
 IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_migration_job_items_job' AND object_id = OBJECT_ID('dbo.migration_job_items'))
     CREATE INDEX IX_migration_job_items_job ON dbo.migration_job_items(job_id);
@@ -296,6 +311,7 @@ IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_migration_job_logs_act
         await context.Database.ExecuteSqlRawAsync(createContainersSql);
         await context.Database.ExecuteSqlRawAsync(createJobsSql);
         await context.Database.ExecuteSqlRawAsync(createExclusionsSql);
+        await context.Database.ExecuteSqlRawAsync(createPreArchiveNoticesSql);
         await context.Database.ExecuteSqlRawAsync(addColdStorageItemColumnsSql);
         await context.Database.ExecuteSqlRawAsync(addColdStorageLogColumnsSql);
         await context.Database.ExecuteSqlRawAsync(createColdStorageIndexesSql);
