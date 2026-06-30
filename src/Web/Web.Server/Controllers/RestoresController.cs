@@ -1,9 +1,12 @@
 using Entities;
+using Entities.Configuration;
 using Entities.DBEntities.ColdStorage;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
+using Migration.Engine.Lifecycle;
+using Migration.Engine.Restore;
 using Models.ColdStorage;
 using Web.Authorization;
 using Web.Models.Api;
@@ -14,21 +17,27 @@ namespace Web.Controllers;
 /// <summary>
 /// <c>POST /api/restores/start</c> – starts a restore request for a
 /// previously migrated item represented by a .url placeholder.
+/// <c>POST /api/restores/force</c> – admin break-glass restore straight from a
+/// blob, bypassing the queue and placeholder (issue #6).
 /// </summary>
 [Authorize]
 [ApiController]
 [Route("api/restores")]
 public class RestoresController(
     SPOColdStorageDbContext db,
+    Config config,
     ILogger<RestoresController> logger,
     ISiteOwnerAuthorizationService siteOwners,
     IContainerAccessService containerAccess,
+    IColdStorageAdminAuthorizationService admin,
     IColdStorageBusPublisher publisher) : ControllerBase
 {
     private readonly SPOColdStorageDbContext _db = db ?? throw new ArgumentNullException(nameof(db));
+    private readonly Config _config = config ?? throw new ArgumentNullException(nameof(config));
     private readonly ILogger<RestoresController> _logger = logger ?? throw new ArgumentNullException(nameof(logger));
     private readonly ISiteOwnerAuthorizationService _siteOwners = siteOwners ?? throw new ArgumentNullException(nameof(siteOwners));
     private readonly IContainerAccessService _containerAccess = containerAccess ?? throw new ArgumentNullException(nameof(containerAccess));
+    private readonly IColdStorageAdminAuthorizationService _admin = admin ?? throw new ArgumentNullException(nameof(admin));
     private readonly IColdStorageBusPublisher _publisher = publisher ?? throw new ArgumentNullException(nameof(publisher));
 
     [HttpPost("start")]
@@ -164,5 +173,120 @@ public class RestoresController(
             JobId = job.JobId,
             Status = MigrationLifecycleStatus.Queued,
         });
+    }
+
+    /// <summary>
+    /// Admin break-glass restore (issue #6). Runs synchronously and pushes a blob
+    /// straight back to a target library, bypassing the queue and not requiring a
+    /// placeholder — for when normal self-service restore can't run. Gated by
+    /// admin authorization and fully audited.
+    /// </summary>
+    [HttpPost("force")]
+    public async Task<ActionResult<AcceptedJobResponse>> ForceAsync([FromBody] ForceRestoreRequest request, CancellationToken cancellationToken)
+    {
+        if (!await _admin.IsAdminAsync(User, cancellationToken).ConfigureAwait(false))
+        {
+            return Forbid();
+        }
+        if (request is null)
+        {
+            return BadRequest("Request body is required.");
+        }
+
+        var upn = User.GetUpn();
+        if (string.IsNullOrEmpty(upn))
+        {
+            return Unauthorized("Caller has no UPN claim.");
+        }
+
+        string? siteUrl = request.SiteUrl;
+        string? blobContainerName = request.BlobContainerName;
+        string? blobPath = request.BlobPath;
+        string? target = request.TargetServerRelativeUrl;
+        string? placeholder = null;
+        int? containerId = null;
+
+        if (request.ItemId is Guid itemId)
+        {
+            var src = await _db.MigrationJobItems
+                .AsNoTracking()
+                .FirstOrDefaultAsync(i => i.ItemId == itemId, cancellationToken)
+                .ConfigureAwait(false);
+            if (src is null)
+            {
+                return NotFound("No migration item with that id.");
+            }
+            siteUrl ??= src.SpSiteUrl;
+            blobContainerName ??= src.BlobContainerName;
+            blobPath ??= src.BlobPath;
+            target ??= src.SpServerRelativeUrl;
+            placeholder = src.PlaceholderServerRelativeUrl;
+            containerId = src.ContainerId;
+        }
+
+        if (string.IsNullOrEmpty(siteUrl) || string.IsNullOrEmpty(blobContainerName)
+            || string.IsNullOrEmpty(blobPath) || string.IsNullOrEmpty(target))
+        {
+            return BadRequest("Provide itemId, or all of siteUrl + blobContainerName + blobPath + targetServerRelativeUrl.");
+        }
+
+        var job = new MigrationJob
+        {
+            JobId = Guid.NewGuid(),
+            Operation = MigrationOperationKind.Restore,
+            RequestedByUpn = upn,
+            SiteUrl = siteUrl,
+            ContainerId = containerId,
+            ConflictBehavior = request.ConflictBehavior,
+            Status = MigrationLifecycleStatus.Queued,
+            CreatedAt = DateTime.UtcNow,
+            UpdatedAt = DateTime.UtcNow,
+            Summary = "Admin break-glass restore.",
+        };
+        var item = new MigrationJobItem
+        {
+            ItemId = Guid.NewGuid(),
+            JobId = job.JobId,
+            SpSiteUrl = siteUrl,
+            SpServerRelativeUrl = target,
+            PlaceholderServerRelativeUrl = placeholder,
+            ContainerId = containerId,
+            BlobContainerName = blobContainerName,
+            BlobPath = blobPath,
+            Status = MigrationLifecycleStatus.Queued,
+            CreatedAt = DateTime.UtcNow,
+            UpdatedAt = DateTime.UtcNow,
+        };
+        _db.MigrationJobs.Add(job);
+        _db.MigrationJobItems.Add(item);
+        _db.MigrationJobLogs.Add(new MigrationJobLog
+        {
+            JobId = job.JobId,
+            ItemId = item.ItemId,
+            Status = MigrationLifecycleStatus.Queued,
+            Level = (int)LogLevel.Warning,
+            Message = $"Break-glass restore requested by {upn} for '{blobContainerName}/{blobPath}' -> '{target}'.",
+            ActorUpn = upn,
+            Action = "ForceRestore",
+        });
+        await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+
+        var writer = new JobStatusWriter(_db, _logger);
+        var pipeline = new SharePointRestorePipeline(_config, _logger, writer);
+        var ok = await pipeline.ForceRestoreFromBlobAsync(
+            job.JobId, item.ItemId, siteUrl, blobContainerName, blobPath, target,
+            request.ConflictBehavior, placeholder, cancellationToken).ConfigureAwait(false);
+
+        var finalStatus = await _db.MigrationJobItems
+            .AsNoTracking()
+            .Where(i => i.ItemId == item.ItemId)
+            .Select(i => i.Status)
+            .FirstOrDefaultAsync(cancellationToken)
+            .ConfigureAwait(false);
+
+        _logger.LogInformation("Break-glass restore {JobId} by {Upn} finished: success={Ok}, status={Status}.", job.JobId, upn, ok, finalStatus);
+
+        var response = new AcceptedJobResponse { JobId = job.JobId, Status = finalStatus };
+        return ok ? Ok(response) : StatusCode(StatusCodes.Status502BadGateway, response);
     }
 }
