@@ -240,6 +240,9 @@ IF COL_LENGTH('dbo.migration_job_items', 'original_modified_by') IS NULL
 
 IF COL_LENGTH('dbo.migration_job_items', 'original_created') IS NULL
     ALTER TABLE dbo.migration_job_items ADD original_created DATETIME2 NULL;
+
+IF COL_LENGTH('dbo.migration_job_items', 'last_error_detail') IS NULL
+    ALTER TABLE dbo.migration_job_items ADD last_error_detail NVARCHAR(MAX) NULL;
 ";
 
         const string createExclusionsSql = @"

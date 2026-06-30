@@ -492,7 +492,12 @@ export class MigrationProgressDialog {
       statusTd.appendChild(this.makeBadge(item.status));
       tr.appendChild(statusTd);
       tr.appendChild(this.cell(String(item.attempts)));
-      tr.appendChild(this.cell(item.lastError ?? '', { color: '#a4262c', fontSize: '12px' }));
+      const errCell = this.cell(item.lastError ?? '', { color: '#a4262c', fontSize: '12px' });
+      if (item.lastErrorDetail) {
+        // Friendly summary in the column; raw technical detail on hover (issue #5).
+        errCell.title = item.lastErrorDetail;
+      }
+      tr.appendChild(errCell);
       tbody.appendChild(tr);
     }
     table.appendChild(tbody);
