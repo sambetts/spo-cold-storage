@@ -171,6 +171,7 @@ public class MigrationsController(
                 SourceLastModified = dto.LastModified,
                 ContainerId = container.ID,
                 BlobContainerName = container.BlobContainerName,
+                Priority = request.Priority,
                 Status = MigrationLifecycleStatus.Queued,
                 CreatedAt = DateTime.UtcNow,
                 UpdatedAt = DateTime.UtcNow,

@@ -18,6 +18,9 @@ public class StartMigrationRequest
 
     public bool Recursive { get; set; }
 
+    /// <summary>Optional processing priority (issue #16); higher is more urgent. Default 0.</summary>
+    public int Priority { get; set; }
+
     public List<StartMigrationItem> Items { get; set; } = [];
 }
 
@@ -234,5 +237,35 @@ public class AuditEntryResponse
     public string? ItemUrl { get; set; }
     public string Message { get; set; } = string.Empty;
     public MigrationLifecycleStatus Status { get; set; }
+}
+
+/// <summary>
+/// Admin live-queue view (issue #16): in-flight items + status counts.
+/// </summary>
+public class QueueViewResponse
+{
+    public int TotalInFlight { get; set; }
+    public Dictionary<string, int> CountsByStatus { get; set; } = [];
+    public List<QueueItemResponse> Items { get; set; } = [];
+}
+
+public class QueueItemResponse
+{
+    public Guid ItemId { get; set; }
+    public Guid JobId { get; set; }
+    public MigrationOperationKind Operation { get; set; }
+    public string SpServerRelativeUrl { get; set; } = string.Empty;
+    public MigrationLifecycleStatus Status { get; set; }
+    public int Priority { get; set; }
+    public int Attempts { get; set; }
+    public string RequestedByUpn { get; set; } = string.Empty;
+    public DateTime CreatedAt { get; set; }
+    public DateTime UpdatedAt { get; set; }
+}
+
+/// <summary>Request body for <c>POST /api/admin/queue/{itemId}/priority</c>.</summary>
+public class SetPriorityRequest
+{
+    public int Priority { get; set; }
 }
 

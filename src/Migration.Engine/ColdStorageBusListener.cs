@@ -122,7 +122,16 @@ public sealed class ColdStorageBusListener : BaseComponent
             using var db = new SPOColdStorageDbContext(_config);
             var writer = new JobStatusWriter(db, _logger);
 
-            if (envelope.Operation == MigrationOperationKind.Migrate)
+            // Honour admin queue control (issue #16): if the item was cancelled or
+            // already finished after the message was enqueued, do no work and let
+            // the message complete.
+            var current = await writer.FindItemAsync(envelope.ItemId, args.CancellationToken).ConfigureAwait(false);
+            if (current is not null && current.Status.IsTerminal())
+            {
+                _logger.LogInformation("Item {ItemId} is already {Status} (e.g. admin-cancelled); skipping.", envelope.ItemId, current.Status);
+                success = true;
+            }
+            else if (envelope.Operation == MigrationOperationKind.Migrate)
             {
                 var pipeline = new ColdStorageMigratorPipeline(_config, _logger, writer);
                 var app = await AuthUtils.GetNewClientApp(_config).ConfigureAwait(false);
