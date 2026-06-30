@@ -76,4 +76,56 @@ public class ArchiveEligibilityEvaluatorTests
         var folder = new ArchiveCandidate { ServerRelativeUrl = "/x/Folder", ItemKind = ColdStorageItemKind.Folder, FileSizeBytes = 0 };
         Assert.True((await sut.EvaluateAsync(folder)).IsEligible);
     }
+
+    private sealed class FakeExclusionSource(params ArchiveExclusion[] exclusions) : IArchiveExclusionSource
+    {
+        private readonly IReadOnlyList<ArchiveExclusion> _exclusions = exclusions;
+        public Task<IReadOnlyList<ArchiveExclusion>> GetActiveExclusionsAsync(CancellationToken cancellationToken = default)
+            => Task.FromResult(_exclusions);
+    }
+
+    [Fact]
+    public async Task SiteExclusion_SkipsItemsInThatSite_WithReason()
+    {
+        var source = new FakeExclusionSource(new ArchiveExclusion("https://contoso.sharepoint.com/sites/Direction", null));
+        var sut = new ArchiveEligibilityEvaluator(0, null, null, source);
+
+        var candidate = new ArchiveCandidate
+        {
+            SiteUrl = "https://contoso.sharepoint.com/sites/Direction",
+            ServerRelativeUrl = "/sites/Direction/Shared Documents/plan.docx",
+            FileSizeBytes = 5_000_000,
+        };
+        var result = await sut.EvaluateAsync(candidate);
+        Assert.False(result.IsEligible);
+        Assert.Contains("excluded scope", result.SkipReason);
+    }
+
+    [Theory]
+    [InlineData("/sites/Contoso/Legal Documents/case.docx", false)]
+    [InlineData("/sites/Contoso/Legal Documents", false)]
+    [InlineData("/sites/Contoso/Legal Documents Archive/old.docx", true)] // sibling, segment-aware
+    [InlineData("/sites/Contoso/Shared Documents/ok.docx", true)]
+    public async Task PrefixExclusion_IsSegmentAware(string url, bool eligible)
+    {
+        var source = new FakeExclusionSource(new ArchiveExclusion(null, "/sites/Contoso/Legal Documents"));
+        var sut = new ArchiveEligibilityEvaluator(0, null, null, source);
+
+        var candidate = new ArchiveCandidate { ServerRelativeUrl = url, FileSizeBytes = 1000 };
+        Assert.Equal(eligible, (await sut.EvaluateAsync(candidate)).IsEligible);
+    }
+
+    [Fact]
+    public async Task FolderUnderExcludedScope_IsSkipped()
+    {
+        var source = new FakeExclusionSource(new ArchiveExclusion(null, "/sites/Contoso/Legal Documents"));
+        var sut = new ArchiveEligibilityEvaluator(0, null, null, source);
+
+        var folder = new ArchiveCandidate
+        {
+            ServerRelativeUrl = "/sites/Contoso/Legal Documents/2024",
+            ItemKind = ColdStorageItemKind.Folder,
+        };
+        Assert.False((await sut.EvaluateAsync(folder)).IsEligible);
+    }
 }
