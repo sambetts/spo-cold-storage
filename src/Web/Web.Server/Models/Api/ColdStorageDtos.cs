@@ -116,6 +116,9 @@ public class PlaceholderMetadataResponse
     public string? OriginalFileName { get; set; }
     public long OriginalFileSize { get; set; }
     public DateTime OriginalLastModified { get; set; }
+    public string? OriginalCreatedBy { get; set; }
+    public string? OriginalModifiedBy { get; set; }
+    public DateTime? OriginalCreated { get; set; }
     public string? ContainerName { get; set; }
     public string? BlobPath { get; set; }
     public string? BlobUrl { get; set; }

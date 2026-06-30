@@ -64,6 +64,29 @@ public class MigrationJobItem
     [Column("source_last_modified")]
     public DateTime? SourceLastModified { get; set; }
 
+    /// <summary>
+    /// Display name of the source file's original author (SharePoint "Created By"),
+    /// captured at migration time so it survives the source delete and is visible
+    /// on the placeholder and after a restore.
+    /// </summary>
+    [MaxLength(256)]
+    [Column("original_created_by")]
+    public string? OriginalCreatedBy { get; set; }
+
+    /// <summary>
+    /// Display name of the last person to edit the source file (SharePoint
+    /// "Modified By"), captured at migration time.
+    /// </summary>
+    [MaxLength(256)]
+    [Column("original_modified_by")]
+    public string? OriginalModifiedBy { get; set; }
+
+    /// <summary>
+    /// Original created timestamp of the source file, captured at migration time.
+    /// </summary>
+    [Column("original_created")]
+    public DateTime? OriginalCreated { get; set; }
+
     [ForeignKey(nameof(Container))]
     [Column("container_id")]
     public int? ContainerId { get; set; }
