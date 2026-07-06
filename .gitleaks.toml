@@ -1,0 +1,31 @@
+# gitleaks configuration for spo-cold-storage
+# Extends the default gitleaks ruleset and allowlists a small set of
+# known-safe values so CI does not fail on false positives.
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Public Azure built-in RBAC role definition IDs used by the deploy scripts (constants, not secrets)"
+regexes = [
+  '''b86a8fe4-44ce-4948-aee5-eccb2c155cd7''', # Key Vault Secrets Officer
+  '''a4417e6f-fecd-4de8-b567-7b0420556985''', # Key Vault Certificates Officer
+  '''00482a5a-887f-4fb3-b363-3b7fe8e74483''', # Key Vault Administrator
+]
+
+[[allowlists]]
+description = "Scrubbed placeholder values (documentation examples, not secrets)"
+regexes = [
+  '''11111111-1111-1111-1111-111111111111''',
+  '''22222222-2222-2222-2222-222222222222''',
+  '''<client-secret>''',
+  '''<your-password>''',
+]
+
+[[allowlists]]
+description = "Local-only (gitignored) secret material and build artifacts that are never committed"
+paths = [
+  '''deploy/\.local/.*''',
+  '''.*/dist/.*''',
+  '''.*\.pfx''',
+]
