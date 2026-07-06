@@ -27,9 +27,9 @@ To run the SiteSnapshotBuilder with **no certificates required**, you only need 
 |---------|-------------|---------|
 | `BaseServerAddress` | Your SharePoint root URL | `https://contoso.sharepoint.com` |
 | `ConnectionStrings:SQLConnectionString` | SQL Server connection string | `Server=localhost;Database=...` |
-| `AzureAd:TenantId` | Azure AD Tenant ID (GUID) | `11111111-1111-1111-1111-111111111111...` |
-| `AzureAd:ClientID` | App Registration Client ID | `22222222-2222-2222-2222-222222222222...` |
-| `AzureAd:Secret` | App Registration Client Secret | `<client-secret> |
+| `AzureAd:TenantId` | Azure AD Tenant ID (GUID) | `11111111-...` |
+| `AzureAd:ClientID` | App Registration Client ID | `22222222-...` |
+| `AzureAd:Secret` | App Registration Client Secret | `<client-secret>` |
 | `AzureAd:AuthenticationMode` | Set to `"ClientSecret"` | `"ClientSecret"` |
 
 ### Optional Settings (Not Required for Snapshot Builder)
