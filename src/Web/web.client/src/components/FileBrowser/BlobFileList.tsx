@@ -1,109 +1,55 @@
-import { BlobItem, ContainerClient } from '@azure/storage-blob';
 import React from 'react';
 import { Component } from 'react';
-import { StorageInfo } from '../ConfigReader'
 import './FileExplorer.css';
 
 interface FileListProps {
-    navToFolderCallback?: Function;
-    accessToken: string,
-    client: ContainerClient,
-    storageInfo: StorageInfo,
-    storageTokenSummary?: string | null
+    accessToken: string;
+    navToFolderCallback?: (prefix: string) => void;
 }
+
+interface FileEntry {
+    name: string;
+    size: number;
+    lastModified?: string;
+}
+
 interface FileListState {
-    blobItems: BlobItem[] | null,
-    currentDirs: string[] | null,
-    storagePrefix: string,
-    isLoading: boolean,
-    listError: string | null,
-    listErrorDetail: string | null
+    files: FileEntry[] | null;
+    currentDirs: string[] | null;
+    storagePrefix: string;
+    isLoading: boolean;
+    listError: string | null;
+    listErrorDetail: string | null;
 }
 
-const getStorageErrorCode = (error: any): string | null => {
-    return (
-        error?.details?.errorCode ??
-        error?.code ??
-        error?.response?.parsedHeaders?.errorCode ??
-        error?.response?.headers?.get?.('x-ms-error-code') ??
-        null
-    );
-};
-
-const buildStorageErrorMessage = (error: any): { friendly: string; detail: string } => {
-    const status: number | undefined = error?.statusCode ?? error?.status;
-    const code = getStorageErrorCode(error);
-    const requestId =
-        error?.details?.requestId ??
-        error?.response?.headers?.get?.('x-ms-request-id') ??
-        null;
-    const rawMessage: string = error?.message ?? String(error);
-
-    let friendly: string;
-    switch (code) {
-        case 'AuthorizationFailure':
-        case 'AuthorizationPermissionMismatch':
-            friendly =
-                `Storage rejected the request (${code}). The signed-in user's token does not grant data-plane access ` +
-                `to this container. Confirm: (1) the user has 'Storage Blob Data Reader' (or higher) on the storage account or container, ` +
-                `(2) the access token was issued for scope 'https://storage.azure.com/user_impersonation', ` +
-                `and (3) any cached token from before the role/scope was granted has been refreshed (sign out and back in).`;
-            break;
-        case 'AuthenticationFailed':
-        case 'InvalidAuthenticationInfo':
-            friendly =
-                `Storage could not authenticate the request (${code}). The bearer token is missing, malformed, or has the wrong audience. ` +
-                `Ensure the token was acquired with the storage scope.`;
-            break;
-        case 'AuthorizationSourceIPMismatch':
-        case 'AuthorizationResourceTypeMismatch':
-        case 'AuthorizationServiceMismatch':
-        case 'AuthorizationProtocolMismatch':
-            friendly = `Storage rejected the request (${code}).`;
-            break;
-        default:
-            if (status === 401) {
-                friendly = `Storage returned HTTP 401 Unauthorized. The token is missing, expired, or has the wrong audience.`;
-            } else if (status === 403) {
-                friendly = `Storage returned HTTP 403 Forbidden. The signed-in user lacks the required RBAC role on this resource (e.g. 'Storage Blob Data Reader').`;
-            } else {
-                friendly = `Failed to list blobs: ${rawMessage}`;
-            }
-    }
-
-    const detailParts = [
-        status !== undefined ? `HTTP status: ${status}` : null,
-        code ? `x-ms-error-code: ${code}` : null,
-        requestId ? `x-ms-request-id: ${requestId}` : null,
-        `message: ${rawMessage}`
-    ].filter(Boolean) as string[];
-
-    return { friendly, detail: detailParts.join('\n') };
-};
-
+// The browser can no longer reach Azure Storage directly (the account's public
+// network access is disabled by policy), so listing and downloading go through
+// our own API, which proxies to storage over the Web App's private endpoint.
 export class BlobFileList extends Component<FileListProps, FileListState> {
 
-    constructor(props: FileListProps)
-    {
+    constructor(props: FileListProps) {
         super(props);
-        this.state = { blobItems: null, currentDirs: null, storagePrefix: "", isLoading: false, listError: null, listErrorDetail: null };
+        this.state = {
+            files: null,
+            currentDirs: null,
+            storagePrefix: "",
+            isLoading: false,
+            listError: null,
+            listErrorDetail: null
+        };
     }
 
-    componentDidMount()
-    {
-        if (this.props.client) {
-            this.listFiles("").catch((err) => {
-                console.error('Initial blob listing failed.', err);
-            });
-        }
+    componentDidMount() {
+        this.listFiles("").catch((err) => {
+            console.error('Initial blob listing failed.', err);
+        });
     }
 
     setDir(clickedPrefix: string) {
-        this.setState({storagePrefix: clickedPrefix});
+        this.setState({ storagePrefix: clickedPrefix });
         if (this.props.navToFolderCallback) {
             this.props.navToFolderCallback(clickedPrefix);
         }
-
         this.listFiles(clickedPrefix).catch((err) => {
             console.error('Folder navigation listing failed.', err);
         });
@@ -120,62 +66,77 @@ export class BlobFileList extends Component<FileListProps, FileListState> {
 
     breadcrumbDirClick(dirIdx: number, allDirs: string[]) {
         let fullPath: string = "";
-
         for (let index = 0; index <= dirIdx; index++) {
-            const thisDir = allDirs[index];
-            fullPath += `${thisDir}/`;
+            fullPath += `${allDirs[index]}/`;
         }
         this.setNewPath(fullPath);
     }
     setNewPath(newPath: string) {
-        this.setState({storagePrefix: newPath});
+        this.setState({ storagePrefix: newPath });
         this.listFiles(newPath).catch((err) => {
             console.error('Breadcrumb navigation listing failed.', err);
         });
     }
 
     async listFiles(prefix: string) {
-
-        let dirs: string[] = [];
-        let blobs: BlobItem[] = [];
-
         this.setState({ isLoading: true, listError: null, listErrorDetail: null });
 
         try {
-            let iter = this.props.client.listBlobsByHierarchy("/", { prefix: prefix });
+            const response = await fetch('/api/storage/blobs?prefix=' + encodeURIComponent(prefix), {
+                headers: { 'Authorization': 'Bearer ' + this.props.accessToken }
+            });
 
-            for await (const item of iter) {
-                if (item.kind === "prefix") {
-                    dirs.push(item.name);
-                } else {
-                    blobs.push(item);
-                }
+            if (!response.ok) {
+                let body = '';
+                try { body = await response.text(); } catch { /* ignore */ }
+                throw new Error(`HTTP ${response.status} ${response.statusText}${body ? `: ${body}` : ''}`);
             }
 
-            this.setState({ blobItems: blobs, currentDirs: dirs, isLoading: false, listError: null, listErrorDetail: null });
-
-            return Promise.resolve();
+            const data = await response.json();
+            this.setState({
+                files: (data.files ?? []) as FileEntry[],
+                currentDirs: (data.folders ?? []) as string[],
+                isLoading: false,
+                listError: null,
+                listErrorDetail: null
+            });
         } catch (error: any) {
-            const { friendly, detail } = buildStorageErrorMessage(error);
-            const fullDetail = this.props.storageTokenSummary
-                ? `${detail}\n\n--- Storage token claims ---\n${this.props.storageTokenSummary}`
-                : detail;
             console.error('Blob listing failed.', error);
             this.setState({
                 isLoading: false,
-                listError: friendly,
-                listErrorDetail: fullDetail,
-                blobItems: [],
+                listError: 'The server could not list files in cold storage.',
+                listErrorDetail: error?.message ?? String(error),
+                files: [],
                 currentDirs: []
             });
-            return Promise.reject(error);
         }
     }
 
-    getUrl(fileName: String) 
-    {
-        return this.props.storageInfo.accountURI + this.props.storageInfo.containerName + "/" + fileName 
-            + this.props.storageInfo.sharedAccessToken;
+    async downloadFile(name: string) {
+        try {
+            const response = await fetch('/api/storage/download?blob=' + encodeURIComponent(name), {
+                headers: { 'Authorization': 'Bearer ' + this.props.accessToken }
+            });
+
+            if (!response.ok) {
+                let body = '';
+                try { body = await response.text(); } catch { /* ignore */ }
+                throw new Error(`HTTP ${response.status} ${response.statusText}${body ? `: ${body}` : ''}`);
+            }
+
+            const blob = await response.blob();
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = this.getFileName(name);
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            URL.revokeObjectURL(url);
+        } catch (error: any) {
+            console.error('Download failed.', error);
+            alert('Could not download the file: ' + (error?.message ?? String(error)));
+        }
     }
 
     formatFileSize(bytes: number): string {
@@ -186,7 +147,7 @@ export class BlobFileList extends Component<FileListProps, FileListState> {
         return Math.round((bytes / Math.pow(k, i)) * 100) / 100 + ' ' + sizes[i];
     }
 
-    formatDate(date: Date | undefined): string {
+    formatDate(date: string | undefined): string {
         if (!date) return '-';
         return new Intl.DateTimeFormat('en-US', {
             year: 'numeric',
@@ -199,8 +160,8 @@ export class BlobFileList extends Component<FileListProps, FileListState> {
 
     render() {
         const breadcumbDirs = this.state.storagePrefix.split("/").filter(d => d);
-        const hasItems = (this.state.currentDirs && this.state.currentDirs.length > 0) || 
-                        (this.state.blobItems && this.state.blobItems.length > 0);
+        const hasItems = (this.state.currentDirs && this.state.currentDirs.length > 0) ||
+                        (this.state.files && this.state.files.length > 0);
 
         return (
             <div className="file-explorer">
@@ -218,8 +179,8 @@ export class BlobFileList extends Component<FileListProps, FileListState> {
                                 <svg className="breadcrumb-separator" width="8" height="12" viewBox="0 0 8 12" fill="currentColor">
                                     <path d="M1 1l5 5-5 5"/>
                                 </svg>
-                                <button 
-                                    onClick={() => this.breadcrumbDirClick(dirIdx, breadcumbDirs)} 
+                                <button
+                                    onClick={() => this.breadcrumbDirClick(dirIdx, breadcumbDirs)}
                                     className="breadcrumb-link"
                                 >
                                     {breadcumbDir}
@@ -289,21 +250,27 @@ export class BlobFileList extends Component<FileListProps, FileListState> {
                     ))}
 
                     {/* Files */}
-                    {this.state.blobItems && this.state.blobItems.map(blob => (
-                        <div key={blob.name} className="file-list-item file-item">
+                    {this.state.files && this.state.files.map(file => (
+                        <div key={file.name} className="file-list-item file-item">
                             <div className="file-list-cell file-name-cell">
                                 <svg className="file-icon document-icon" width="20" height="20" viewBox="0 0 20 20" fill="currentColor">
                                     <path d="M4 3.5A1.5 1.5 0 0 1 5.5 2h5.086a1.5 1.5 0 0 1 1.06.44l3.915 3.914c.28.28.439.662.439 1.06V16.5A1.5 1.5 0 0 1 14.5 18h-9A1.5 1.5 0 0 1 4 16.5v-13zm7 0v3.5A1.5 1.5 0 0 0 12.5 8.5h3.5L11 3.5z"/>
                                 </svg>
-                                <a href={this.getUrl(blob.name)} className="file-name file-link" target="_blank" rel="noopener noreferrer">
-                                    {this.getFileName(blob.name)}
-                                </a>
+                                <button
+                                    type="button"
+                                    className="file-name file-link"
+                                    style={{ background: 'none', border: 'none', padding: 0, font: 'inherit', color: 'inherit', cursor: 'pointer', textAlign: 'left' }}
+                                    onClick={() => this.downloadFile(file.name)}
+                                    title="Download"
+                                >
+                                    {this.getFileName(file.name)}
+                                </button>
                             </div>
                             <div className="file-list-cell file-modified-cell">
-                                {this.formatDate(blob.properties.lastModified)}
+                                {this.formatDate(file.lastModified)}
                             </div>
                             <div className="file-list-cell file-size-cell">
-                                {this.formatFileSize(blob.properties.contentLength || 0)}
+                                {this.formatFileSize(file.size || 0)}
                             </div>
                         </div>
                     ))}

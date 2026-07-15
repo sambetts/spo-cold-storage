@@ -1,19 +1,15 @@
-import { BlobServiceClient, ContainerClient } from '@azure/storage-blob';
 import { BlobFileList } from './BlobFileList';
 import '../NavMenu.css';
 import './FileExplorer.css';
 import React from 'react';
-import { useIsAuthenticated, useMsal } from "@azure/msal-react";
+import { useIsAuthenticated } from "@azure/msal-react";
 import { getStorageConfigFromAPI, ServiceConfiguration } from '../ConfigReader';
-import { storageRequest } from '../../authConfig';
 
-type LoadPhase = 'idle' | 'acquiring-token' | 'loading-config' | 'connecting' | 'ready' | 'error';
+type LoadPhase = 'idle' | 'loading-config' | 'ready' | 'error';
 
 const phaseMessages: Record<Exclude<LoadPhase, 'ready' | 'error'>, string> = {
   'idle': 'Preparing...',
-  'acquiring-token': 'Acquiring storage access token...',
-  'loading-config': 'Loading storage configuration...',
-  'connecting': 'Connecting to Azure Blob storage...'
+  'loading-config': 'Loading storage configuration...'
 };
 
 const describeError = (e: unknown): string => {
@@ -27,8 +23,7 @@ const getStorageAccountName = (accountUri: string | undefined | null): string | 
   if (!accountUri) return null;
   try {
     const host = new URL(accountUri).hostname;
-    // e.g. myaccount.blob.core.windows.net  -> "myaccount"
-    //      myaccount.dfs.core.windows.net   -> "myaccount"
+    // e.g. myaccount.blob.core.windows.net -> "myaccount"
     const first = host.split('.')[0];
     return first || null;
   } catch {
@@ -36,155 +31,57 @@ const getStorageAccountName = (accountUri: string | undefined | null): string | 
   }
 };
 
-// Decode a JWT (no signature verification — for diagnostic display only).
-const decodeJwtPayload = (jwt: string): Record<string, any> | null => {
-  try {
-    const parts = jwt.split('.');
-    if (parts.length < 2) return null;
-    const b64 = parts[1].replace(/-/g, '+').replace(/_/g, '/');
-    const padded = b64 + '='.repeat((4 - (b64.length % 4)) % 4);
-    const json = decodeURIComponent(
-      atob(padded)
-        .split('')
-        .map(c => '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2))
-        .join('')
-    );
-    return JSON.parse(json);
-  } catch {
-    return null;
-  }
-};
-
-const summarizeStorageToken = (jwt: string): string => {
-  const payload = decodeJwtPayload(jwt);
-  if (!payload) return 'Token: <could not decode>';
-  const expIso = payload.exp ? new Date(payload.exp * 1000).toISOString() : 'n/a';
-  return [
-    `aud:    ${payload.aud ?? '<missing>'}`,
-    `iss:    ${payload.iss ?? '<missing>'}`,
-    `scp:    ${payload.scp ?? '<missing>'}`,
-    `roles:  ${Array.isArray(payload.roles) ? payload.roles.join(', ') : '<none>'}`,
-    `appid:  ${payload.appid ?? payload.azp ?? '<missing>'}`,
-    `tid:    ${payload.tid ?? '<missing>'}`,
-    `oid:    ${payload.oid ?? '<missing>'}`,
-    `upn:    ${payload.upn ?? payload.unique_name ?? payload.preferred_username ?? '<missing>'}`,
-    `exp:    ${expIso}`
-  ].join('\n');
-};
-
+// The file browser no longer talks to Azure Storage from the browser. The storage
+// account's public network access is disabled by policy, so we load display
+// config from our API and let <BlobFileList/> list/download via the server proxy
+// (which reaches storage over the Web App's private endpoint) using the same API
+// access token.
 export const FileBrowser: React.FC<{ token: string }> = (props) => {
 
-  const [client, setClient] = React.useState<ContainerClient | null>(null);
   const [serviceConfiguration, setServiceConfiguration] = React.useState<ServiceConfiguration | null>(null);
-  const [storageToken, setStorageToken] = React.useState<string | null>(null);
-
   const [phase, setPhase] = React.useState<LoadPhase>('idle');
   const [errorMessage, setErrorMessage] = React.useState<string | null>(null);
   const [errorDetail, setErrorDetail] = React.useState<string | null>(null);
   const [retryCount, setRetryCount] = React.useState<number>(0);
 
   const isAuthenticated = useIsAuthenticated();
-  const { accounts, instance } = useMsal();
 
   const retry = React.useCallback(() => {
     setErrorMessage(null);
     setErrorDetail(null);
-    setStorageToken(null);
     setServiceConfiguration(null);
-    setClient(null);
     setPhase('idle');
     setRetryCount(c => c + 1);
   }, []);
 
-  // Acquire storage token separately
   React.useEffect(() => {
-    if (!isAuthenticated || storageToken || phase === 'error') return;
-
-    const request = {
-      ...storageRequest,
-      account: accounts[0],
-      // Always pull a fresh token from AAD so that any newly-granted RBAC roles
-      // or consented scopes are reflected in the claims (cached tokens do NOT
-      // get retroactively updated when roles change).
-      forceRefresh: true
-    };
-
-    setPhase('acquiring-token');
-    setErrorMessage(null);
-
-    instance.acquireTokenSilent(request)
-      .then((response) => {
-        console.log('Storage token acquired. Decoded claims:\n' + summarizeStorageToken(response.accessToken));
-        setStorageToken(response.accessToken);
-      })
-      .catch((silentError) => {
-        console.warn('Silent storage token acquisition failed, falling back to popup.', silentError);
-        instance.acquireTokenPopup(request)
-          .then((response) => {
-            console.log('Storage token acquired via popup. Decoded claims:\n' + summarizeStorageToken(response.accessToken));
-            setStorageToken(response.accessToken);
-          })
-          .catch((popupError) => {
-            console.error('Storage token acquisition failed.', popupError);
-            setErrorMessage('Could not acquire an access token for Azure Storage.');
-            setErrorDetail(describeError(popupError));
-            setPhase('error');
-          });
-      });
-  }, [isAuthenticated, storageToken, accounts, instance, phase, retryCount]);
-
-  React.useEffect(() => {
-    if (!storageToken) return;
-    if (phase === 'error') return;
+    if (!isAuthenticated) return;
+    if (phase !== 'idle') return;
 
     let cancelled = false;
-
     setPhase('loading-config');
 
     getStorageConfigFromAPI(props.token)
       .then((storageConfigInfo: ServiceConfiguration) => {
         if (cancelled) return;
-        console.log('Got service config from site API');
 
         if (!storageConfigInfo?.storageInfo?.accountURI || !storageConfigInfo?.storageInfo?.containerName) {
           throw new Error('Service configuration is missing storage account URI or container name.');
         }
 
         setServiceConfiguration(storageConfigInfo);
-        setPhase('connecting');
-
-        // Create a custom credential that uses the storage access token
-        const tokenCredential = {
-          getToken: async () => {
-            return {
-              token: storageToken,
-              expiresOnTimestamp: Date.now() + 3600000 // 1 hour from now
-            };
-          }
-        };
-
-        // Create a new BlobServiceClient using Azure AD authentication
-        const blobServiceClient = new BlobServiceClient(
-          storageConfigInfo.storageInfo.accountURI,
-          tokenCredential
-        );
-
-        const containerName = storageConfigInfo.storageInfo.containerName;
-        const blobStorageClient = blobServiceClient.getContainerClient(containerName);
-
-        setClient(blobStorageClient);
         setPhase('ready');
       })
       .catch((err) => {
         if (cancelled) return;
-        console.error('Failed to load storage configuration / connect to storage.', err);
+        console.error('Failed to load storage configuration.', err);
         setErrorMessage('Could not load storage configuration from the server.');
         setErrorDetail(describeError(err));
         setPhase('error');
       });
 
     return () => { cancelled = true; };
-  }, [props.token, storageToken, retryCount]);
+  }, [props.token, isAuthenticated, phase, retryCount]);
 
   return (
     <div className="file-browser-container">
@@ -213,14 +110,9 @@ export const FileBrowser: React.FC<{ token: string }> = (props) => {
           )}
         </div>
 
-        {phase === 'ready' && client && serviceConfiguration ? (
+        {phase === 'ready' && serviceConfiguration ? (
           <div className="file-browser-content">
-            <BlobFileList
-              client={client}
-              accessToken={props.token}
-              storageInfo={serviceConfiguration.storageInfo}
-              storageTokenSummary={storageToken ? summarizeStorageToken(storageToken) : null}
-            />
+            <BlobFileList accessToken={props.token} />
           </div>
         ) : phase === 'error' ? (
           <div className="error-container" role="alert">
