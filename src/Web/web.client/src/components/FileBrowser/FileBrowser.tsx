@@ -56,7 +56,6 @@ export const FileBrowser: React.FC<{ token: string }> = (props) => {
 
   React.useEffect(() => {
     if (!isAuthenticated) return;
-    if (phase !== 'idle') return;
 
     let cancelled = false;
     setPhase('loading-config');
@@ -81,7 +80,7 @@ export const FileBrowser: React.FC<{ token: string }> = (props) => {
       });
 
     return () => { cancelled = true; };
-  }, [props.token, isAuthenticated, phase, retryCount]);
+  }, [props.token, isAuthenticated, retryCount]);
 
   return (
     <div className="file-browser-container">
