@@ -419,7 +419,7 @@ For dev environment you should use the secrets system by running these commands:
 *	dotnet user-secrets set "ConnectionStrings:ServiceBus" "$value" 
 *	dotnet user-secrets set "ConnectionStrings:Storage" "$value" 
 *	dotnet user-secrets set "KeyVaultUrl" "https://spocoldstoragedev.vault.azure.net" 
-*	dotnet user-secrets set "BaseServerAddress" "https://m365x352268.sharepoint.com"  
+*	dotnet user-secrets set "BaseServerAddress" "https://contoso.sharepoint.com"  
 These settings are used for creating test data for development environment but aren’t used normally:
 *	dotnet user-secrets set "Dev:DefaultSharePointSite" "$value" 
 
