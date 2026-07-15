@@ -49,6 +49,10 @@
 	<PackageVersion Include="CommandLineParser" Version="2.9.1" />
 	<PackageVersion Include="PnP.Framework" Version="1.19.0" />
 	<PackageVersion Include="Swashbuckle.AspNetCore" Version="10.1.7" />
+	<!-- Security transitive pin: Swashbuckle 10.1.7 pulls Microsoft.OpenApi 2.4.1, which is
+	     vulnerable to GHSA-v5pm-xwqc-g5wc (stack-overflow DoS on a circular $ref). 2.7.5+ is
+	     patched. CentralPackageTransitivePinningEnabled (above) applies this to the transitive ref. -->
+	<PackageVersion Include="Microsoft.OpenApi" Version="2.7.6" />
 
 	<!-- Test stack -->
 	<PackageVersion Include="coverlet.collector" Version="10.0.1" />
