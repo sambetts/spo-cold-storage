@@ -11,6 +11,7 @@
   </Folder>
   <Project Path="Entities/Entities.csproj" />
   <Project Path="Migration.Engine/Migration.Engine.csproj" />
+  <Project Path="Migration.Functions/Migration.Functions.csproj" />
   <Project Path="Migration.Indexer/Migration.Indexer.csproj" />
   <Project Path="Migration.Migrator/Migration.Migrator.csproj" />
   <Project Path="Migration.SiteSnapshotBuilder/Migration.SiteSnapshotBuilder.csproj" />

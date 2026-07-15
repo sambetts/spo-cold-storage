@@ -45,6 +45,11 @@
 	<PackageVersion Include="Azure.Storage.Files.Shares" Version="12.26.0" />
 	<PackageVersion Include="Azure.Storage.Queues" Version="12.26.0" />
 
+	<!-- Azure Functions (isolated worker, .NET 10) — queue-triggered cold-storage worker -->
+	<PackageVersion Include="Microsoft.Azure.Functions.Worker" Version="2.52.0" />
+	<PackageVersion Include="Microsoft.Azure.Functions.Worker.Sdk" Version="2.0.7" />
+	<PackageVersion Include="Microsoft.Azure.Functions.Worker.Extensions.ServiceBus" Version="5.24.0" />
+
 	<!-- Third-party -->
 	<PackageVersion Include="CommandLineParser" Version="2.9.1" />
 	<PackageVersion Include="PnP.Framework" Version="1.19.0" />

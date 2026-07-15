@@ -380,3 +380,6 @@ src/SPO.ColdStorage.Web/ClientApp/src/authConfig - dev.js
 /deploy/.bicep-cache/
 /deploy/.local/
 /deploy/*.publish.zip
+
+# Azure Functions local settings
+local.settings.json
