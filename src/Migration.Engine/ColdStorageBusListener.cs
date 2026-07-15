@@ -44,6 +44,9 @@ public sealed class ColdStorageBusListener : BaseComponent
         });
     }
 
+    /// <summary>Fully-qualified Service Bus namespace the listener is attached to (diagnostics / heartbeat).</summary>
+    public string ServiceBusNamespace => _sbClient.FullyQualifiedNamespace;
+
     public async Task ListenAsync(CancellationToken cancellationToken = default)
     {
         try

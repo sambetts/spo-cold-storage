@@ -20,8 +20,8 @@
  * ColdStorageStatusFieldCustomizer.ts. All dynamic text uses textContent to
  * avoid XSS via user-controlled file paths or backend error messages.
  */
-import { ColdStorageApiClient, ColdStorageApiError, DialogMode, IAcceptedJobResponse, IJobItemStatus, IJobStatusResponse, MigrationLifecycleStatus } from '../../common/ColdStorageApiClient';
-import { colorFor, formatLabel, isTerminal } from '../../common/statusFormat';
+import { ColdStorageApiClient, ColdStorageApiError, DialogMode, IAcceptedJobResponse, IJobItemStatus, IJobLogEntry, IJobStatusResponse, IWorkerHealth, MigrationLifecycleStatus } from '../../common/ColdStorageApiClient';
+import { colorFor, describeStatus, formatLabel, isTerminal } from '../../common/statusFormat';
 
 const POLL_INTERVAL_MS = 3000;
 const MAX_POLL_INTERVAL_MS = 30000;
@@ -34,6 +34,7 @@ interface ITrackedJob {
   label: string;
   lastResponse?: IJobStatusResponse;
   acceptResponse?: IAcceptedJobResponse;
+  logs?: IJobLogEntry[];
   pollFailures: number;
   lastPollError?: ColdStorageApiError;
 }
@@ -52,6 +53,7 @@ export class MigrationProgressDialog {
   private statusMessage = '';
   private errorMessage?: string;
   private jobs: ITrackedJob[] = [];
+  private workerHealth?: IWorkerHealth;
   private startedAt = Date.now();
   private pollTimer?: number;
   private currentPollDelay = POLL_INTERVAL_MS;
@@ -142,6 +144,15 @@ export class MigrationProgressDialog {
       ? 'No migration or restore jobs have been submitted from this site yet.'
       : `Showing ${jobs.length} most recent job${jobs.length === 1 ? '' : 's'} for this site.`;
     this.render();
+    // One-shot worker liveness so a "Queued" row here is explained (offline
+    // worker) rather than looking like a silent hang. Best-effort.
+    void this.refreshWorkerHealthAndRender();
+  }
+
+  private refreshWorkerHealthAndRender(): Promise<void> {
+    return this.client.getWorkerHealth()
+      .then(h => { if (!this.closed) { this.workerHealth = h; this.render(); } })
+      .catch(() => { /* best-effort; leave banner off */ });
   }
 
   private labelForListedJob(job: IJobStatusResponse, idx: number, total: number): string {
@@ -290,7 +301,16 @@ export class MigrationProgressDialog {
 
   private render(): void {
     if (!this.bodyEl) return;
+    // Preserve scroll so the 3s auto-refresh doesn't yank the user back to the
+    // top while they're reading the activity log further down.
+    const prevScroll = this.bodyEl.scrollTop;
     this.bodyEl.innerHTML = ''; // static markup ahead - safe to clear
+    this.renderBody();
+    this.bodyEl.scrollTop = prevScroll;
+  }
+
+  private renderBody(): void {
+    if (!this.bodyEl) return;
 
     if (this.phase === 'submitting' && this.jobs.length === 0) {
       this.bodyEl.appendChild(this.makeSpinnerBlock(this.statusMessage || 'Working…'));
@@ -300,6 +320,13 @@ export class MigrationProgressDialog {
     if (this.phase === 'error') {
       this.bodyEl.appendChild(this.makeErrorBlock(this.errorMessage ?? 'Unknown error.', this.retryHandler));
       return;
+    }
+
+    // Worker-liveness banner: explains a long "Queued" wait (worker offline /
+    // still warming up) so the user isn't left staring at a bare "Queued".
+    const workerBanner = this.renderWorkerBanner();
+    if (workerBanner) {
+      this.bodyEl.appendChild(workerBanner);
     }
 
     if (this.phase === 'browse') {
@@ -427,6 +454,12 @@ export class MigrationProgressDialog {
 
     wrap.appendChild(head);
 
+    // Sub-line: what the job is doing right now + how long it's been running.
+    const meta = this.renderJobMeta(job, overallStatus);
+    if (meta) {
+      wrap.appendChild(meta);
+    }
+
     const items = job.lastResponse?.items ?? [];
     if (items.length === 0) {
       const empty = document.createElement('p');
@@ -460,7 +493,43 @@ export class MigrationProgressDialog {
         wrap.appendChild(sum);
       }
     }
+
+    // Live activity log so the user can watch each step happen.
+    const timeline = this.renderTimeline(job);
+    if (timeline) {
+      wrap.appendChild(timeline);
+    }
     return wrap;
+  }
+
+  /**
+   * "What is happening + for how long" sub-line under a job header. For a
+   * finished job it shows the total elapsed time instead.
+   */
+  private renderJobMeta(job: ITrackedJob, overallStatus?: MigrationLifecycleStatus | string): HTMLElement | undefined {
+    const desc = overallStatus !== undefined ? describeStatus(overallStatus) : '';
+    const timing: string[] = [];
+    const created = job.lastResponse?.createdAt;
+    const terminal = job.lastResponse ? isTerminal(job.lastResponse.status) : false;
+    if (created) {
+      const startedMs = MigrationProgressDialog.parseServerDate(created);
+      if (!isNaN(startedMs)) {
+        if (terminal && job.lastResponse?.completedAt) {
+          const endMs = MigrationProgressDialog.parseServerDate(job.lastResponse.completedAt);
+          if (!isNaN(endMs)) {
+            timing.push(`finished in ${MigrationProgressDialog.formatDuration(endMs - startedMs)}`);
+          }
+        } else {
+          timing.push(`running for ${MigrationProgressDialog.formatDuration(Date.now() - startedMs)}`);
+        }
+      }
+    }
+    const text = [desc, timing.join(' · ')].filter(Boolean).join(' — ');
+    if (!text) return undefined;
+    const el = document.createElement('div');
+    Object.assign(el.style, { padding: '8px 12px 4px', fontSize: '12px', color: '#605e5c' } as CSSStyleDeclaration);
+    el.textContent = text;
+    return el;
   }
 
   private renderItemsTable(items: IJobItemStatus[]): HTMLElement {
@@ -490,6 +559,10 @@ export class MigrationProgressDialog {
       const statusTd = document.createElement('td');
       Object.assign(statusTd.style, { padding: '6px 10px' } as CSSStyleDeclaration);
       statusTd.appendChild(this.makeBadge(item.status));
+      const step = this.renderItemStep(item);
+      if (step) {
+        statusTd.appendChild(step);
+      }
       tr.appendChild(statusTd);
       tr.appendChild(this.cell(String(item.attempts)));
       const errCell = this.cell(item.lastError ?? '', { color: '#a4262c', fontSize: '12px' });
@@ -520,6 +593,163 @@ export class MigrationProgressDialog {
     }
     wrap.appendChild(ul);
     return wrap;
+  }
+
+  /**
+   * Short "current step + how long in it" line shown under an item's status
+   * badge. For a Queued item this surfaces exactly how long it's been waiting —
+   * the whole point of the exercise.
+   */
+  private renderItemStep(item: IJobItemStatus): HTMLElement | undefined {
+    const desc = describeStatus(item.status);
+    let duration = '';
+    if (!isTerminal(item.status) && item.updatedAt) {
+      const ms = MigrationProgressDialog.parseServerDate(item.updatedAt);
+      if (!isNaN(ms)) {
+        const d = MigrationProgressDialog.formatDuration(Date.now() - ms);
+        duration = item.status === MigrationLifecycleStatus.Queued
+          ? ` · queued ${d}`
+          : ` · ${d} in this step`;
+      }
+    }
+    if (!desc && !duration) return undefined;
+    const el = document.createElement('div');
+    Object.assign(el.style, { marginTop: '4px', fontSize: '11px', color: '#605e5c', maxWidth: '280px' } as CSSStyleDeclaration);
+    el.textContent = `${desc}${duration}`;
+    return el;
+  }
+
+  /**
+   * Live activity log (most-recent dozen entries) so the user can watch each
+   * lifecycle step happen with timestamps instead of a single static badge.
+   */
+  private renderTimeline(job: ITrackedJob): HTMLElement | undefined {
+    const logs = job.logs ?? [];
+    if (logs.length === 0) return undefined;
+    const recent = logs.slice(-12); // logs are oldest→newest; show the last dozen
+    const wrap = document.createElement('div');
+    Object.assign(wrap.style, { margin: '4px 12px 12px' } as CSSStyleDeclaration);
+    const h = document.createElement('div');
+    Object.assign(h.style, { fontSize: '12px', fontWeight: '600', color: '#605e5c', marginBottom: '4px' } as CSSStyleDeclaration);
+    h.textContent = 'Activity';
+    wrap.appendChild(h);
+    const ul = document.createElement('ul');
+    Object.assign(ul.style, { margin: '0', padding: '0', listStyle: 'none' } as CSSStyleDeclaration);
+    for (const log of recent) {
+      const li = document.createElement('li');
+      Object.assign(li.style, { display: 'flex', gap: '8px', fontSize: '12px', padding: '2px 0', alignItems: 'baseline' } as CSSStyleDeclaration);
+      const time = document.createElement('span');
+      Object.assign(time.style, { color: '#a19f9d', whiteSpace: 'nowrap', fontSize: '11px', minWidth: '58px' } as CSSStyleDeclaration);
+      time.textContent = MigrationProgressDialog.relativeTime(log.timestamp);
+      const dot = document.createElement('span');
+      Object.assign(dot.style, { color: MigrationProgressDialog.logLevelColor(log.level), fontWeight: '700', whiteSpace: 'nowrap' } as CSSStyleDeclaration);
+      dot.textContent = '\u2022';
+      const msg = document.createElement('span');
+      Object.assign(msg.style, { color: '#323130', wordBreak: 'break-word' } as CSSStyleDeclaration);
+      msg.textContent = log.message;
+      li.appendChild(time);
+      li.appendChild(dot);
+      li.appendChild(msg);
+      ul.appendChild(li);
+    }
+    wrap.appendChild(ul);
+    return wrap;
+  }
+
+  /**
+   * Banner explaining a stalled "Queued" state: worker offline (nothing draining
+   * the queue) vs. worker online (actively working / warming up). Only shown when
+   * there's actually pending work waiting on the worker.
+   */
+  private renderWorkerBanner(): HTMLElement | undefined {
+    const health = this.workerHealth;
+    if (!health || !this.hasPendingWork()) return undefined;
+
+    if (!health.isOnline) {
+      const seen = health.lastSeenUtc
+        ? `last seen ${MigrationProgressDialog.relativeTime(health.lastSeenUtc)}`
+        : 'no worker has checked in yet';
+      return this.makeBanner(
+        `\u26A0 The background worker appears to be offline (${seen}). Queued items won\u2019t start until it\u2019s running \u2014 on an idle app the worker may need to be started.`,
+        'warn');
+    }
+    return this.makeBanner(
+      'The background worker is online and processing \u2014 queued items will start shortly.',
+      'info');
+  }
+
+  /** True when a tracked job still has work that hasn't reached a final state. */
+  private hasPendingWork(): boolean {
+    for (const job of this.jobs) {
+      const items = job.lastResponse?.items ?? [];
+      if (items.length === 0) {
+        const s = job.lastResponse?.status ?? job.acceptResponse?.status;
+        if (s === undefined || !isTerminal(s)) return true;
+      }
+      for (const it of items) {
+        if (!isTerminal(it.status)) return true;
+      }
+    }
+    return false;
+  }
+
+  private makeBanner(text: string, kind: 'info' | 'warn' | 'error' | 'ok'): HTMLElement {
+    const palette = {
+      info:  { bg: '#eff6fc', border: '#0078d4', color: '#005a9e' },
+      warn:  { bg: '#fff4ce', border: '#f0c419', color: '#8a6d00' },
+      error: { bg: '#fde7e9', border: '#a4262c', color: '#a4262c' },
+      ok:    { bg: '#dff6dd', border: '#107c10', color: '#107c10' },
+    }[kind];
+    const el = document.createElement('div');
+    Object.assign(el.style, {
+      background: palette.bg, border: `1px solid ${palette.border}`, color: palette.color,
+      padding: '8px 12px', borderRadius: '2px', marginBottom: '12px', fontSize: '13px', lineHeight: '1.4',
+    } as CSSStyleDeclaration);
+    el.textContent = text;
+    return el;
+  }
+
+  private static logLevelColor(level: number): string {
+    // Microsoft.Extensions.Logging.LogLevel: 2=Info, 3=Warning, 4=Error, 5=Critical.
+    if (level >= 4) return '#a4262c';
+    if (level === 3) return '#8a6d00';
+    return '#0078d4';
+  }
+
+  /**
+   * Parse a server timestamp as UTC. EF may serialize DateTimes without a
+   * timezone designator (Kind=Unspecified); a bare timestamp must be treated as
+   * UTC or elapsed calculations would be off by the viewer's local offset.
+   */
+  private static parseServerDate(iso?: string): number {
+    if (!iso) return NaN;
+    const hasTz = /(?:[zZ]|[+-]\d{2}:?\d{2})$/.test(iso);
+    return Date.parse(hasTz ? iso : iso + 'Z');
+  }
+
+  private static formatDuration(ms: number): string {
+    let s = Math.floor((isFinite(ms) && ms > 0 ? ms : 0) / 1000);
+    if (s < 60) return `${s}s`;
+    const m = Math.floor(s / 60);
+    s = s % 60;
+    if (m < 60) return s ? `${m}m ${s}s` : `${m}m`;
+    const h = Math.floor(m / 60);
+    const mm = m % 60;
+    return mm ? `${h}h ${mm}m` : `${h}h`;
+  }
+
+  private static relativeTime(iso?: string): string {
+    const t = MigrationProgressDialog.parseServerDate(iso);
+    if (isNaN(t)) return '';
+    const diff = Date.now() - t;
+    if (diff < 5000) return 'just now';
+    const s = Math.floor(diff / 1000);
+    if (s < 60) return `${s}s ago`;
+    const m = Math.floor(s / 60);
+    if (m < 60) return `${m}m ago`;
+    const h = Math.floor(m / 60);
+    if (h < 24) return `${h}h ago`;
+    return `${Math.floor(h / 24)}d ago`;
   }
 
   private cell(text: string, style?: Partial<CSSStyleDeclaration>): HTMLTableCellElement {
@@ -633,13 +863,24 @@ export class MigrationProgressDialog {
 
     let unauthorized = false;
     let anyFailure = false;
-    await Promise.all(this.jobs.map(async job => {
+
+    // Worker liveness, once per poll. Best-effort: a failure here keeps the last
+    // known value and never interrupts job polling.
+    const healthPromise = this.client.getWorkerHealth()
+      .then(h => { if (!this.closed) this.workerHealth = h; })
+      .catch(() => { /* keep previous health */ });
+
+    const jobPromises = this.jobs.map(async job => {
       try {
         const resp = await this.client.getJob(job.jobId);
         if (this.closed) return;
         job.lastResponse = resp;
         job.lastPollError = undefined;
         job.pollFailures = 0;
+        // Activity log is best-effort; its failure must not fail the poll.
+        try {
+          job.logs = await this.client.getJobLogs(job.jobId);
+        } catch { /* keep previous logs */ }
       } catch (err) {
         if (this.closed) return;
         const apiErr = err instanceof ColdStorageApiError ? err : ColdStorageApiError.fromTransport(err);
@@ -648,7 +889,9 @@ export class MigrationProgressDialog {
         anyFailure = true;
         if (apiErr.isUnauthorized) unauthorized = true;
       }
-    }));
+    });
+
+    await Promise.all([healthPromise, ...jobPromises]);
 
     if (this.closed) return;
 
@@ -667,7 +910,13 @@ export class MigrationProgressDialog {
     // Compute overall terminality across every tracked job.
     const allTerminal = this.jobs.every(j => {
       const items = j.lastResponse?.items ?? [];
-      if (items.length === 0) return false; // no items yet; keep polling
+      if (items.length === 0) {
+        // No items doesn't always mean "still starting": folder expansion can
+        // finish a job with zero queued items (e.g. CompletedWithWarning). Fall
+        // back to the job-level status so we don't poll a done job for 15 minutes.
+        const s = j.lastResponse?.status;
+        return s !== undefined && isTerminal(s);
+      }
       return items.every((i: IJobItemStatus) => isTerminal(i.status));
     });
 

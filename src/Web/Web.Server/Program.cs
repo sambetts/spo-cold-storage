@@ -87,6 +87,7 @@ public class Program
         // Cold-storage services backing the new SPFx-facing API surface.
         builder.Services.AddScoped<ISiteOwnerAuthorizationService, SiteOwnerAuthorizationService>();
         builder.Services.AddScoped<IContainerAccessService, ContainerAccessService>();
+        builder.Services.AddScoped<ISharePointFolderExpansionService, SharePointFolderExpansionService>();
         builder.Services.AddScoped<IColdStorageAdminAuthorizationService, ColdStorageAdminAuthorizationService>();
         builder.Services.AddSingleton<IPreArchiveNotifier, LoggingPreArchiveNotifier>();
         builder.Services.AddScoped<PreArchiveNoticeService>();

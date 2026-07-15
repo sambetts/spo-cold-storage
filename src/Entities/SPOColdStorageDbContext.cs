@@ -57,6 +57,7 @@ public class SPOColdStorageDbContext : DbContext
     public DbSet<MigrationJob> MigrationJobs { get; set; } = null!;
     public DbSet<MigrationJobItem> MigrationJobItems { get; set; } = null!;
     public DbSet<MigrationJobLog> MigrationJobLogs { get; set; } = null!;
+    public DbSet<ColdStorageWorkerHeartbeat> ColdStorageWorkerHeartbeats { get; set; } = null!;
 
     protected override void OnModelCreating(ModelBuilder builder)
     {

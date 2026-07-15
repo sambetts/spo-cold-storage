@@ -129,6 +129,8 @@ public class JobItemStatusResponse
     public int Attempts { get; set; }
     public string? LastError { get; set; }
     public string? LastErrorDetail { get; set; }
+    public DateTime CreatedAt { get; set; }
+    public DateTime UpdatedAt { get; set; }
     public DateTime? ValidatedAt { get; set; }
     public DateTime? CopiedAt { get; set; }
     public DateTime? SourceDeletedAt { get; set; }
@@ -145,6 +147,27 @@ public class JobLogEntryResponse
     public int Level { get; set; }
     public string Message { get; set; } = string.Empty;
     public string? Exception { get; set; }
+}
+
+/// <summary>
+/// Liveness of the background migrator worker, surfaced so the SPFx UI can
+/// explain a long "Queued" wait ("the worker is offline") instead of hanging
+/// silently. <see cref="IsOnline"/> is true when the newest heartbeat is within
+/// <see cref="OnlineWindowSeconds"/>.
+/// </summary>
+public class WorkerHealthResponse
+{
+    public bool IsOnline { get; set; }
+    public DateTime? LastSeenUtc { get; set; }
+    public double? SecondsSinceLastSeen { get; set; }
+    public int OnlineWindowSeconds { get; set; }
+    public string? WorkerId { get; set; }
+    public string? MachineName { get; set; }
+    public string? WorkerVersion { get; set; }
+    public DateTime? StartedAtUtc { get; set; }
+
+    /// <summary>Number of worker instances that have ever reported a heartbeat.</summary>
+    public int WorkerCount { get; set; }
 }
 
 public class ContainerResponse

@@ -142,6 +142,8 @@ public class JobsController(SPOColdStorageDbContext db, ILogger<JobsController> 
                     Attempts = i.Attempts,
                     LastError = i.LastError,
                     LastErrorDetail = i.LastErrorDetail,
+                    CreatedAt = i.CreatedAt,
+                    UpdatedAt = i.UpdatedAt,
                     ValidatedAt = i.ValidatedAt,
                     CopiedAt = i.CopiedAt,
                     SourceDeletedAt = i.SourceDeletedAt,
@@ -166,7 +168,7 @@ public class JobsController(SPOColdStorageDbContext db, ILogger<JobsController> 
         }
         var logs = await _db.MigrationJobLogs
             .Where(l => l.JobId == jobId)
-            .OrderBy(l => l.Timestamp)
+            .OrderByDescending(l => l.Timestamp)
             .Take(capped)
             .Select(l => new JobLogEntryResponse
             {
@@ -179,6 +181,9 @@ public class JobsController(SPOColdStorageDbContext db, ILogger<JobsController> 
             })
             .ToListAsync(cancellationToken)
             .ConfigureAwait(false);
+        // Take the newest `capped` rows above (so a long-running job's latest
+        // activity is never truncated), then present them oldest→newest.
+        logs.Reverse();
         return logs;
     }
 }

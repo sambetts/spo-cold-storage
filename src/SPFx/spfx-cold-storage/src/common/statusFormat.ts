@@ -120,3 +120,42 @@ export function isTerminal(value: StatusLike): boolean {
   const status = normalizeStatus(value);
   return status ? TERMINAL.has(status) : false;
 }
+
+const DESCRIPTIONS: Partial<Record<MigrationLifecycleStatus, string>> = {
+  [MigrationLifecycleStatus.Queued]: 'Waiting for a background worker to pick this up.',
+  [MigrationLifecycleStatus.Validating]: 'Checking the item is eligible and reading its details.',
+  [MigrationLifecycleStatus.ValidationFailed]: 'The item couldn\u2019t be validated for archiving.',
+  [MigrationLifecycleStatus.MigrationInProgress]: 'Copying the file from SharePoint to cold storage.',
+  [MigrationLifecycleStatus.CopiedToColdStorage]: 'Copied to cold storage; verifying the copy.',
+  [MigrationLifecycleStatus.CopyToColdStorageFailed]: 'Couldn\u2019t copy to cold storage. The original is safe in SharePoint.',
+  [MigrationLifecycleStatus.PostCopyValidation]: 'Verifying the copied file (size + checksum).',
+  [MigrationLifecycleStatus.DeletePending]: 'Copy verified \u2014 removing the original from SharePoint.',
+  [MigrationLifecycleStatus.DeleteFailed]: 'Archived, but the original couldn\u2019t be removed from SharePoint.',
+  [MigrationLifecycleStatus.PlaceholderCreating]: 'Creating the .url placeholder in SharePoint.',
+  [MigrationLifecycleStatus.PlaceholderFailed]: 'Archived, but the placeholder link couldn\u2019t be created.',
+  [MigrationLifecycleStatus.ColdStorageMigrationCompleted]: 'Migration complete \u2014 file archived and placeholder created.',
+  [MigrationLifecycleStatus.RestoreInProgress]: 'Downloading from cold storage and uploading back to SharePoint.',
+  [MigrationLifecycleStatus.RestoredToSharePoint]: 'Content restored to SharePoint; verifying.',
+  [MigrationLifecycleStatus.RestoreFailed]: 'The file couldn\u2019t be restored. The archived copy is intact.',
+  [MigrationLifecycleStatus.PostRestoreValidation]: 'Verifying the restored file (size + checksum).',
+  [MigrationLifecycleStatus.PlaceholderRemoving]: 'Removing the .url placeholder now the file is back.',
+  [MigrationLifecycleStatus.PlaceholderRemoveFailed]: 'Restored, but the placeholder couldn\u2019t be removed.',
+  [MigrationLifecycleStatus.RestoreCompleted]: 'Restore complete \u2014 file is back in SharePoint.',
+  [MigrationLifecycleStatus.CompletedWithWarning]: 'Finished, but one or more items need attention.',
+  [MigrationLifecycleStatus.RetryScheduled]: 'A retry has been scheduled after a transient failure.',
+  [MigrationLifecycleStatus.Cancelled]: 'The operation was cancelled.',
+  [MigrationLifecycleStatus.Skipped]: 'Deliberately not archived (ineligible or excluded); the original is untouched.',
+};
+
+/**
+ * A short, human-friendly sentence explaining what a status means / what is
+ * happening right now. Falls back to the spaced label when unrecognised so the
+ * UI always shows something meaningful.
+ */
+export function describeStatus(value: StatusLike): string {
+  const status = normalizeStatus(value);
+  if (status && DESCRIPTIONS[status]) {
+    return DESCRIPTIONS[status] as string;
+  }
+  return formatLabel(value);
+}

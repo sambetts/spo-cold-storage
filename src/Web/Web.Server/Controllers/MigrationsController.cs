@@ -30,6 +30,7 @@ public class MigrationsController(
     ISiteOwnerAuthorizationService siteOwners,
     IContainerAccessService containerAccess,
     IArchiveEligibilityEvaluator eligibility,
+    ISharePointFolderExpansionService folderExpansion,
     IColdStorageBusPublisher publisher) : ControllerBase
 {
     private readonly SPOColdStorageDbContext _db = db ?? throw new ArgumentNullException(nameof(db));
@@ -38,6 +39,7 @@ public class MigrationsController(
     private readonly ISiteOwnerAuthorizationService _siteOwners = siteOwners ?? throw new ArgumentNullException(nameof(siteOwners));
     private readonly IContainerAccessService _containerAccess = containerAccess ?? throw new ArgumentNullException(nameof(containerAccess));
     private readonly IArchiveEligibilityEvaluator _eligibility = eligibility ?? throw new ArgumentNullException(nameof(eligibility));
+    private readonly ISharePointFolderExpansionService _folderExpansion = folderExpansion ?? throw new ArgumentNullException(nameof(folderExpansion));
     private readonly IColdStorageBusPublisher _publisher = publisher ?? throw new ArgumentNullException(nameof(publisher));
 
     [HttpPost("start")]
@@ -89,7 +91,54 @@ public class MigrationsController(
         var warnings = new List<string>();
         var queueWork = new List<ColdStorageBusEnvelope>();
 
+        // Expand any selected folders into their constituent files up front, so the
+        // per-file loop below (and the worker) only ever deal with individual files.
+        // A folder handed straight to the migrator was treated as a single file:
+        // it downloaded garbage then failed at the delete step (issue: folders can't
+        // be migrated). Files are de-duplicated so a file selected both directly and
+        // via its parent folder is only queued once, and a request-wide file cap keeps
+        // one submit from enqueueing an unbounded number of items.
+        const int requestFileCap = 5000;
+        var expandedItems = new List<StartMigrationItem>();
+        var seenUrls = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var dto in request.Items)
+        {
+            if (string.IsNullOrWhiteSpace(dto.ServerRelativeUrl))
+            {
+                warnings.Add("Skipping item with empty serverRelativeUrl.");
+                continue;
+            }
+
+            if (dto.ItemKind == ColdStorageItemKind.Folder)
+            {
+                var expansion = await _folderExpansion
+                    .ExpandAsync(request.SiteUrl, dto.ServerRelativeUrl, request.Recursive, requestFileCap - expandedItems.Count, cancellationToken)
+                    .ConfigureAwait(false);
+                if (!string.IsNullOrEmpty(expansion.Warning))
+                {
+                    warnings.Add(expansion.Warning);
+                }
+                foreach (var f in expansion.Files)
+                {
+                    if (seenUrls.Add(f.ServerRelativeUrl))
+                    {
+                        expandedItems.Add(new StartMigrationItem
+                        {
+                            ServerRelativeUrl = f.ServerRelativeUrl,
+                            ItemKind = ColdStorageItemKind.File,
+                            FileSize = f.FileSize,
+                            LastModified = f.LastModified,
+                        });
+                    }
+                }
+            }
+            else if (seenUrls.Add(dto.ServerRelativeUrl))
+            {
+                expandedItems.Add(dto);
+            }
+        }
+
+        foreach (var dto in expandedItems)
         {
             if (string.IsNullOrWhiteSpace(dto.ServerRelativeUrl))
             {
@@ -244,6 +293,25 @@ public class MigrationsController(
                 Status = job.Status,
                 Warnings = warnings,
             });
+        }
+
+        // Persist accept-time warnings (folder-expansion caps, skipped items, …) as
+        // job-level log rows so they remain visible when the job is reopened later,
+        // not only in the synchronous accept response. Publish failures below are
+        // logged per-item separately, so this runs before publishing to avoid dupes.
+        if (warnings.Count > 0)
+        {
+            foreach (var w in warnings)
+            {
+                _db.MigrationJobLogs.Add(new MigrationJobLog
+                {
+                    JobId = job.JobId,
+                    Status = MigrationLifecycleStatus.Queued,
+                    Level = (int)LogLevel.Warning,
+                    Message = w,
+                });
+            }
+            await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
         }
 
         // Publish each envelope. If a publish fails, mark the corresponding DB row

@@ -97,6 +97,8 @@ export interface IJobItemStatus {
   attempts: number;
   lastError?: string;
   lastErrorDetail?: string;
+  createdAt?: string;
+  updatedAt?: string;
   copiedAt?: string;
   sourceDeletedAt?: string;
   placeholderCreatedAt?: string;
@@ -112,9 +114,43 @@ export interface IJobStatusResponse {
   siteUrl: string;
   requestedByUpn: string;
   containerName?: string;
+  createdAt?: string;
+  updatedAt?: string;
+  completedAt?: string;
   items: IJobItemStatus[];
   warnings: string[];
   errors: string[];
+}
+
+/**
+ * One entry from the per-job audit log (`GET /api/jobs/{id}/logs`). Rendered as
+ * a live activity timeline so the user can watch each step happen instead of
+ * staring at a single "Queued" badge.
+ */
+export interface IJobLogEntry {
+  itemId?: string;
+  timestamp: string;
+  status: MigrationLifecycleStatus;
+  level: number;
+  message: string;
+  exception?: string;
+}
+
+/**
+ * Liveness of the background migrator worker (`GET /api/worker/health`). Used to
+ * explain a long "Queued" wait — if the worker is offline, nothing drains the
+ * Service Bus queue and queued items won't move until it's started.
+ */
+export interface IWorkerHealth {
+  isOnline: boolean;
+  lastSeenUtc?: string;
+  secondsSinceLastSeen?: number;
+  onlineWindowSeconds: number;
+  workerId?: string;
+  machineName?: string;
+  workerVersion?: string;
+  startedAtUtc?: string;
+  workerCount: number;
 }
 
 export interface IPlaceholderMetadata {
@@ -159,6 +195,14 @@ export class ColdStorageApiClient {
 
   public async getJob(jobId: string): Promise<IJobStatusResponse> {
     return this.getJson<IJobStatusResponse>(`/api/jobs/${jobId}`);
+  }
+
+  public async getJobLogs(jobId: string, take: number = 200): Promise<IJobLogEntry[]> {
+    return this.getJson<IJobLogEntry[]>(`/api/jobs/${jobId}/logs?take=${encodeURIComponent(String(take))}`);
+  }
+
+  public async getWorkerHealth(): Promise<IWorkerHealth> {
+    return this.getJson<IWorkerHealth>('/api/worker/health');
   }
 
   public async listRecentJobs(siteUrl: string, take: number = 20): Promise<IJobStatusResponse[]> {
