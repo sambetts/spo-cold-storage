@@ -24,12 +24,12 @@ public class BaseSharePointFileInfo
     }
 
     /// <summary>
-    /// Example: https://m365x352268.sharepoint.com/sites/MigrationHost
+    /// Example: https://contoso.sharepoint.com/sites/MigrationHost
     /// </summary>
     public string SiteUrl { get; set; } = string.Empty;
 
     /// <summary>
-    /// Example: https://m365x352268.sharepoint.com/sites/MigrationHost/subsite
+    /// Example: https://contoso.sharepoint.com/sites/MigrationHost/subsite
     /// </summary>
     public string WebUrl { get; set; } = string.Empty;
 

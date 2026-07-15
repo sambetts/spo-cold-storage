@@ -44,7 +44,7 @@ public class MockListLoader(int itemsPerPage, int pages) : BaseMockLoader(itemsP
 
         for (int i = 0; i < ItemsPerPage; i++)
         {
-            var siteRoot = $"https://m365x352268.sharepoint.com";
+            var siteRoot = $"https://contoso.sharepoint.com";
             var siteRelativeUrl = $"{siteRoot}/page{wantedPage}";
             var siteFQDN = $"{siteRoot}{siteRelativeUrl}";
             result.FilesFound.Add(new SharePointFileInfoWithList
