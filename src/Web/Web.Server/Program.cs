@@ -118,7 +118,7 @@ public class Program
             {
                 c.AddConsole();
             }).CreateLogger("DB init");
-            logger.LogInformation($"Using SQL connection-string: {config.ConnectionStrings.SQLConnectionString}");
+            logger.LogInformation("Initializing cold-storage database schema…");
 
             await DbInitializer.Init(db, config.DevConfig);
 

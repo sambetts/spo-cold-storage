@@ -353,6 +353,18 @@ public class RestoresController(
         var warnings = new List<string>();
         var queueWork = new List<ColdStorageBusEnvelope>();
         var containerCache = new Dictionary<int, ColdStorageContainer?>();
+        // Coalesce per-placeholder skips so a large folder-restore doesn't emit
+        // thousands of near-identical warnings.
+        var skipped = 0;
+        var skipSamples = new List<string>();
+        void Skip(string reason)
+        {
+            skipped++;
+            if (skipSamples.Count < 5)
+            {
+                skipSamples.Add(reason);
+            }
+        }
 
         foreach (var placeholder in placeholders)
         {
@@ -363,7 +375,7 @@ public class RestoresController(
                 .ConfigureAwait(false);
             if (migrateItem is null || string.IsNullOrEmpty(migrateItem.BlobContainerName) || migrateItem.ContainerId is null)
             {
-                warnings.Add($"'{placeholder}': no restorable migration record found; skipping.");
+                Skip($"'{placeholder}': no restorable migration record found.");
                 continue;
             }
 
@@ -375,7 +387,7 @@ public class RestoresController(
                 .ConfigureAwait(false);
             if (inFlight is not null && !inFlight.Status.IsTerminal())
             {
-                warnings.Add($"'{placeholder}': restore already in progress (status {inFlight.Status}); skipping.");
+                Skip($"'{placeholder}': restore already in progress (status {inFlight.Status}).");
                 continue;
             }
 
@@ -389,12 +401,12 @@ public class RestoresController(
             }
             if (container is null)
             {
-                warnings.Add($"'{placeholder}': cold-storage container no longer configured; skipping.");
+                Skip($"'{placeholder}': cold-storage container no longer configured.");
                 continue;
             }
             if (!await _containerAccess.CanAsync(User, container, ContainerAction.Restore, cancellationToken).ConfigureAwait(false))
             {
-                warnings.Add($"'{placeholder}': no restore permission on its container; skipping.");
+                Skip($"'{placeholder}': no restore permission on its container.");
                 continue;
             }
 
@@ -442,6 +454,12 @@ public class RestoresController(
                     OriginalServerRelativeUrl = migrateItem.SpServerRelativeUrl,
                 },
             });
+        }
+
+        if (skipped > 0)
+        {
+            warnings.Add($"{skipped} item(s) skipped.");
+            warnings.AddRange(skipSamples.Select(s => "  • " + s));
         }
 
         if (queueWork.Count == 0)

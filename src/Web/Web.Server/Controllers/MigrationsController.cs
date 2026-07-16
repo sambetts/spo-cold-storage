@@ -89,6 +89,14 @@ public class MigrationsController(
         await _db.MigrationJobs.AddAsync(job, cancellationToken).ConfigureAwait(false);
 
         var warnings = new List<string>();
+        // Coalesce high-volume skip categories so re-submitting a large folder does
+        // not emit thousands of near-identical warnings into the job record, the
+        // accept response, and the UI (a 4,000-file folder previously produced 4,000
+        // "already in flight; skipping" lines).
+        var alreadyInFlight = 0;
+        var notEligible = 0;
+        var emptyPaths = 0;
+        var notEligibleSamples = new List<string>();
         var queueWork = new List<ColdStorageBusEnvelope>();
 
         // Expand any selected folders into their constituent files up front, so the
@@ -105,7 +113,7 @@ public class MigrationsController(
         {
             if (string.IsNullOrWhiteSpace(dto.ServerRelativeUrl))
             {
-                warnings.Add("Skipping item with empty serverRelativeUrl.");
+                emptyPaths++;
                 continue;
             }
 
@@ -142,7 +150,7 @@ public class MigrationsController(
         {
             if (string.IsNullOrWhiteSpace(dto.ServerRelativeUrl))
             {
-                warnings.Add("Skipping item with empty serverRelativeUrl.");
+                emptyPaths++;
                 continue;
             }
 
@@ -184,7 +192,7 @@ public class MigrationsController(
                 }
                 else
                 {
-                    warnings.Add($"'{dto.ServerRelativeUrl}' is already in flight (status {existing.Status}); skipping.");
+                    alreadyInFlight++;
                     continue;
                 }
             }
@@ -203,7 +211,11 @@ public class MigrationsController(
             }, cancellationToken).ConfigureAwait(false);
             if (!eligibility.IsEligible)
             {
-                warnings.Add($"'{dto.ServerRelativeUrl}' skipped: {eligibility.SkipReason}");
+                notEligible++;
+                if (notEligibleSamples.Count < 3)
+                {
+                    notEligibleSamples.Add($"'{dto.ServerRelativeUrl}': {eligibility.SkipReason}");
+                }
                 continue;
             }
 
@@ -255,6 +267,22 @@ public class MigrationsController(
                 ActorUpn = upn,
                 Action = "Migrate",
             }, cancellationToken).ConfigureAwait(false);
+        }
+
+        // Fold the coalesced skip categories into a few summary warnings instead of
+        // one line per skipped file.
+        if (emptyPaths > 0)
+        {
+            warnings.Add($"{emptyPaths} item(s) skipped: empty path.");
+        }
+        if (alreadyInFlight > 0)
+        {
+            warnings.Add($"{alreadyInFlight} item(s) already queued or in progress; skipped to avoid duplicate work.");
+        }
+        if (notEligible > 0)
+        {
+            warnings.Add($"{notEligible} item(s) skipped as not eligible for archiving.");
+            warnings.AddRange(notEligibleSamples.Select(s => "  • " + s));
         }
 
         await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
