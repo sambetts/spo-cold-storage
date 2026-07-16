@@ -3,8 +3,8 @@ import { Link, useNavigate, useParams } from "react-router-dom";
 import { Badge, Button, Checkbox, Input, Select, Spinner } from "@fluentui/react-components";
 import { ArrowClockwise20Regular, ArrowLeft20Regular, ArrowSync20Regular } from "@fluentui/react-icons";
 import { ApiError, useApi } from "../../api/client";
-import { JobLogEntry, JobStatus, JobSummary, MigrationOperationKind, WorkerHealth } from "../../api/types";
-import { describeLogLevel, describeOperation, describeStatus, isErrorLevel, isFailedStatus, isWarnLevel } from "../../api/status";
+import { JobItemStatus, JobLogEntry, JobStatus, JobSummary, MigrationOperationKind, WorkerHealth } from "../../api/types";
+import { describeLogLevel, describeOperation, describeStatus, isErrorLevel, isFailedStatus, isInProgressStatus, isWarnLevel, StatusCategory, statusCategory } from "../../api/status";
 import { fileName, formatDateTime, formatRelative } from "../../utils/format";
 
 const REFRESH_MS = 10000;
@@ -404,6 +404,171 @@ function TransfersList() {
 }
 
 // ---------------------------------------------------------------------------
+// Detail view helpers — folder grouping, progress bar, collapsible sections.
+// ---------------------------------------------------------------------------
+function folderOf(path: string): string {
+  const clean = (path || "").replace(/\/+$/, "");
+  const i = clean.lastIndexOf("/");
+  return i > 0 ? clean.slice(0, i) : "/";
+}
+
+function shortFolder(path: string): string {
+  const segs = path.split("/").filter(Boolean);
+  if (path === "/" || segs.length === 0) return "/ (site root)";
+  if (segs.length <= 3) return "/" + segs.join("/");
+  return "…/" + segs.slice(-2).join("/");
+}
+
+/** Pull the first quoted path out of a warning string (for folder grouping). */
+function warningPath(w: string): string {
+  const m = w.match(/'([^']+)'/);
+  return m ? m[1] : "";
+}
+
+function groupByFolder<T>(items: readonly T[], pathOf: (t: T) => string): { folder: string; items: T[] }[] {
+  const map = new Map<string, T[]>();
+  for (const it of items) {
+    const f = folderOf(pathOf(it));
+    const arr = map.get(f);
+    if (arr) arr.push(it);
+    else map.set(f, [it]);
+  }
+  return [...map.entries()].sort((a, b) => a[0].localeCompare(b[0])).map(([folder, groupItems]) => ({ folder, items: groupItems }));
+}
+
+function folderRollup(items: JobItemStatus[]): { label: string; color: string } {
+  let done = 0;
+  let failed = 0;
+  let inprog = 0;
+  for (const it of items) {
+    const c = statusCategory(it.status);
+    if (c === "completed") done++;
+    else if (c === "failed") failed++;
+    else if (c === "inprogress") inprog++;
+  }
+  const total = items.length;
+  if (inprog > 0) return { label: `${done}/${total} done`, color: "#0f6cbd" };
+  if (failed > 0) return { label: `${done}/${total} · ${failed} failed`, color: "#a4262c" };
+  return { label: `all ${total} done`, color: "#107c10" };
+}
+
+const disclosureHeaderStyle: CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: 8,
+  width: "100%",
+  padding: "8px 10px",
+  border: "none",
+  background: "transparent",
+  cursor: "pointer",
+  fontSize: 13,
+  textAlign: "left",
+};
+
+function FolderDisclosure({
+  folder,
+  count,
+  rollup,
+  open,
+  onToggle,
+  children,
+}: {
+  folder: string;
+  count: number;
+  rollup?: { label: string; color: string };
+  open: boolean;
+  onToggle: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <div style={{ borderBottom: "1px solid #f3f2f1" }}>
+      <button type="button" onClick={onToggle} aria-expanded={open} style={{ ...disclosureHeaderStyle, background: "#faf9f8" }}>
+        <span style={{ color: "#605e5c" }}>{open ? "▾" : "▸"}</span>
+        <span style={{ fontWeight: 600, flex: "1 1 auto", wordBreak: "break-all" }} title={folder}>
+          {shortFolder(folder)}
+        </span>
+        <span style={{ fontSize: 12, color: "#605e5c", background: "#f3f2f1", borderRadius: 10, padding: "1px 8px" }}>{count}</span>
+        {rollup && (
+          <span style={{ fontSize: 11, color: "#fff", background: rollup.color, borderRadius: 10, padding: "2px 8px", whiteSpace: "nowrap" }}>
+            {rollup.label}
+          </span>
+        )}
+      </button>
+      {open && <div style={{ padding: "0 8px" }}>{children}</div>}
+    </div>
+  );
+}
+
+function ItemsTable({ items }: { items: JobItemStatus[] }) {
+  return (
+    <div style={{ border: "1px solid #edebe9", borderRadius: 6, overflow: "hidden", margin: "0 0 8px" }}>
+      <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+        <thead>
+          <tr style={{ background: "#faf9f8", textAlign: "left", color: "#605e5c" }}>
+            <th style={th}>File</th>
+            <th style={th}>Status</th>
+            <th style={th}>Attempts</th>
+            <th style={th}>Updated</th>
+            <th style={th}>Detail</th>
+          </tr>
+        </thead>
+        <tbody>
+          {items.map((item) => (
+            <tr key={item.itemId} style={{ borderTop: "1px solid #f3f2f1" }}>
+              <td style={{ ...td, maxWidth: 360 }} title={item.spServerRelativeUrl}>
+                {fileName(item.spServerRelativeUrl)}
+              </td>
+              <td style={td}>
+                <StatusBadge status={item.status} />
+              </td>
+              <td style={td}>{item.attempts}</td>
+              <td style={td} title={formatDateTime(item.updatedAt)}>
+                {formatRelative(item.updatedAt)}
+              </td>
+              <td style={{ ...td, color: item.lastError ? "#a4262c" : "#605e5c", whiteSpace: "normal" }} title={item.lastErrorDetail ?? undefined}>
+                {item.lastError ?? "—"}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+interface Counts {
+  completed: number;
+  failed: number;
+  skipped: number;
+  inprogress: number;
+  total: number;
+}
+
+function TransferProgress({ counts, inProgress }: { counts: Counts; inProgress: boolean }) {
+  const { completed, failed, skipped, inprogress, total } = counts;
+  if (total === 0) return null;
+  const pct = (n: number) => `${(n / total) * 100}%`;
+  return (
+    <div style={{ marginBottom: 16 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, color: "#605e5c", marginBottom: 4, gap: 12, flexWrap: "wrap" }}>
+        <span>
+          <strong style={{ color: "#201f1e" }}>{completed}</strong> of {total} done
+          {failed > 0 ? ` · ${failed} failed` : ""}
+          {skipped > 0 ? ` · ${skipped} skipped` : ""}
+        </span>
+        <span>{inProgress ? `${inprogress} in progress · auto-refreshing…` : "Finished"}</span>
+      </div>
+      <div style={{ display: "flex", height: 10, borderRadius: 6, overflow: "hidden", background: "#edebe9" }}>
+        {completed > 0 && <div style={{ width: pct(completed), background: "#107c10" }} />}
+        {failed > 0 && <div style={{ width: pct(failed), background: "#a4262c" }} />}
+        {inprogress > 0 && <div style={{ width: pct(inprogress), background: "#0f6cbd" }} />}
+        {skipped > 0 && <div style={{ width: pct(skipped), background: "#c8c6c4" }} />}
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Detail view — one transfer: its items + full log timeline.
 // ---------------------------------------------------------------------------
 function TransferDetail({ jobId }: { jobId: string }) {
@@ -437,6 +602,41 @@ function TransferDetail({ jobId }: { jobId: string }) {
   }, [load]);
 
   const failedCount = useMemo(() => (job?.items ?? []).filter((i) => isFailedStatus(i.status)).length, [job]);
+
+  const items = useMemo(() => job?.items ?? [], [job]);
+  const counts = useMemo<Counts>(() => {
+    const c: Counts = { completed: 0, failed: 0, skipped: 0, inprogress: 0, total: items.length };
+    for (const it of items) c[statusCategory(it.status)]++;
+    return c;
+  }, [items]);
+  const inProgress = counts.inprogress > 0 || (job !== null && items.length === 0 && isInProgressStatus(job.status));
+
+  const [statusFilter, setStatusFilter] = useState<"" | StatusCategory>("");
+  const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set());
+  const [warningsOpen, setWarningsOpen] = useState(false);
+
+  const filteredItems = useMemo(
+    () => (statusFilter ? items.filter((i) => statusCategory(i.status) === statusFilter) : items),
+    [items, statusFilter],
+  );
+  const fileGroups = useMemo(() => groupByFolder(filteredItems, (i) => i.spServerRelativeUrl), [filteredItems]);
+  const warningGroups = useMemo(() => groupByFolder(job?.warnings ?? [], warningPath), [job]);
+
+  const toggleFolder = useCallback((key: string) => {
+    setExpandedFolders((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }, []);
+
+  // Auto-refresh while the transfer is still in progress; stops once terminal.
+  useEffect(() => {
+    if (!inProgress) return;
+    const t = setInterval(() => void load(), 8000);
+    return () => clearInterval(t);
+  }, [inProgress, load]);
 
   const requeue = useCallback(async () => {
     if (!job) return;
@@ -516,58 +716,90 @@ function TransferDetail({ jobId }: { jobId: string }) {
             {job.completedAt ? ` · finished ${formatDateTime(job.completedAt)}` : ""} · job {job.jobId}
           </div>
 
-          {(job.errors.length > 0 || job.warnings.length > 0) && (
-            <div style={{ marginBottom: 16 }}>
+          <TransferProgress counts={counts} inProgress={inProgress} />
+
+          {job.errors.length > 0 && (
+            <div style={{ marginBottom: 12 }}>
               {job.errors.map((e, i) => (
                 <div key={`e${i}`} style={{ color: "#a4262c", fontSize: 13 }}>
                   ✕ {e}
                 </div>
               ))}
-              {job.warnings.map((w, i) => (
-                <div key={`w${i}`} style={{ color: "#835c00", fontSize: 13 }}>
-                  ⚠ {w}
-                </div>
-              ))}
             </div>
           )}
 
-          <h3 style={{ margin: "0 0 8px 0", fontSize: 15 }}>Files ({job.items.length})</h3>
+          {job.warnings.length > 0 && (
+            <div style={{ border: "1px solid #f2e2b3", background: "#fffdf5", borderRadius: 8, marginBottom: 16 }}>
+              <button type="button" onClick={() => setWarningsOpen((v) => !v)} aria-expanded={warningsOpen} style={disclosureHeaderStyle}>
+                <span style={{ color: "#605e5c" }}>{warningsOpen ? "▾" : "▸"}</span>
+                <span style={{ fontWeight: 600, color: "#835c00" }}>
+                  ⚠ {job.warnings.length} warning{job.warnings.length === 1 ? "" : "s"}
+                </span>
+                <span style={{ color: "#605e5c" }}>· grouped by folder</span>
+              </button>
+              {warningsOpen && (
+                <div style={{ padding: "0 8px 4px" }}>
+                  {warningGroups.map((g) => (
+                    <FolderDisclosure
+                      key={`w-${g.folder}`}
+                      folder={g.folder}
+                      count={g.items.length}
+                      open={expandedFolders.has(`w-${g.folder}`)}
+                      onToggle={() => toggleFolder(`w-${g.folder}`)}
+                    >
+                      <ul style={{ margin: "4px 0 8px 0", paddingLeft: 22 }}>
+                        {g.items.map((w, i) => (
+                          <li key={i} style={{ color: "#835c00", fontSize: 12.5, wordBreak: "break-word" }}>
+                            {w}
+                          </li>
+                        ))}
+                      </ul>
+                    </FolderDisclosure>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          <div style={{ display: "flex", alignItems: "center", gap: 12, margin: "4px 0 8px", flexWrap: "wrap" }}>
+            <h3 style={{ margin: 0, fontSize: 15 }}>Files ({job.items.length})</h3>
+            <Select
+              value={statusFilter}
+              onChange={(_, d) => setStatusFilter(d.value as "" | StatusCategory)}
+              aria-label="Filter files by status"
+            >
+              <option value="">All statuses</option>
+              <option value="inprogress">In progress ({counts.inprogress})</option>
+              <option value="completed">Completed ({counts.completed})</option>
+              <option value="failed">Failed ({counts.failed})</option>
+              <option value="skipped">Skipped ({counts.skipped})</option>
+            </Select>
+            <span style={{ flex: 1 }} />
+            <Button size="small" appearance="subtle" onClick={() => setExpandedFolders(new Set(fileGroups.map((g) => `f-${g.folder}`)))}>
+              Expand all
+            </Button>
+            <Button size="small" appearance="subtle" onClick={() => setExpandedFolders(new Set())}>
+              Collapse all
+            </Button>
+          </div>
           <div style={{ border: "1px solid #edebe9", borderRadius: 8, overflow: "hidden", marginBottom: 24 }}>
-            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
-              <thead>
-                <tr style={{ background: "#faf9f8", textAlign: "left", color: "#605e5c" }}>
-                  <th style={th}>File</th>
-                  <th style={th}>Status</th>
-                  <th style={th}>Attempts</th>
-                  <th style={th}>Updated</th>
-                  <th style={th}>Detail</th>
-                </tr>
-              </thead>
-              <tbody>
-                {job.items.map((item) => (
-                  <tr key={item.itemId} style={{ borderTop: "1px solid #f3f2f1" }}>
-                    <td style={{ ...td, maxWidth: 380, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={item.spServerRelativeUrl}>
-                      {fileName(item.spServerRelativeUrl)}
-                    </td>
-                    <td style={td}>
-                      <StatusBadge status={item.status} />
-                    </td>
-                    <td style={td}>{item.attempts}</td>
-                    <td style={td} title={formatDateTime(item.updatedAt)}>
-                      {formatRelative(item.updatedAt)}
-                    </td>
-                    <td style={{ ...td, color: item.lastError ? "#a4262c" : "#605e5c" }}>{item.lastError ?? "—"}</td>
-                  </tr>
-                ))}
-                {job.items.length === 0 && (
-                  <tr>
-                    <td style={{ ...td, color: "#605e5c" }} colSpan={5}>
-                      No files were queued for this transfer.
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
+            {fileGroups.map((g) => (
+              <FolderDisclosure
+                key={`f-${g.folder}`}
+                folder={g.folder}
+                count={g.items.length}
+                rollup={folderRollup(g.items)}
+                open={expandedFolders.has(`f-${g.folder}`)}
+                onToggle={() => toggleFolder(`f-${g.folder}`)}
+              >
+                <ItemsTable items={g.items} />
+              </FolderDisclosure>
+            ))}
+            {fileGroups.length === 0 && (
+              <div style={{ color: "#605e5c", fontSize: 13, padding: 12 }}>
+                {job.items.length === 0 ? "No files were queued for this transfer." : "No files match this filter."}
+              </div>
+            )}
           </div>
 
           <h3 style={{ margin: "0 0 8px 0", fontSize: 15 }}>Log timeline</h3>

@@ -17,8 +17,13 @@ export const msalConfig = {
     navigateToLoginRequestUrl: true,
   },
   cache: {
-    cacheLocation: "sessionStorage", // This configures where your cache will be stored
-    storeAuthStateInCookie: false, // Set this to "true" if you are having issues on IE11 or Edge
+    // localStorage persists tokens across tabs and browser restarts, so users
+    // aren't forced to re-authenticate every time they reopen the app (sessionStorage
+    // is cleared when the tab/browser closes).
+    cacheLocation: "localStorage",
+    // Also keep auth state in a cookie — the redirect flow uses it to carry state
+    // across the round-trip to Entra ID.
+    storeAuthStateInCookie: true,
   }
 };
 

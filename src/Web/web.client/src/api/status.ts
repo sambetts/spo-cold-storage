@@ -55,6 +55,23 @@ export function isFailedStatus(status: MigrationLifecycleStatus): boolean {
   return FAILED_STATUSES.includes(status);
 }
 
+/** Coarse bucket used for progress bars, filtering and folder rollups. */
+export type StatusCategory = "completed" | "failed" | "skipped" | "inprogress";
+
+const COMPLETED_STATUSES: MigrationLifecycleStatus[] = ["ColdStorageMigrationCompleted", "RestoreCompleted"];
+const SKIPPED_STATUSES: MigrationLifecycleStatus[] = ["Skipped", "Cancelled"];
+
+export function statusCategory(status: MigrationLifecycleStatus): StatusCategory {
+  if (COMPLETED_STATUSES.includes(status) || status === "CompletedWithWarning") return "completed";
+  if (isFailedStatus(status)) return "failed";
+  if (SKIPPED_STATUSES.includes(status)) return "skipped";
+  return "inprogress";
+}
+
+export function isInProgressStatus(status: MigrationLifecycleStatus): boolean {
+  return statusCategory(status) === "inprogress";
+}
+
 const LOG_LEVEL_NAMES: Record<number, string> = {
   0: "Trace",
   1: "Debug",

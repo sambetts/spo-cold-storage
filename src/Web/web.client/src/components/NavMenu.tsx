@@ -61,7 +61,7 @@ function SignOutButton() {
   const { instance } = useMsal();
   return (
     <AuthenticatedTemplate>
-      <Button appearance="subtle" onClick={() => void instance.logoutPopup()}>
+      <Button appearance="subtle" onClick={() => void instance.logoutRedirect()}>
         Sign out
       </Button>
     </AuthenticatedTemplate>
