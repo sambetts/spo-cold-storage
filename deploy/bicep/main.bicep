@@ -62,6 +62,9 @@ param subnetAppPrefix string = '10.50.0.0/24'
 @description('Private endpoints subnet CIDR. Default 10.50.1.0/24.')
 param subnetPePrefix string = '10.50.1.0/24'
 
+@description('Azure Function (Flex Consumption) VNet-integration subnet CIDR. Dedicated, delegated to Microsoft.App/environments. Default 10.50.2.0/24.')
+param subnetFuncPrefix string = '10.50.2.0/24'
+
 // Derived (allows naming.vnet override without forcing it into existing params.json files).
 var vnetName = naming.?vnet ?? 'vnet-${naming.webApp}'
 
@@ -93,6 +96,18 @@ resource vnet 'Microsoft.Network/virtualNetworks@2024-01-01' = {
           privateEndpointNetworkPolicies: 'Disabled'
         }
       }
+      {
+        // Flex Consumption VNet integration subnet — delegated to Microsoft.App/environments.
+        name: 'snet-func'
+        properties: {
+          addressPrefix: subnetFuncPrefix
+          delegations: [ {
+            name: 'flexFunctions'
+            properties: { serviceName: 'Microsoft.App/environments' }
+          } ]
+          privateEndpointNetworkPolicies: 'Disabled'
+        }
+      }
     ]
   }
 }
@@ -104,6 +119,10 @@ resource snetApp 'Microsoft.Network/virtualNetworks/subnets@2024-01-01' existing
 resource snetPe 'Microsoft.Network/virtualNetworks/subnets@2024-01-01' existing = {
   parent: vnet
   name: 'snet-pe'
+}
+resource snetFunc 'Microsoft.Network/virtualNetworks/subnets@2024-01-01' existing = {
+  parent: vnet
+  name: 'snet-func'
 }
 
 // ---------- Private DNS zones (linked to the VNet, A records auto-registered by PEs) ----------
@@ -129,6 +148,16 @@ resource pdnsSb 'Microsoft.Network/privateDnsZones@2024-06-01' = {
   location: 'global'
   tags: tags
 }
+resource pdnsQueue 'Microsoft.Network/privateDnsZones@2024-06-01' = {
+  name: 'privatelink.queue.${environment().suffixes.storage}'
+  location: 'global'
+  tags: tags
+}
+resource pdnsTable 'Microsoft.Network/privateDnsZones@2024-06-01' = {
+  name: 'privatelink.table.${environment().suffixes.storage}'
+  location: 'global'
+  tags: tags
+}
 
 resource pdnsLinkBlob 'Microsoft.Network/privateDnsZones/virtualNetworkLinks@2024-06-01' = {
   parent: pdnsBlob
@@ -150,6 +179,18 @@ resource pdnsLinkSql 'Microsoft.Network/privateDnsZones/virtualNetworkLinks@2024
 }
 resource pdnsLinkSb 'Microsoft.Network/privateDnsZones/virtualNetworkLinks@2024-06-01' = {
   parent: pdnsSb
+  name: 'link-${vnet.name}'
+  location: 'global'
+  properties: { virtualNetwork: { id: vnet.id }, registrationEnabled: false }
+}
+resource pdnsLinkQueue 'Microsoft.Network/privateDnsZones/virtualNetworkLinks@2024-06-01' = {
+  parent: pdnsQueue
+  name: 'link-${vnet.name}'
+  location: 'global'
+  properties: { virtualNetwork: { id: vnet.id }, registrationEnabled: false }
+}
+resource pdnsLinkTable 'Microsoft.Network/privateDnsZones/virtualNetworkLinks@2024-06-01' = {
+  parent: pdnsTable
   name: 'link-${vnet.name}'
   location: 'global'
   properties: { virtualNetwork: { id: vnet.id }, registrationEnabled: false }
@@ -227,6 +268,15 @@ resource blobSvc 'Microsoft.Storage/storageAccounts/blobServices@2023-05-01' = {
 resource blobContainer 'Microsoft.Storage/storageAccounts/blobServices/containers@2023-05-01' = {
   parent: blobSvc
   name: naming.blobContainer
+  properties: {
+    publicAccess: 'None'
+  }
+}
+
+// Deployment package container for the Flex Consumption Function (identity-auth).
+resource funcDeployContainer 'Microsoft.Storage/storageAccounts/blobServices/containers@2023-05-01' = {
+  parent: blobSvc
+  name: 'func-deploy'
   properties: {
     publicAccess: 'None'
   }
@@ -418,6 +468,8 @@ var roleIds = {
   StorageBlobDelegator:         'db58b8e5-c6ad-4a2a-8342-4190687cbf4a'
   ServiceBusDataSender:         '69a216fc-b8fb-44d8-bc22-1f3c2cd27a39'
   ServiceBusDataReceiver:       '4f6d3b9b-027b-4f4c-9142-0e5a2a2247e0'
+  StorageQueueDataContributor:  '974c5e8b-45b9-4653-ba55-5f855dd0fb88'
+  StorageTableDataContributor:  '0a9a7e1f-b9d0-4cc4-a60d-0319b160aaa3'
 }
 
 // Web App MSI → Key Vault Secrets User (resolves @Microsoft.KeyVault references)
@@ -608,6 +660,239 @@ resource peSbDns 'Microsoft.Network/privateEndpoints/privateDnsZoneGroups@2024-0
   } ] }
 }
 
+// ---------- Storage queue + table private endpoints ----------
+// The Function's identity-based AzureWebJobsStorage uses the queue + table
+// services; storage public access is disabled by governance, so it reaches them
+// over these private endpoints from snet-func.
+resource peQueue 'Microsoft.Network/privateEndpoints@2024-01-01' = {
+  name: 'pe-${storage.name}-queue'
+  location: location
+  tags: tags
+  properties: {
+    subnet: { id: snetPe.id }
+    privateLinkServiceConnections: [ {
+      name: 'queue'
+      properties: { privateLinkServiceId: storage.id, groupIds: [ 'queue' ] }
+    } ]
+  }
+}
+resource peQueueDns 'Microsoft.Network/privateEndpoints/privateDnsZoneGroups@2024-01-01' = {
+  parent: peQueue
+  name: 'default'
+  properties: { privateDnsZoneConfigs: [ {
+    name: 'queue'
+    properties: { privateDnsZoneId: pdnsQueue.id }
+  } ] }
+}
+resource peTable 'Microsoft.Network/privateEndpoints@2024-01-01' = {
+  name: 'pe-${storage.name}-table'
+  location: location
+  tags: tags
+  properties: {
+    subnet: { id: snetPe.id }
+    privateLinkServiceConnections: [ {
+      name: 'table'
+      properties: { privateLinkServiceId: storage.id, groupIds: [ 'table' ] }
+    } ]
+  }
+}
+resource peTableDns 'Microsoft.Network/privateEndpoints/privateDnsZoneGroups@2024-01-01' = {
+  parent: peTable
+  name: 'default'
+  properties: { privateDnsZoneConfigs: [ {
+    name: 'table'
+    properties: { privateDnsZoneId: pdnsTable.id }
+  } ] }
+}
+
+// ---------- Function worker (Flex Consumption) ----------
+// Queue-triggered Azure Function that drains 'filediscovery'. Replaced the WebJob
+// worker (which needed Always On, disabled by governance). App settings + code are
+// applied by deploy.ps1 -Phase Function (mirrors how the Web App is configured).
+var functionAppName = replace(naming.webApp, 'app-', 'func-')
+
+resource funcPlan 'Microsoft.Web/serverfarms@2024-04-01' = {
+  name: 'plan-${functionAppName}'
+  location: location
+  tags: tags
+  kind: 'functionapp'
+  sku: { name: 'FC1', tier: 'FlexConsumption' }
+  properties: { reserved: true }
+}
+
+resource func 'Microsoft.Web/sites@2024-04-01' = {
+  name: functionAppName
+  location: location
+  tags: tags
+  kind: 'functionapp,linux'
+  identity: { type: 'SystemAssigned' }
+  properties: {
+    serverFarmId: funcPlan.id
+    httpsOnly: true
+    virtualNetworkSubnetId: snetFunc.id
+    functionAppConfig: {
+      deployment: {
+        storage: {
+          type: 'blobContainer'
+          value: '${storage.properties.primaryEndpoints.blob}func-deploy'
+          authentication: { type: 'SystemAssignedIdentity' }
+        }
+      }
+      runtime: { name: 'dotnet-isolated', version: '10.0' }
+      scaleAndConcurrency: {
+        instanceMemoryMB: 2048
+        maximumInstanceCount: 40
+        alwaysReady: [ { name: 'function:ColdStorageQueue', instanceCount: 2 } ]
+      }
+    }
+  }
+  dependsOn: [ funcDeployContainer ]
+}
+
+// Function MSI role assignments: identity-based AzureWebJobsStorage (blob/queue/table),
+// KV secret references, and the Service Bus trigger (receive).
+resource raFuncBlob 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  scope: storage
+  name: guid(storage.id, func.id, roleIds.StorageBlobDataContributor)
+  properties: {
+    principalId: func.identity.principalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', roleIds.StorageBlobDataContributor)
+  }
+}
+resource raFuncQueue 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  scope: storage
+  name: guid(storage.id, func.id, roleIds.StorageQueueDataContributor)
+  properties: {
+    principalId: func.identity.principalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', roleIds.StorageQueueDataContributor)
+  }
+}
+resource raFuncTable 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  scope: storage
+  name: guid(storage.id, func.id, roleIds.StorageTableDataContributor)
+  properties: {
+    principalId: func.identity.principalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', roleIds.StorageTableDataContributor)
+  }
+}
+resource raFuncKv 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  scope: kv
+  name: guid(kv.id, func.id, roleIds.KeyVaultSecretsUser)
+  properties: {
+    principalId: func.identity.principalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', roleIds.KeyVaultSecretsUser)
+  }
+}
+resource raFuncSb 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  scope: sb
+  name: guid(sb.id, func.id, roleIds.ServiceBusDataReceiver)
+  properties: {
+    principalId: func.identity.principalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', roleIds.ServiceBusDataReceiver)
+  }
+}
+
+// ---------- Monitoring: action group + alerts ----------
+resource actionGroup 'Microsoft.Insights/actionGroups@2023-01-01' = {
+  name: 'ag-spocs-alerts'
+  location: 'global'
+  tags: tags
+  properties: {
+    groupShortName: 'spocsAlrt'
+    enabled: true
+    emailReceivers: [ {
+      name: 'admin'
+      emailAddress: sql.entraAdminLogin
+      useCommonAlertSchema: true
+    } ]
+  }
+}
+resource alertDlq 'Microsoft.Insights/metricAlerts@2018-03-01' = {
+  name: 'spocs-dlq-depth'
+  location: 'global'
+  tags: tags
+  properties: {
+    description: 'A migrate/restore message dead-lettered. Source is intact by design; investigate + requeue.'
+    severity: 2
+    enabled: true
+    scopes: [ sb.id ]
+    evaluationFrequency: 'PT5M'
+    windowSize: 'PT5M'
+    criteria: {
+      'odata.type': 'Microsoft.Azure.Monitor.SingleResourceMultipleMetricCriteria'
+      allOf: [ {
+        name: 'dlq'
+        metricNamespace: 'Microsoft.ServiceBus/namespaces'
+        metricName: 'DeadletteredMessages'
+        dimensions: [ { name: 'EntityName', operator: 'Include', values: [ naming.serviceBusQueue ] } ]
+        operator: 'GreaterThan'
+        threshold: 0
+        timeAggregation: 'Average'
+        criterionType: 'StaticThresholdCriterion'
+      } ]
+    }
+    actions: [ { actionGroupId: actionGroup.id } ]
+  }
+}
+resource alertBacklog 'Microsoft.Insights/metricAlerts@2018-03-01' = {
+  name: 'spocs-queue-backlog'
+  location: 'global'
+  tags: tags
+  properties: {
+    description: 'filediscovery backlog above 500 for 1h — worker may be stopped or not keeping up.'
+    severity: 3
+    enabled: true
+    scopes: [ sb.id ]
+    evaluationFrequency: 'PT15M'
+    windowSize: 'PT1H'
+    criteria: {
+      'odata.type': 'Microsoft.Azure.Monitor.SingleResourceMultipleMetricCriteria'
+      allOf: [ {
+        name: 'backlog'
+        metricNamespace: 'Microsoft.ServiceBus/namespaces'
+        metricName: 'ActiveMessages'
+        dimensions: [ { name: 'EntityName', operator: 'Include', values: [ naming.serviceBusQueue ] } ]
+        operator: 'GreaterThan'
+        threshold: 500
+        timeAggregation: 'Average'
+        criterionType: 'StaticThresholdCriterion'
+      } ]
+    }
+    actions: [ { actionGroupId: actionGroup.id } ]
+  }
+}
+resource alertFuncErrors 'Microsoft.Insights/metricAlerts@2018-03-01' = {
+  name: 'spocs-func-exceptions'
+  location: 'global'
+  tags: tags
+  properties: {
+    description: 'Migration worker threw >10 exceptions in 15m — investigate worker health.'
+    severity: 2
+    enabled: true
+    scopes: [ appi.id ]
+    evaluationFrequency: 'PT5M'
+    windowSize: 'PT15M'
+    criteria: {
+      'odata.type': 'Microsoft.Azure.Monitor.SingleResourceMultipleMetricCriteria'
+      allOf: [ {
+        name: 'exceptions'
+        metricNamespace: 'microsoft.insights/components'
+        metricName: 'exceptions/count'
+        operator: 'GreaterThan'
+        threshold: 10
+        timeAggregation: 'Count'
+        criterionType: 'StaticThresholdCriterion'
+      } ]
+    }
+    actions: [ { actionGroupId: actionGroup.id } ]
+  }
+}
+
 // ---------- Outputs ----------
 output webAppName string                = web.name
 output webAppHostname string            = web.properties.defaultHostName
@@ -627,6 +912,9 @@ output vnetName string                  = vnet.name
 output vnetId string                    = vnet.id
 output appSubnetId string               = snetApp.id
 output peSubnetId string                = snetPe.id
+output funcSubnetId string              = snetFunc.id
+output functionAppName string           = func.name
+output functionPrincipalId string       = func.identity.principalId
 output baseServerAddress string         = sharePoint.baseServerAddress
 output aadClientId string               = azureAd.clientId
 output aadTenantId string               = azureAd.tenantId

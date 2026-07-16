@@ -7,13 +7,16 @@
     Phases (run with -Phase, default 'All'):
       Prereqs   Validate local tools, az login, subscription, providers.
       Validate  Parse + strictly validate deploy/params.json.
-      Infra     Run bicep what-if then deploy main.bicep.
+      Infra     Recover a soft-deleted (purge-protected) Key Vault if present, run
+                bicep what-if, then deploy main.bicep (incl. the Function worker,
+                its Flex plan, storage queue/table private endpoints, and alerts).
       Secrets   Push the AAD client secret into Key Vault (prompted/-AzureAdClientSecret/env var).
-      Sql       Grant the Web App MSI db_owner on the SQL database (T-SQL via Entra token).
-      App       dotnet publish Web.Server + 2 workers (Indexer, SnapshotBuilder — the
-                Migrator WebJob is retired; a queue-triggered Azure Function replaced it),
-                assemble zip with App_Data/jobs layout, deploy to the Web App, set app
-                settings (Key Vault references), restart.
+      Sql       Grant the Web App MSI AND the Function worker MSI db_owner on the SQL
+                database (T-SQL via Entra token, FROM EXTERNAL PROVIDER).
+      App       dotnet publish Web.Server (self-contained), zip-deploy to the API Web
+                App, set app settings (Key Vault references), restart.
+      Function  Set the Flex Consumption Function app settings (identity-based storage +
+                SB trigger), dotnet publish Migration.Functions, and zip-deploy the code.
       Smoke     Verify the Web App responds, container/log-stream OK, secrets resolve.
 
 .PARAMETER ParamsFile
@@ -50,7 +53,7 @@
 param(
     [string]$ParamsFile = (Join-Path $PSScriptRoot 'params.json'),
 
-    [ValidateSet('All','Prereqs','Validate','Infra','Secrets','Sql','App','Smoke')]
+    [ValidateSet('All','Prereqs','Validate','Infra','Secrets','Sql','App','Function','Smoke')]
     [string]$Phase = 'All',
 
     [SecureString]$AzureAdClientSecret,
@@ -199,6 +202,17 @@ function Invoke-Phase-Infra {
             '--tags' (Convert-TagsToCliArgs $p) -Quiet | Out-Null
     } else {
         Write-Ok "Resource group $($p.resourceGroupName) already exists."
+    }
+
+    # Recover a soft-deleted Key Vault of the same name if one exists. The vault has
+    # purge protection, so after a teardown it can't be purged for the retention
+    # window — a same-name redeploy MUST recover it rather than fail on create.
+    $kvName = $p.naming.keyVault
+    $deletedKv = (Invoke-Native az 'keyvault' 'list-deleted' '--query' "[?name=='$kvName'].name | [0]" '-o' 'tsv' -Quiet -AllowNonZero)
+    if ($deletedKv -and $deletedKv.Trim() -eq $kvName) {
+        Write-Info "Recovering soft-deleted Key Vault '$kvName' (purge protection prevents same-name recreate)…"
+        Invoke-Native az 'keyvault' 'recover' '-n' $kvName '-l' $p.location -Quiet -AllowNonZero | Out-Null
+        Write-Ok "Recovered Key Vault '$kvName'."
     }
 
     $deployIp = Get-PublicIp
@@ -419,23 +433,29 @@ function Invoke-Phase-Sql {
     # and uses the right SID automatically. The Web App MSI's SP is named after the
     # Web App itself, so this resolves unambiguously.
     $userName = $webAppName
-    $sqlScript = @"
-IF NOT EXISTS (SELECT 1 FROM sys.database_principals WHERE name = N'$userName')
+    $funcName = $global:Outputs['functionAppName']
+    # Grant BOTH the API Web App MSI and the Function worker MSI db_owner. Both
+    # managed-identity SPs are named after their resource, so FROM EXTERNAL PROVIDER
+    # resolves the correct SID (Azure SQL derives it from the SP appId).
+    $msiUsers = @($webAppName, $funcName) | Where-Object { $_ }
+    $userLabel = ($msiUsers -join ' + ')
+    $sqlScript = (($msiUsers | ForEach-Object {
+@"
+IF NOT EXISTS (SELECT 1 FROM sys.database_principals WHERE name = N'$_')
 BEGIN
-    CREATE USER [$userName] FROM EXTERNAL PROVIDER;
+    CREATE USER [$_] FROM EXTERNAL PROVIDER;
 END
 IF NOT EXISTS (
     SELECT 1 FROM sys.database_role_members rm
     JOIN sys.database_principals r ON rm.role_principal_id = r.principal_id
     JOIN sys.database_principals m ON rm.member_principal_id = m.principal_id
-    WHERE r.name = N'db_owner' AND m.name = N'$userName'
+    WHERE r.name = N'db_owner' AND m.name = N'$_'
 )
 BEGIN
-    ALTER ROLE db_owner ADD MEMBER [$userName];
+    ALTER ROLE db_owner ADD MEMBER [$_];
 END
-SELECT name, type_desc, CONVERT(VARCHAR(256), sid, 1) AS sid_hex
-FROM sys.database_principals WHERE name = N'$userName';
 "@
+    }) -join "`n") + "`nSELECT name, type_desc FROM sys.database_principals WHERE type = 'E';"
 
     # Ensure deploy IP is in the firewall (bicep already did this, but guard against drift).
     $deployIp = Get-PublicIp
@@ -449,7 +469,7 @@ FROM sys.database_principals WHERE name = N'$userName';
     Write-Info "Connecting to $serverFqdn / $dbName as Entra admin…"
     try {
         Invoke-AzureSqlCommand -ServerFqdn $serverFqdn -Database $dbName -Sql $sqlScript | Format-Table | Out-String | Write-Host
-        Write-Ok "Granted db_owner to MSI '$userName' (SID derived from appId via FROM EXTERNAL PROVIDER)."
+        Write-Ok "Granted db_owner to MSI(s) '$userLabel' (SID derived from appId via FROM EXTERNAL PROVIDER)."
     } catch {
         throw "SQL grant failed: $($_.Exception.Message)`nEnsure the deploying user is a member of the Entra SQL admin group/user '$($p.sql.entraAdminLogin)'."
     } finally {
@@ -715,6 +735,72 @@ function Set-AppSettings {
     }
 }
 
+function Invoke-Phase-Function {
+    Write-Step 'Function: configure + deploy the Flex Consumption worker'
+    Ensure-OutputsLoaded
+    $p = $global:Params
+    $o = $global:Outputs
+    $rg = $p.resourceGroupName
+    $funcName = $o['functionAppName']
+    if (-not $funcName) { throw 'functionAppName output missing — run -Phase Infra first.' }
+    $kvName = $o['keyVaultName']
+    $kvSecretUri = { param($name) "@Microsoft.KeyVault(SecretUri=https://$kvName.vault.azure.net/secrets/$name/)" }
+    $sqlConn = "Server=tcp:$($o['sqlServerFqdn']),1433;Initial Catalog=$($o['sqlDatabaseName']);Encrypt=True;TrustServerCertificate=False;Connection Timeout=30;Authentication=Active Directory Managed Identity;"
+
+    # App settings: identity-based AzureWebJobsStorage (accountName, no key) + the
+    # Service Bus trigger (fullyQualifiedNamespace, no connection string), plus the
+    # same Config values the API uses. KV references resolve via the Function MSI's
+    # 'Key Vault Secrets User' role (assigned in Bicep). No FUNCTIONS_WORKER_RUNTIME /
+    # WEBSITE_* — Flex Consumption takes the runtime from functionAppConfig instead.
+    $settings = [ordered]@{
+        'APPLICATIONINSIGHTS_CONNECTION_STRING' = $o['appInsightsConnectionString']
+        'BaseServerAddress'                     = $o['baseServerAddress']
+        'KeyVaultUrl'                           = $o['keyVaultUri'].TrimEnd('/')
+        'BlobContainerName'                     = $o['blobContainerName']
+        'AppBaseUrl'                            = "https://$($o['webAppHostname'])"
+        'AzureAd__ClientID'                     = $o['aadClientId']
+        'AzureAd__TenantId'                     = $o['aadTenantId']
+        'AzureAd__CertificateName'              = $o['aadCertificateName']
+        'AzureAd__AuthenticationMode'           = 'Certificate'
+        'AzureAd__Secret'                       = (& $kvSecretUri 'aad-client-secret')
+        'ConnectionStrings__SQLConnectionString' = $sqlConn
+        'ConnectionStrings__Storage'            = (& $kvSecretUri 'storage-connection-string')
+        'ConnectionStrings__ServiceBus'         = (& $kvSecretUri 'servicebus-connection-string')
+        'ServiceBusQueueName'                   = $o['serviceBusQueueName']
+        'ServiceBusConnection__fullyQualifiedNamespace' = $o['serviceBusFqdn']
+        'AzureWebJobsStorage__accountName'      = $o['storageAccountName']
+    }
+    $tmp = New-TemporaryFile
+    try {
+        $payload = @($settings.GetEnumerator() | ForEach-Object {
+            [ordered]@{ name = $_.Key; value = [string]$_.Value; slotSetting = $false }
+        })
+        ($payload | ConvertTo-Json -Depth 5) | Set-Content -LiteralPath $tmp -Encoding utf8
+        Invoke-Native az 'functionapp' 'config' 'appsettings' 'set' `
+            '-g' $rg '-n' $funcName '--settings' "@$tmp" '-o' 'none' -Quiet | Out-Null
+        Write-Ok ("Set {0} function app settings." -f $settings.Count)
+    } finally {
+        Remove-Item -LiteralPath $tmp -ErrorAction SilentlyContinue
+    }
+
+    # Publish + zip-deploy the worker code (Flex Consumption one-deploy to the
+    # func-deploy container via the app's managed identity).
+    $funcProj = Join-Path $SrcRoot 'Migration.Functions/Migration.Functions.csproj'
+    $pub = Join-Path ([System.IO.Path]::GetTempPath()) ("spocs-func-" + [Guid]::NewGuid().ToString('N').Substring(0,8))
+    Write-Info "dotnet publish Migration.Functions → $pub"
+    Invoke-Native dotnet 'publish' $funcProj '-c' 'Release' '-o' $pub | Out-Null
+    $zip = "$pub.zip"
+    if (Test-Path $zip) { Remove-Item $zip -Force }
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    [System.IO.Compression.ZipFile]::CreateFromDirectory($pub, $zip)
+    Write-Info 'Deploying zip to the Function app…'
+    Invoke-Native az 'functionapp' 'deployment' 'source' 'config-zip' `
+        '-g' $rg '-n' $funcName '--src' $zip '-o' 'none' -Quiet | Out-Null
+    Write-Ok 'Function code deployed (always-ready + scale come from the Bicep functionAppConfig).'
+    Remove-Item $pub -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-Item $zip -Force -ErrorAction SilentlyContinue
+}
+
 function Invoke-Phase-Smoke {
     Write-Step 'Smoke: basic post-deploy checks'
     Ensure-OutputsLoaded
@@ -760,6 +846,7 @@ function Run-Phase {
         'Secrets'  { Invoke-Phase-Secrets }
         'Sql'      { Invoke-Phase-Sql }
         'App'      { Invoke-Phase-App }
+        'Function' { Invoke-Phase-Function }
         'Smoke'    { Invoke-Phase-Smoke }
         default    { throw "Unknown phase: $Name" }
     }
@@ -767,7 +854,7 @@ function Run-Phase {
 
 try {
     $phases = if ($Phase -eq 'All') {
-        @('Prereqs','Validate','Infra','Secrets','Sql','App','Smoke')
+        @('Prereqs','Validate','Infra','Secrets','Sql','App','Function','Smoke')
     } else {
         # For standalone phases, ensure params are at least loaded for context (except phases
         # that do this themselves, or Prereqs which is pre-params).

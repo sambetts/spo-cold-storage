@@ -182,10 +182,11 @@ deploy/
 |---|---|
 | `Prereqs` | Verifies local tooling, az login, registers resource providers. |
 | `Validate` | Strict params validation; Azure-name rule checks; global uniqueness pre-flight. |
-| `Infra` | Creates the resource group if missing; runs `bicep what-if`; deploys `main.bicep`. |
+| `Infra` | Creates the resource group if missing; recovers a soft-deleted (purge-protected) Key Vault if present; runs `bicep what-if`; deploys `main.bicep` (API Web App, the Flex Consumption **Function worker** + its plan, VNet + private endpoints incl. storage queue/table, Service Bus, SQL, Key Vault, storage, alerts). |
 | `Secrets` | Writes the AAD client secret to Key Vault. Other secrets are seeded by Bicep `listKeys`. |
-| `Sql` | Connects to Azure SQL as the Entra admin; grants the Web App MSI `db_owner` via `CREATE USER … FROM EXTERNAL PROVIDER`. |
-| `App` | `dotnet publish` Web.Server (self-contained); zip-deploys to the API Web App; sets app settings (Key Vault refs); restarts. The worker is a separate queue-triggered Azure Function (`Migration.Functions`), deployed independently. |
+| `Sql` | Connects to Azure SQL as the Entra admin; grants **both** the Web App MSI and the Function worker MSI `db_owner` via `CREATE USER … FROM EXTERNAL PROVIDER`. |
+| `App` | `dotnet publish` Web.Server (self-contained); zip-deploys to the API Web App; sets app settings (Key Vault refs); restarts. |
+| `Function` | Sets the Flex Consumption Function app settings (identity-based storage + Service Bus trigger); `dotnet publish` Migration.Functions; zip-deploys the code. |
 | `Smoke` | HTTP-probes the web app. |
 
 Useful flags: `-Phase <name>` (single phase), `-WhatIfPreview` (Infra dry-run), `-SkipConfirm`, `-ParamsFile path/to/other.json`.
