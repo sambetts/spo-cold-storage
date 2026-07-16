@@ -52,7 +52,7 @@ param storageUserDataReaderTypes array = []
 
 // Secret values written to Key Vault. Empty strings are skipped so phases can be re-run.
 @secure()
-@description('Azure AD application client secret. Stored as Key Vault secret aad-client-secret.')
+@description('Azure AD application client secret. Stored as Key Vault secret aad-client-secret. Written via the control plane (ARM) so it works even when the vault is private-only.')
 param aadClientSecret string = ''
 
 // ---------- Network configuration (private VNet for private endpoints) ----------

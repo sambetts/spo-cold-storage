@@ -238,8 +238,28 @@ function Invoke-Phase-Infra {
             deployClientIpAddress  = @{ value = $deployIp }
             storageUserDataReaderPrincipals = @{ value = @(Get-StorageUserReaderOids $p) }
             storageUserDataReaderTypes      = @{ value = @(Get-StorageUserReaderTypes $p) }
-            # aadClientSecret intentionally omitted here; pushed in Secrets phase.
         }
+    }
+    # Write the AAD client secret through the control plane (ARM) so it lands in Key
+    # Vault even when the vault is private-only (data-plane 'az keyvault secret set'
+    # is blocked from the deploy machine by the network policy on some subs). Passed
+    # as a @secure() bicep param, so it never appears in deployment history. Best
+    # effort: if the secret can't be resolved here, Bicep skips it and the Secrets
+    # phase (public vaults) or a prior recovered value covers it.
+    try {
+        $haveSecretSource = [bool]$AzureAdClientSecret -or [bool]$env:SPOCS_AAD_CLIENT_SECRET -or (Test-Path (Join-Path $DeployRoot '.local/aad-client-secret.txt'))
+        if ($haveSecretSource) {
+            $infraSec = Get-OrPromptAadSecret
+            $infraSecPlain = [System.Net.NetworkCredential]::new('', $infraSec).Password
+            if ($infraSecPlain) {
+                $bicepParams.parameters['aadClientSecret'] = @{ value = $infraSecPlain }
+                Write-Info 'AAD client secret will be written to Key Vault via the control plane (ARM).'
+            }
+        } else {
+            Write-Info 'No non-interactive AAD client secret source found for Infra; Secrets phase will handle it.'
+        }
+    } catch {
+        Write-Info "AAD client secret not resolved for Infra ($($_.Exception.Message)); Secrets phase will handle it."
     }
     $tmpParams = New-TemporaryFile
     try {
@@ -362,6 +382,23 @@ function Invoke-Phase-Secrets {
     Write-Step 'Secrets: push AAD client secret into Key Vault'
     Ensure-OutputsLoaded
     $kv = $global:Outputs['keyVaultName']
+
+    # Private-only vaults (network policy) reject data-plane 'az keyvault secret set'
+    # from the deploy machine. In that case the Infra phase already wrote the secret
+    # through the control plane (ARM/Bicep @secure() param), so here we just confirm
+    # it exists (a control-plane 'az resource show', which the policy allows).
+    $kvPublic = (Invoke-Native az 'keyvault' 'show' '--name' $kv `
+        '--query' 'properties.publicNetworkAccess' '-o' 'tsv' -Quiet -AllowNonZero).Trim()
+    if ($kvPublic -eq 'Disabled') {
+        Write-Info "Key Vault $kv is private-only; the secret is written by the Infra phase over the control plane."
+        $secretId = "/subscriptions/$($global:Params.subscription.id)/resourceGroups/$($global:Params.resourceGroupName)/providers/Microsoft.KeyVault/vaults/$kv/secrets/aad-client-secret"
+        $found = (Invoke-Native az 'resource' 'show' '--ids' $secretId '--query' 'name' '-o' 'tsv' -Quiet -AllowNonZero).Trim()
+        if ($found -eq 'aad-client-secret') {
+            Write-Ok "Secret 'aad-client-secret' present in $kv (written control-plane by Infra)."
+            return
+        }
+        throw "Secret 'aad-client-secret' is missing from private vault $kv. Re-run '-Phase Infra' with the AAD secret available (deploy/.local/aad-client-secret.txt or -AzureAdClientSecret)."
+    }
 
     # Self-grant Key Vault Secrets Officer on this vault so the deploying user can push secrets.
     # (RBAC-mode KVs don't give the vault creator any default rights.)
