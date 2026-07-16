@@ -20,18 +20,6 @@ public class DbInitializer
         // (guarded by COL_LENGTH / sys.indexes) so it's safe to run every startup.
         await ApplySchemaUpgradesAsync(context);
 
-        if (context.TargetSharePointSites.Any() || config == null)
-        {
-            return false;
-        }
-
-        // Add default data
-        if (!string.IsNullOrEmpty(config.DefaultSharePointSite))
-        {
-            context.TargetSharePointSites.Add(new TargetMigrationSite { RootURL = config.DefaultSharePointSite });
-            await context.SaveChangesAsync();
-        }
-
         return true;
     }
 
@@ -43,16 +31,9 @@ public class DbInitializer
     /// </summary>
     private static async Task ApplySchemaUpgradesAsync(SPOColdStorageDbContext context)
     {
-        // Migration 2: graph_item_id / drive_id on files + StagingFiles.
-        // Required so the snapshot builder can retry analytics on rows where
-        // analysis_completed IS NULL without re-crawling the entire drive.
+        // Migration 2: graph_item_id / drive_id on the files analytics table.
+        // Required so the read-activity eligibility rule can key rows by Graph id.
         const string addGraphIdColumnsSql = @"
-IF COL_LENGTH('dbo.StagingFiles', 'DriveId') IS NULL
-    ALTER TABLE dbo.StagingFiles ADD DriveId NVARCHAR(450) NULL;
-
-IF COL_LENGTH('dbo.StagingFiles', 'GraphItemId') IS NULL
-    ALTER TABLE dbo.StagingFiles ADD GraphItemId NVARCHAR(450) NULL;
-
 IF COL_LENGTH('dbo.files', 'drive_id') IS NULL
     ALTER TABLE dbo.files ADD drive_id NVARCHAR(450) NULL;
 
@@ -77,16 +58,6 @@ IF EXISTS (SELECT 1 FROM sys.columns
            WHERE object_id = OBJECT_ID('dbo.files')
              AND name = 'drive_id' AND max_length = -1)
     ALTER TABLE dbo.files ALTER COLUMN drive_id NVARCHAR(450) NULL;
-
-IF EXISTS (SELECT 1 FROM sys.columns
-           WHERE object_id = OBJECT_ID('dbo.StagingFiles')
-             AND name = 'GraphItemId' AND max_length = -1)
-    ALTER TABLE dbo.StagingFiles ALTER COLUMN GraphItemId NVARCHAR(450) NULL;
-
-IF EXISTS (SELECT 1 FROM sys.columns
-           WHERE object_id = OBJECT_ID('dbo.StagingFiles')
-             AND name = 'DriveId' AND max_length = -1)
-    ALTER TABLE dbo.StagingFiles ALTER COLUMN DriveId NVARCHAR(450) NULL;
 ";
 
         const string addUnanalyzedIndexSql = @"

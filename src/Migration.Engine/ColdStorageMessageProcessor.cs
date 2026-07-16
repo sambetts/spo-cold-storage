@@ -14,10 +14,9 @@ namespace Migration.Engine;
 
 /// <summary>
 /// What the host should do with a Service Bus message after processing.
-/// Decouples the cold-storage dispatch logic from the transport so the same
-/// code drives both the continuous-WebJob <see cref="ColdStorageBusListener"/>
-/// (push <c>ServiceBusProcessor</c>) and the queue-triggered Azure Function
-/// (which wakes on messages and needs no Always On).
+/// Decouples the cold-storage dispatch logic from the transport so the
+/// queue-triggered Azure Function (which wakes on messages and needs no
+/// Always On) can settle each message correctly.
 /// </summary>
 public enum MessageOutcome
 {
@@ -28,9 +27,8 @@ public enum MessageOutcome
 
 /// <summary>
 /// Transport-agnostic core of the cold-storage listener: parses a raw bus
-/// message body, routes it to the migrate or restore pipeline (with the legacy
-/// <see cref="BaseSharePointFileInfo"/> fallback the indexer still emits), and
-/// returns the settlement <see cref="MessageOutcome"/> for the host to apply.
+/// message body, routes it to the migrate or restore pipeline, and returns the
+/// settlement <see cref="MessageOutcome"/> for the host to apply.
 ///
 /// Holds per-process in-flight guards so a single host doesn't process the same
 /// item / placeholder twice concurrently; cross-process duplicates are still
@@ -39,7 +37,6 @@ public enum MessageOutcome
 public sealed class ColdStorageMessageProcessor(Config config, ILogger logger) : BaseComponent(config, logger)
 {
     private readonly ConcurrentDictionary<Guid, byte> _inFlightItems = new();
-    private readonly ConcurrentDictionary<string, byte> _legacyInFlight = new(StringComparer.OrdinalIgnoreCase);
     // Serialises concurrent restores of the SAME placeholder on this host so a
     // second in-flight restore can't double-upload (issue #10). Cross-host
     // restores are additionally coalesced by the pipeline's DB status guard.
@@ -47,8 +44,8 @@ public sealed class ColdStorageMessageProcessor(Config config, ILogger logger) :
 
     /// <summary>
     /// Processes one raw message body and returns how the host should settle it.
-    /// Tries the new <see cref="ColdStorageBusEnvelope"/> first, falls back to the
-    /// legacy indexer payload, and dead-letters anything unrecognised.
+    /// Parses the <see cref="ColdStorageBusEnvelope"/> and dead-letters anything
+    /// unrecognised.
     /// </summary>
     public async Task<MessageOutcome> ProcessMessageAsync(string body, CancellationToken cancellationToken = default)
     {
@@ -56,13 +53,6 @@ public sealed class ColdStorageMessageProcessor(Config config, ILogger logger) :
         if (envelope is not null && envelope.IsValid)
         {
             return await ProcessEnvelopeAsync(envelope, cancellationToken).ConfigureAwait(false);
-        }
-
-        // Backward compatibility: indexer continues to publish raw file-info.
-        var legacy = TryDeserialiseLegacy(body);
-        if (legacy is not null && legacy.IsValidInfo)
-        {
-            return await ProcessLegacyAsync(legacy, cancellationToken).ConfigureAwait(false);
         }
 
         _logger.LogWarning("Unrecognised cold-storage bus message; sending to dead-letter queue. Body length={Length}", body.Length);
@@ -136,54 +126,11 @@ public sealed class ColdStorageMessageProcessor(Config config, ILogger logger) :
         return success ? MessageOutcome.Complete : MessageOutcome.Abandon;
     }
 
-    private async Task<MessageOutcome> ProcessLegacyAsync(BaseSharePointFileInfo legacy, CancellationToken cancellationToken)
-    {
-        var key = legacy.FullSharePointUrl;
-        if (!_legacyInFlight.TryAdd(key, 0))
-        {
-            _logger.LogWarning("Legacy file '{Url}' already in flight; deferring message.", key);
-            return MessageOutcome.Abandon;
-        }
-        try
-        {
-            using var sharePointFileMigrator = new SharePointFileMigrator(_config, _logger);
-            var app = await AuthUtils.GetNewClientApp(_config).ConfigureAwait(false);
-            try
-            {
-                _ = await sharePointFileMigrator.MigrateFromSharePointToBlobStorage(legacy, app).ConfigureAwait(false);
-                await sharePointFileMigrator.SaveSucessfulFileMigrationToSql(legacy).ConfigureAwait(false);
-                return MessageOutcome.Complete;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Legacy migration failed for '{Url}'.", key);
-                await sharePointFileMigrator.SaveErrorForFileMigrationToSql(ex, legacy).ConfigureAwait(false);
-                return MessageOutcome.Abandon;
-            }
-        }
-        finally
-        {
-            _legacyInFlight.TryRemove(key, out _);
-        }
-    }
-
     private static ColdStorageBusEnvelope? TryDeserialiseEnvelope(string body)
     {
         try
         {
             return JsonSerializer.Deserialize<ColdStorageBusEnvelope>(body);
-        }
-        catch (JsonException)
-        {
-            return null;
-        }
-    }
-
-    private static BaseSharePointFileInfo? TryDeserialiseLegacy(string body)
-    {
-        try
-        {
-            return JsonSerializer.Deserialize<BaseSharePointFileInfo>(body);
         }
         catch (JsonException)
         {

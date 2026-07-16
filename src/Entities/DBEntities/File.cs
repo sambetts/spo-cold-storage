@@ -74,20 +74,3 @@ public class SPFile : BaseDBObjectWithUrl
     [MaxLength(450)]
     public string? GraphItemId { get; set; }
 }
-
-public class StagingTempFile : BaseSharePointFileInfo
-{
-    public StagingTempFile() { }
-    public StagingTempFile(BaseSharePointFileInfo driveArg, Guid blockGuid, DateTime inserted) : base(driveArg)
-    {
-        this.ImportBlockId = blockGuid;
-        this.Inserted = inserted;
-    }
-
-    [Key]
-    [Column("id")]
-    public int ID { get; set; }
-
-    public Guid ImportBlockId { get; set; } = Guid.Empty;
-    public DateTime Inserted { get; set; } = DateTime.Now;
-}

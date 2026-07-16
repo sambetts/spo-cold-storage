@@ -5,16 +5,11 @@
     <Platform Name="x86" />
   </Configurations>
   <Folder Name="/Tests/">
-    <Project Path="LoadGenerator/LoadGenerator.csproj" />
     <Project Path="Migration.Engine.Tests/Migration.Engine.Tests.csproj" />
-    <Project Path="Tests/Tests.csproj" />
   </Folder>
   <Project Path="Entities/Entities.csproj" />
   <Project Path="Migration.Engine/Migration.Engine.csproj" />
   <Project Path="Migration.Functions/Migration.Functions.csproj" />
-  <Project Path="Migration.Indexer/Migration.Indexer.csproj" />
-  <Project Path="Migration.Migrator/Migration.Migrator.csproj" />
-  <Project Path="Migration.SiteSnapshotBuilder/Migration.SiteSnapshotBuilder.csproj" />
   <Project Path="Models/Models.csproj" />
   <Project Path="Web/web.client/web.client.esproj">
     <Build Solution="*|Any CPU" />

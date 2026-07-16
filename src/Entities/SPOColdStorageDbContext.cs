@@ -39,16 +39,18 @@ public class SPOColdStorageDbContext : DbContext
     // Add-Migration -Name "FilterConfig" -Project "Entities" -StartupProject "Tests" -Context SPOColdStorageDbContext
     // Script-Migration -Project "Entities" -StartupProject "Tests" -From "PreviousMigration" -Context SPOColdStorageDbContext
 
-    public DbSet<TargetMigrationSite> TargetSharePointSites { get; set; } = null!;
+    // Legacy SharePoint file-analytics schema retained ONLY because the
+    // read-activity archive-eligibility rule (DbFileReadActivitySource) still
+    // reads the `files` table's access_count. These tables are currently unfed
+    // (the indexer/snapshot-builder that populated them was removed in the
+    // greenfield cleanup); a future Graph-analytics feeder can repopulate them,
+    // or the read-activity rule can be dropped, at which point this whole
+    // cluster goes too.
     public DbSet<Site> Sites { get; set; } = null!;
     public DbSet<Web> Webs { get; set; } = null!;
     public DbSet<SPFile> Files { get; set; } = null!;
     public DbSet<FileDirectory> FileDirectories { get; set; } = null!;
     public DbSet<User> Users { get; set; } = null!;
-    public DbSet<StagingTempFile> StagingFiles { get; set; } = null!;
-    public DbSet<FileMigrationErrorLog> FileMigrationErrors { get; set; } = null!;
-    public DbSet<FileMigrationCompletedLog> FileMigrationsCompleted { get; set; } = null!;
-    public DbSet<DriveDeltaToken> DriveDeltaTokens { get; set; } = null!;
 
     public DbSet<ColdStorageContainer> ColdStorageContainers { get; set; } = null!;
     public DbSet<ColdStorageContainerAcl> ColdStorageContainerAcls { get; set; } = null!;
@@ -76,12 +78,6 @@ public class SPOColdStorageDbContext : DbContext
         builder.Entity<FileDirectory>()
             .HasIndex(u => u.DirectoryPath)
             .IsUnique();
-
-        builder.Entity<DriveDeltaToken>()
-            .HasKey(d => d.DriveId);
-
-        builder.Entity<DriveDeltaToken>()
-            .HasIndex(d => d.SiteId);
 
         builder.Entity<ColdStorageContainer>()
             .HasIndex(c => c.Name)

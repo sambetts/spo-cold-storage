@@ -78,15 +78,15 @@ $BicepMain      = Join-Path $BicepRoot  'main.bicep'
 $SrcRoot        = Join-Path $RepoRoot   'src'
 $WebProject     = Join-Path $SrcRoot    'Web/Web.Server/Web.Server.csproj'
 $WorkerProjects = @(
-    # Migration.Migrator (the Service Bus queue consumer) is RETIRED as a continuous
-    # WebJob: continuous WebJobs need App Service Always On, which governance disables
-    # on this subscription, so the worker stopped whenever the app idled and left items
-    # stuck in "Queued". It was replaced by a queue-triggered Azure Function
+    # All background work now runs in the queue-triggered Azure Function
     # (func-*, Flex Consumption, always-ready) that wakes on messages and never
-    # idle-stops. Do NOT re-add it here or two workers will compete on the queue.
-    # The Function is deployed separately (see deploy notes / the Flex function app).
-    @{ Name = 'Migration.Indexer';             Csproj = 'Migration.Indexer/Migration.Indexer.csproj';                         Kind = 'triggered';  Singleton = $false }
-    @{ Name = 'Migration.SiteSnapshotBuilder'; Csproj = 'Migration.SiteSnapshotBuilder/Migration.SiteSnapshotBuilder.csproj'; Kind = 'triggered';  Singleton = $false }
+    # idle-stops — deployed separately from this script's App phase.
+    #
+    # The legacy WebJob workers (Migration.Migrator continuous consumer,
+    # Migration.Indexer / Migration.SiteSnapshotBuilder triggered crawlers) were
+    # REMOVED in the greenfield cleanup. Do NOT re-add worker WebJobs here: the
+    # Function is the single worker, and a second consumer would compete on the
+    # 'filediscovery' queue.
 )
 $Providers = @(
     'Microsoft.Web', 'Microsoft.Storage', 'Microsoft.KeyVault',

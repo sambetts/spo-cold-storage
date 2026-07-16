@@ -158,9 +158,6 @@ public class Config(Microsoft.Extensions.Configuration.IConfiguration config) : 
 
     [ConfigSection("Dev")]
     public DevConfig DevConfig { get; set; } = null!;
-
-    [ConfigSection("Search")]
-    public SearchConfig SearchConfig { get; set; } = null!;
 }
 
 public class ConfigException(string message) : Exception(message)
