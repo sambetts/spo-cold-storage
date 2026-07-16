@@ -1,92 +1,92 @@
-import { useEffect, useState } from 'react';
-
-/**
- * /Savings — cost & savings KPI dashboard (issue #8).
- * Fetches GET /api/reports/savings (admin-only) and shows reclaimed GB,
- * estimated Azure cost and net monthly savings.
- */
-interface ISavingsReport {
-    archivedItemCount: number;
-    reclaimedBytes: number;
-    reclaimedGb: number;
-    azurePricePerGbMonth: number;
-    spoPricePerGbMonth: number;
-    estimatedAzureCostPerMonth: number;
-    estimatedSpoValuePerMonth: number;
-    estimatedNetSavingsPerMonth: number;
-    currency: string;
-}
-
-interface IProps { token: string; }
+import { useEffect, useState } from "react";
+import { Spinner } from "@fluentui/react-components";
+import { ApiError, useApi } from "../../api/client";
+import { SavingsReport } from "../../api/types";
 
 function money(value: number, currency: string): string {
-    const fixed = value.toFixed(2);
-    return currency === 'USD' ? `$${fixed}` : `${fixed} ${currency}`;
+  const fixed = value.toFixed(2);
+  return currency === "USD" ? `$${fixed}` : `${fixed} ${currency}`;
 }
 
 function Kpi({ label, value, accent }: { label: string; value: string; accent?: string }) {
-    return (
-        <div style={{ border: '1px solid #edebe9', borderRadius: 8, padding: '16px 20px', minWidth: 200 }}>
-            <div style={{ fontSize: 13, color: '#605e5c' }}>{label}</div>
-            <div style={{ fontSize: 28, fontWeight: 600, color: accent ?? '#201f1e', marginTop: 4 }}>{value}</div>
-        </div>
-    );
+  return (
+    <div style={{ border: "1px solid #edebe9", borderRadius: 8, padding: "16px 20px", minWidth: 200 }}>
+      <div style={{ fontSize: 13, color: "#605e5c" }}>{label}</div>
+      <div style={{ fontSize: 28, fontWeight: 600, color: accent ?? "#201f1e", marginTop: 4 }}>{value}</div>
+    </div>
+  );
 }
 
-export function SavingsDashboard({ token }: IProps) {
-    const [report, setReport] = useState<ISavingsReport | null>(null);
-    const [error, setError] = useState<string | null>(null);
-    const [loading, setLoading] = useState<boolean>(true);
+/**
+ * /savings — cost & savings KPIs. Fetches GET /api/reports/savings (admin-only)
+ * and shows reclaimed GB, estimated Azure cost and net monthly savings.
+ */
+export function SavingsDashboard() {
+  const api = useApi();
+  const [report, setReport] = useState<SavingsReport | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
 
-    useEffect(() => {
-        let cancelled = false;
-        setLoading(true);
-        setError(null);
-        fetch('/api/reports/savings', { headers: { Authorization: `Bearer ${token}` } })
-            .then(async (r) => {
-                if (!r.ok) {
-                    throw new Error(r.status === 403 ? 'You need cold-storage admin rights to view this.' : `Server returned ${r.status}`);
-                }
-                return (await r.json()) as ISavingsReport;
-            })
-            .then((data) => {
-                if (!cancelled) {
-                    setReport(data);
-                    setLoading(false);
-                }
-            })
-            .catch((e: unknown) => {
-                if (!cancelled) {
-                    setError(e instanceof Error ? e.message : 'Failed to load savings.');
-                    setLoading(false);
-                }
-            });
-        return () => { cancelled = true; };
-    }, [token]);
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+    api
+      .get<SavingsReport>("/api/reports/savings")
+      .then((data) => {
+        if (cancelled) return;
+        setReport(data);
+        setLoading(false);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        if (err instanceof ApiError && err.status === 403) {
+          setError("Administrator access is required to view savings.");
+        } else {
+          setError(err instanceof ApiError ? err.message : String(err));
+        }
+        setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [api]);
 
-    return (
-        <div style={{ padding: 24 }}>
-            <h2>Cold storage — cost &amp; savings</h2>
-            {loading && <p>Loading savings…</p>}
-            {error && <p style={{ color: '#a4262c' }}>Could not load savings: {error}</p>}
-            {report && (
-                <>
-                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 16, marginTop: 16 }}>
-                        <Kpi label="Files archived" value={report.archivedItemCount.toLocaleString()} />
-                        <Kpi label="Reclaimed in SharePoint" value={`${report.reclaimedGb.toLocaleString(undefined, { maximumFractionDigits: 2 })} GB`} />
-                        <Kpi label="Est. Azure cost / month" value={money(report.estimatedAzureCostPerMonth, report.currency)} />
-                        <Kpi
-                            label="Est. net saving / month"
-                            value={money(report.estimatedNetSavingsPerMonth, report.currency)}
-                            accent={report.estimatedNetSavingsPerMonth >= 0 ? '#107c10' : '#a4262c'}
-                        />
-                    </div>
-                    <p style={{ marginTop: 16, color: '#605e5c', fontSize: 13 }}>
-                        Based on {report.reclaimedGb.toFixed(2)} GB reclaimed, Azure @ {money(report.azurePricePerGbMonth, report.currency)}/GB/mo
-                        vs SharePoint @ {money(report.spoPricePerGbMonth, report.currency)}/GB/mo. Figures are estimates.
-                    </p>
-                </>
-            )}
+  return (
+    <div style={{ maxWidth: 1000, margin: "0 auto" }}>
+      <h2 style={{ margin: "0 0 2px 0" }}>Savings</h2>
+      <div style={{ color: "#605e5c", fontSize: 13, marginBottom: 16 }}>
+        Storage reclaimed in SharePoint by archiving to Azure cold storage, and the estimated net monthly saving.
+      </div>
+
+      {loading && <Spinner label="Calculating savings…" size="small" />}
+      {error && (
+        <div style={{ color: "#a4262c", border: "1px solid #f3d6d8", background: "#fdf3f4", padding: 12, borderRadius: 6 }}>
+          {error}
         </div>
-    );
+      )}
+
+      {report && !loading && !error && (
+        <>
+          <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
+            <Kpi label="Files archived" value={report.archivedItemCount.toLocaleString()} />
+            <Kpi label="Storage reclaimed" value={`${report.reclaimedGb.toLocaleString()} GB`} />
+            <Kpi
+              label="Net saving / month"
+              value={money(report.estimatedNetSavingsPerMonth, report.currency)}
+              accent="#107c10"
+            />
+          </div>
+          <div style={{ display: "flex", gap: 16, flexWrap: "wrap", marginTop: 16 }}>
+            <Kpi label="Azure cost / month" value={money(report.estimatedAzureCostPerMonth, report.currency)} />
+            <Kpi label="Reclaimed SPO value / month" value={money(report.estimatedSpoValuePerMonth, report.currency)} />
+          </div>
+          <div style={{ marginTop: 16, fontSize: 12, color: "#605e5c" }}>
+            Based on {money(report.azurePricePerGbMonth, report.currency)}/GB Azure vs{" "}
+            {money(report.spoPricePerGbMonth, report.currency)}/GB SharePoint.
+          </div>
+        </>
+      )}
+    </div>
+  );
 }

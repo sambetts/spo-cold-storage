@@ -38,7 +38,3 @@ export const storageRequest = {
       : "https://storage.azure.com/user_impersonation"
   ]
 };
-
-export const teamsAppConfig = {
-  startLoginPageUrl: readConfigVal("TEAMSFX_START_LOGIN_PAGE_URL"),
-}

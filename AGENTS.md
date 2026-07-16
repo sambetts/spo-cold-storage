@@ -12,6 +12,26 @@ The **single most important invariant** in this codebase:
 
 This is enforced in `ColdStorageMigratorPipeline.ProcessAsync` by the **strict ordering of try/catch blocks**. Anyone touching that file must keep that ordering. `MigrationLifecycleStatusExtensions.SourceDeleteAllowed()` codifies the same rule as a runtime guard, and `MigrationLifecycleStatusTests` locks it down.
 
+## 1b. Product charter (PM) — re-review every change against this
+
+**What it is:** SPO Cold Storage is a first-of-its-kind, **open-source**, *self-service* archival product. It agilises **end users** (SharePoint site owners), not admins, to offload and archive **individual files and folders** into Azure Blob cold storage — each source replaced with a `.url` placeholder — plus automated rules. Restore is the inverse.
+
+**Three product pillars — every PR must protect all three:**
+
+1. **Reliable.** Source data is *never* deleted unless its copy to cold storage is confirmed good (length + MD5). This is THE invariant (§1). Any change touching the migrate pipeline, validation, or delete path must preserve the lifecycle ordering and the `SourceDeleteAllowed()` guard and keep `MigrationLifecycleStatusTests` green.
+
+2. **Scalable.** Work is queue-driven and horizontally scalable: the API only *enqueues*; a stateless, queue-triggered worker (Azure Function, always-ready + scale-out) does the heavy lifting. Don't add per-item work to the API request path, don't reintroduce a singleton / Always-On worker, and keep processing idempotent (DB status guards + per-host in-flight locks) so scale-out never double-processes or double-deletes.
+
+3. **Accountable.** Every transfer is logged and the logs are **easy to find**. All status/audit writes go through `IJobStatusWriter` into `migration_job_logs`; user-initiated actions carry `Action` / `ActorUpn`. The **SPA MUST expose** (a) a **Transfers/Logs area** where any transfer and its full lifecycle timeline can be found and filtered, and (b) a **cold-storage file finder** to browse/download what's been archived. Never delete or bypass the audit trail.
+
+**SPA scope (the accountability surface):** browse cold storage; find/filter *all* transfers across sites; drill into a transfer's per-item lifecycle + log timeline; savings. Keep it focused — this is an accountability + operations console. Triggering migrations lives in the SPFx command set, not here.
+
+**Re-review checklist for any change:**
+- [ ] Preserves the never-delete-unconfirmed invariant (reliable)?
+- [ ] New heavy work is queue-driven, idempotent, and scale-out safe (scalable)?
+- [ ] Every transfer / user action is still logged and findable in the SPA (accountable)?
+- [ ] The SPA Transfers/Logs area and Cold Storage finder still cover the change?
+
 ## 2. Solution layout
 
 ```

@@ -119,6 +119,30 @@ public class JobStatusResponse
     public List<string> Errors { get; set; } = [];
 }
 
+/// <summary>
+/// Lightweight per-job summary for the SPA "Transfers / Logs" accountability
+/// list (<c>GET /api/jobs/recent</c>). Carries item counts instead of the full
+/// item list so the global transfers view stays cheap regardless of how many
+/// files each job moved.
+/// </summary>
+public class JobSummaryResponse
+{
+    public Guid JobId { get; set; }
+    public MigrationOperationKind Operation { get; set; }
+    public MigrationLifecycleStatus Status { get; set; }
+    public string? Summary { get; set; }
+    public string SiteUrl { get; set; } = string.Empty;
+    public string RequestedByUpn { get; set; } = string.Empty;
+    public string? ContainerName { get; set; }
+    public int ItemCount { get; set; }
+    public int CompletedCount { get; set; }
+    public int FailedCount { get; set; }
+    public int InProgressCount { get; set; }
+    public DateTime CreatedAt { get; set; }
+    public DateTime UpdatedAt { get; set; }
+    public DateTime? CompletedAt { get; set; }
+}
+
 public class JobItemStatusResponse
 {
     public Guid ItemId { get; set; }

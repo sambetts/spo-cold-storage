@@ -1,20 +1,22 @@
 import { useMsal } from "@azure/msal-react";
-import { loginRequest } from "../authConfig.js";
-import { Button } from "@mui/material";
-
-function handleLogin(instance: any) {
-    instance.loginPopup(loginRequest).catch((e : Error) => {
-        console.error(e);
-    });
-}
+import { Button } from "@fluentui/react-components";
+import { loginRequest } from "../authConfig";
 
 /**
- * Renders a button which, when selected, will open a popup for login
+ * Renders a button which, when selected, opens a popup for sign-in.
  */
 export const SignInButton = () => {
-    const { instance } = useMsal();
+  const { instance } = useMsal();
 
-    return (
-        <Button onClick={() => handleLogin(instance)}>Sign in to Azure AD</Button>
-    );
-}
+  const handleLogin = () => {
+    instance.loginPopup(loginRequest).catch((e: Error) => {
+      console.error(e);
+    });
+  };
+
+  return (
+    <Button appearance="primary" onClick={handleLogin}>
+      Sign in to Microsoft Entra ID
+    </Button>
+  );
+};

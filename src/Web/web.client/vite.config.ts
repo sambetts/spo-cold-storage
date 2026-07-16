@@ -47,16 +47,9 @@ export default defineConfig({
             '@': fileURLToPath(new URL('./src', import.meta.url))
         }
     },
-    optimizeDeps: {
-        include: ['@mui/material/Tooltip', '@emotion/styled'],
-    },
     server: {
         proxy: {
-            "/AppConfiguration": {
-                target,
-                secure: false
-            },
-            "/MigrationRecord": {
+            "/api": {
                 target,
                 secure: false
             }

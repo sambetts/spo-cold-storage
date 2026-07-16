@@ -1,144 +1,192 @@
-import { BlobFileList } from './BlobFileList';
-import '../NavMenu.css';
-import './FileExplorer.css';
-import React from 'react';
-import { useIsAuthenticated } from "@azure/msal-react";
-import { getStorageConfigFromAPI, ServiceConfiguration } from '../ConfigReader';
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import "./FileExplorer.css";
+import { Button, Input, Spinner } from "@fluentui/react-components";
+import { ArrowClockwise20Regular, Search20Regular } from "@fluentui/react-icons";
+import { ApiError, useApi } from "../../api/client";
+import { StorageListing } from "../../api/types";
+import { fileName, formatBytes, formatDateTime } from "../../utils/format";
 
-type LoadPhase = 'idle' | 'loading-config' | 'ready' | 'error';
+type Phase = "loading" | "ready" | "error";
 
-const phaseMessages: Record<Exclude<LoadPhase, 'ready' | 'error'>, string> = {
-  'idle': 'Preparing...',
-  'loading-config': 'Loading storage configuration...'
-};
+export function FileBrowser() {
+  const api = useApi();
+  const [prefix, setPrefix] = useState("");
+  const [listing, setListing] = useState<StorageListing | null>(null);
+  const [phase, setPhase] = useState<Phase>("loading");
+  const [error, setError] = useState<string | null>(null);
+  const [filter, setFilter] = useState("");
+  const reqId = useRef(0);
 
-const describeError = (e: unknown): string => {
-  if (!e) return 'Unknown error.';
-  if (e instanceof Error) return e.message;
-  if (typeof e === 'string') return e;
-  try { return JSON.stringify(e); } catch { return String(e); }
-};
+  const load = useCallback(
+    async (targetPrefix: string) => {
+      const id = ++reqId.current;
+      setPhase("loading");
+      setError(null);
+      try {
+        const data = await api.get<StorageListing>(`/api/storage/blobs?prefix=${encodeURIComponent(targetPrefix)}`);
+        if (id !== reqId.current) return;
+        setListing(data);
+        setPhase("ready");
+      } catch (err) {
+        if (id !== reqId.current) return;
+        setError(err instanceof ApiError ? `${err.message}${err.detail ? ` — ${err.detail}` : ""}` : String(err));
+        setPhase("error");
+      }
+    },
+    [api],
+  );
 
-const getStorageAccountName = (accountUri: string | undefined | null): string | null => {
-  if (!accountUri) return null;
-  try {
-    const host = new URL(accountUri).hostname;
-    // e.g. myaccount.blob.core.windows.net -> "myaccount"
-    const first = host.split('.')[0];
-    return first || null;
-  } catch {
-    return null;
-  }
-};
+  useEffect(() => {
+    void load(prefix);
+  }, [prefix, load]);
 
-// The file browser no longer talks to Azure Storage from the browser. The storage
-// account's public network access is disabled by policy, so we load display
-// config from our API and let <BlobFileList/> list/download via the server proxy
-// (which reaches storage over the Web App's private endpoint) using the same API
-// access token.
-export const FileBrowser: React.FC<{ token: string }> = (props) => {
+  const download = useCallback(
+    async (blobName: string) => {
+      try {
+        const response = await api.getResponse(`/api/storage/download?blob=${encodeURIComponent(blobName)}`);
+        const blob = await response.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = fileName(blobName);
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
+      } catch (err) {
+        setError(err instanceof ApiError ? `Download failed: ${err.message}` : `Download failed: ${String(err)}`);
+      }
+    },
+    [api],
+  );
 
-  const [serviceConfiguration, setServiceConfiguration] = React.useState<ServiceConfiguration | null>(null);
-  const [phase, setPhase] = React.useState<LoadPhase>('idle');
-  const [errorMessage, setErrorMessage] = React.useState<string | null>(null);
-  const [errorDetail, setErrorDetail] = React.useState<string | null>(null);
-  const [retryCount, setRetryCount] = React.useState<number>(0);
+  const crumbs = prefix.split("/").filter(Boolean);
+  const folders = useMemo(
+    () => (listing?.folders ?? []).filter((f) => fileName(f).toLowerCase().includes(filter.toLowerCase())),
+    [listing, filter],
+  );
+  const files = useMemo(
+    () => (listing?.files ?? []).filter((f) => fileName(f.name).toLowerCase().includes(filter.toLowerCase())),
+    [listing, filter],
+  );
+  const hasItems = folders.length > 0 || files.length > 0;
 
-  const isAuthenticated = useIsAuthenticated();
-
-  const retry = React.useCallback(() => {
-    setErrorMessage(null);
-    setErrorDetail(null);
-    setServiceConfiguration(null);
-    setPhase('idle');
-    setRetryCount(c => c + 1);
-  }, []);
-
-  React.useEffect(() => {
-    if (!isAuthenticated) return;
-
-    let cancelled = false;
-    setPhase('loading-config');
-
-    getStorageConfigFromAPI(props.token)
-      .then((storageConfigInfo: ServiceConfiguration) => {
-        if (cancelled) return;
-
-        if (!storageConfigInfo?.storageInfo?.accountURI || !storageConfigInfo?.storageInfo?.containerName) {
-          throw new Error('Service configuration is missing storage account URI or container name.');
-        }
-
-        setServiceConfiguration(storageConfigInfo);
-        setPhase('ready');
-      })
-      .catch((err) => {
-        if (cancelled) return;
-        console.error('Failed to load storage configuration.', err);
-        setErrorMessage('Could not load storage configuration from the server.');
-        setErrorDetail(describeError(err));
-        setPhase('error');
-      });
-
-    return () => { cancelled = true; };
-  }, [props.token, isAuthenticated, retryCount]);
+  const goTo = (p: string) => setPrefix(p);
+  const crumbTo = (idx: number) => setPrefix(crumbs.slice(0, idx + 1).join("/") + "/");
 
   return (
-    <div className="file-browser-container">
-      <div className="spo-content-card">
-        <div className="file-browser-header">
-          <h1 className="spo-section-header">Cold Storage Browser</h1>
-          <p className="file-browser-description">
-            Browse and access files that have been moved into Azure Blob cold storage.
-          </p>
-          {serviceConfiguration?.storageInfo?.accountURI && (
-            <div className="storage-connection-info" aria-label="Storage connection">
-              <svg className="storage-connection-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <ellipse cx="12" cy="5" rx="9" ry="3" />
-                <path d="M3 5v6c0 1.66 4 3 9 3s9-1.34 9-3V5" />
-                <path d="M3 11v6c0 1.66 4 3 9 3s9-1.34 9-3v-6" />
-              </svg>
-              <span className="storage-connection-label">Connected to</span>
-              <span className="storage-connection-account">
-                {getStorageAccountName(serviceConfiguration.storageInfo.accountURI) ?? serviceConfiguration.storageInfo.accountURI}
+    <div style={{ maxWidth: 1100, margin: "0 auto" }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 12 }}>
+        <div>
+          <h2 style={{ margin: "0 0 2px 0" }}>Cold storage</h2>
+          <div style={{ color: "#605e5c", fontSize: 13 }}>
+            Browse and download files archived to Azure Blob{listing ? ` — container “${listing.container}”` : ""}.
+          </div>
+        </div>
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <Input
+            value={filter}
+            onChange={(_, d) => setFilter(d.value)}
+            placeholder="Filter this folder…"
+            contentBefore={<Search20Regular />}
+            aria-label="Filter files in this folder"
+          />
+          <Button
+            icon={<ArrowClockwise20Regular />}
+            onClick={() => void load(prefix)}
+            appearance="subtle"
+            aria-label="Refresh"
+          >
+            Refresh
+          </Button>
+        </div>
+      </div>
+
+      <div className="file-explorer" style={{ marginTop: 16 }}>
+        <div className="breadcrumb-bar">
+          <div className="breadcrumb-navigation">
+            <button onClick={() => goTo("")} className="breadcrumb-link">
+              Root
+            </button>
+            {crumbs.map((c, idx) => (
+              <span key={idx}>
+                <span className="breadcrumb-separator-text"> / </span>
+                <button onClick={() => crumbTo(idx)} className="breadcrumb-link">
+                  {c}
+                </button>
               </span>
-              <span className="storage-connection-separator">/</span>
-              <span className="storage-connection-container">
-                {serviceConfiguration.storageInfo.containerName}
-              </span>
-            </div>
-          )}
+            ))}
+          </div>
         </div>
 
-        {phase === 'ready' && serviceConfiguration ? (
-          <div className="file-browser-content">
-            <BlobFileList accessToken={props.token} />
-          </div>
-        ) : phase === 'error' ? (
-          <div className="error-container" role="alert">
-            <svg className="error-icon" width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <circle cx="12" cy="12" r="10" />
-              <line x1="12" y1="8" x2="12" y2="12" />
-              <line x1="12" y1="16" x2="12.01" y2="16" />
-            </svg>
-            <h2 className="error-title">Unable to load storage</h2>
-            <p className="error-message">{errorMessage ?? 'An unexpected error occurred.'}</p>
-            {errorDetail && (
-              <details className="error-details">
-                <summary>Technical details</summary>
-                <pre>{errorDetail}</pre>
-              </details>
-            )}
-            <button type="button" className="error-retry-button" onClick={retry}>
-              Try again
-            </button>
-          </div>
-        ) : (
-          <div className="loading-container">
-            <div className="loading-spinner"></div>
-            <p>{phaseMessages[phase as Exclude<LoadPhase, 'ready' | 'error'>] ?? 'Loading storage...'}</p>
-          </div>
-        )}
+        <div className="file-list-header">
+          <div className="file-list-column file-name-column">Name</div>
+          <div className="file-list-column file-modified-column">Date modified</div>
+          <div className="file-list-column file-size-column">Size</div>
+        </div>
+
+        <div className="file-list-content">
+          {phase === "error" && (
+            <div className="list-error" role="alert">
+              <strong>Could not list files.</strong>
+              <p>{error}</p>
+              <button type="button" className="error-retry-button" onClick={() => void load(prefix)}>
+                Retry
+              </button>
+            </div>
+          )}
+
+          {phase === "loading" && (
+            <div style={{ padding: 24, display: "flex", justifyContent: "center" }}>
+              <Spinner label="Loading files…" size="small" />
+            </div>
+          )}
+
+          {phase === "ready" && !hasItems && (
+            <div className="empty-folder">
+              <p className="empty-folder-text">{filter ? "No files match your filter." : "This folder is empty."}</p>
+            </div>
+          )}
+
+          {phase === "ready" &&
+            folders.map((dir) => (
+              <div key={dir} className="file-list-item folder-item" onClick={() => goTo(dir)}>
+                <div className="file-list-cell file-name-cell">
+                  <span className="file-name">📁 {fileName(dir)}</span>
+                </div>
+                <div className="file-list-cell file-modified-cell">—</div>
+                <div className="file-list-cell file-size-cell">—</div>
+              </div>
+            ))}
+
+          {phase === "ready" &&
+            files.map((file) => (
+              <div key={file.name} className="file-list-item file-item">
+                <div className="file-list-cell file-name-cell">
+                  <button
+                    type="button"
+                    className="file-name file-link"
+                    style={{
+                      background: "none",
+                      border: "none",
+                      padding: 0,
+                      font: "inherit",
+                      color: "#0f6cbd",
+                      cursor: "pointer",
+                      textAlign: "left",
+                    }}
+                    onClick={() => void download(file.name)}
+                    title="Download"
+                  >
+                    📄 {fileName(file.name)}
+                  </button>
+                </div>
+                <div className="file-list-cell file-modified-cell">{formatDateTime(file.lastModified)}</div>
+                <div className="file-list-cell file-size-cell">{formatBytes(file.size || 0)}</div>
+              </div>
+            ))}
+        </div>
       </div>
     </div>
   );
-};
+}

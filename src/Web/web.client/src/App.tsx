@@ -1,79 +1,42 @@
-import React, { useState } from 'react';
-import { Route, Switch } from 'react-router-dom';
-import { Layout } from './components/Layout';
-import { FileBrowser } from './components/FileBrowser/FileBrowser';
-import { Login } from './components/Login';
-import { FindFile } from './components/FileSearch/FindFile';
-import { FindMigrationLog } from './components/MigrationLogs/FindMigrationLog';
-import { ColdStorageDownload } from './components/ColdStorage/ColdStorageDownload';
-import { SavingsDashboard } from './components/Savings/SavingsDashboard';
+import { AuthenticatedTemplate, UnauthenticatedTemplate } from "@azure/msal-react";
+import React from "react";
+import { Navigate, Route, Routes } from "react-router-dom";
+import { Layout } from "./components/Layout";
+import { Login } from "./components/Login";
+import { FileBrowser } from "./components/FileBrowser/FileBrowser";
+import { SavingsDashboard } from "./components/Savings/SavingsDashboard";
+import { TransfersLog } from "./components/Transfers/TransfersLog";
+import { ColdStorageDownload } from "./components/ColdStorage/ColdStorageDownload";
 
-import { AuthenticatedTemplate, UnauthenticatedTemplate, useIsAuthenticated, useMsal } from "@azure/msal-react";
-import { loginRequest } from "./authConfig";
+import "./custom.css";
 
-import './custom.css'
-import { MigrationTargetsConfig } from './components/MigrationTargets/MigrationTargetsConfig';
+/**
+ * Gates a page behind sign-in. Token acquisition itself happens per-request in
+ * the API client (see api/client.ts), so pages never receive a raw token prop
+ * and never break when the initial token expires.
+ */
+function RequireAuth({ children }: { children: React.ReactNode }) {
+  return (
+    <>
+      <AuthenticatedTemplate>{children}</AuthenticatedTemplate>
+      <UnauthenticatedTemplate>
+        <Login />
+      </UnauthenticatedTemplate>
+    </>
+  );
+}
 
 export default function App() {
-
-    const [accessToken, setAccessToken] = useState<string | null>();
-    const isAuthenticated = useIsAuthenticated();
-    const { instance, accounts } = useMsal();
-
-    const RequestAccessToken = React.useCallback(() => {
-        const request = {
-            ...loginRequest,
-            account: accounts[0]
-        };
-
-        // Silently acquires an access token which is then attached to a request for Microsoft Graph data
-        instance.acquireTokenSilent(request).then((response) => {
-            setAccessToken(response.accessToken);
-        }).catch(() => {
-            instance.acquireTokenPopup(request).then((response) => {
-                setAccessToken(response.accessToken);
-            });
-        });
-    }, [accounts, instance]);
-
-    React.useEffect(() => {
-
-        // Get OAuth token
-        if (isAuthenticated && !accessToken) {
-            RequestAccessToken();
-        }
-    }, [accessToken, RequestAccessToken, isAuthenticated]);
-
-
-    return (
-        <div>
-            {accessToken ?
-                (
-                    <Layout>
-                        <AuthenticatedTemplate>
-                            <Switch>
-                                <Route exact path='/' render={() => <FileBrowser {... { token: accessToken! }} />} />
-                                <Route path='/FindFile' render={() => <FindFile {... { token: accessToken! }} />} />
-                                <Route path='/FindMigrationLog' render={() => <FindMigrationLog {... { token: accessToken! }} />} />
-                                <Route path='/MigrationTargets' render={() => <MigrationTargetsConfig {... { token: accessToken! }} />} />
-                                <Route path='/Savings' render={() => <SavingsDashboard token={accessToken!} />} />
-                                <Route path='/cold-storage/download/:itemId' render={() => <ColdStorageDownload token={accessToken!} />} />
-                            </Switch>
-                        </AuthenticatedTemplate>
-                        <UnauthenticatedTemplate>
-                            <Route path='/' render={() => <Login />} />
-                        </UnauthenticatedTemplate>
-                    </Layout>
-                )
-                :
-                (
-                    <Layout>
-                        <UnauthenticatedTemplate>
-                            <Route path='/' render={() => <Login />} />
-                        </UnauthenticatedTemplate>
-                    </Layout>
-                )}
-        </div>
-    );
-
+  return (
+    <Layout>
+      <Routes>
+        <Route path="/" element={<RequireAuth><FileBrowser /></RequireAuth>} />
+        <Route path="/transfers" element={<RequireAuth><TransfersLog /></RequireAuth>} />
+        <Route path="/transfers/:jobId" element={<RequireAuth><TransfersLog /></RequireAuth>} />
+        <Route path="/savings" element={<RequireAuth><SavingsDashboard /></RequireAuth>} />
+        <Route path="/cold-storage/download/:itemId" element={<RequireAuth><ColdStorageDownload /></RequireAuth>} />
+        <Route path="*" element={<Navigate to="/" replace />} />
+      </Routes>
+    </Layout>
+  );
 }
