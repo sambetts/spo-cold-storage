@@ -3,6 +3,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Migration.Engine;
+using Migration.Functions;
 
 // Isolated-worker Azure Functions host for the cold-storage queue trigger.
 // This replaces the continuous-WebJob worker's dependency on Always On: the
@@ -24,6 +25,10 @@ var host = new HostBuilder()
         services.AddSingleton(sp => new ColdStorageMessageProcessor(
             sp.GetRequiredService<Config>(),
             sp.GetRequiredService<ILoggerFactory>().CreateLogger("ColdStorage")));
+
+        // Emit the worker heartbeat so the health API / SPFx UI shows this
+        // queue-triggered worker as online (the WebJob is being retired).
+        services.AddHostedService<HeartbeatBackgroundService>();
     })
     .Build();
 
