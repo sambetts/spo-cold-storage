@@ -10,8 +10,10 @@
       Infra     Run bicep what-if then deploy main.bicep.
       Secrets   Push the AAD client secret into Key Vault (prompted/-AzureAdClientSecret/env var).
       Sql       Grant the Web App MSI db_owner on the SQL database (T-SQL via Entra token).
-      App       dotnet publish Web.Server + 3 workers, assemble zip with App_Data/jobs layout,
-                deploy to the Web App, set app settings (Key Vault references), restart.
+      App       dotnet publish Web.Server + 2 workers (Indexer, SnapshotBuilder — the
+                Migrator WebJob is retired; a queue-triggered Azure Function replaced it),
+                assemble zip with App_Data/jobs layout, deploy to the Web App, set app
+                settings (Key Vault references), restart.
       Smoke     Verify the Web App responds, container/log-stream OK, secrets resolve.
 
 .PARAMETER ParamsFile
@@ -76,7 +78,13 @@ $BicepMain      = Join-Path $BicepRoot  'main.bicep'
 $SrcRoot        = Join-Path $RepoRoot   'src'
 $WebProject     = Join-Path $SrcRoot    'Web/Web.Server/Web.Server.csproj'
 $WorkerProjects = @(
-    @{ Name = 'Migration.Migrator';            Csproj = 'Migration.Migrator/Migration.Migrator.csproj';                       Kind = 'continuous'; Singleton = $true  }
+    # Migration.Migrator (the Service Bus queue consumer) is RETIRED as a continuous
+    # WebJob: continuous WebJobs need App Service Always On, which governance disables
+    # on this subscription, so the worker stopped whenever the app idled and left items
+    # stuck in "Queued". It was replaced by a queue-triggered Azure Function
+    # (func-*, Flex Consumption, always-ready) that wakes on messages and never
+    # idle-stops. Do NOT re-add it here or two workers will compete on the queue.
+    # The Function is deployed separately (see deploy notes / the Flex function app).
     @{ Name = 'Migration.Indexer';             Csproj = 'Migration.Indexer/Migration.Indexer.csproj';                         Kind = 'triggered';  Singleton = $false }
     @{ Name = 'Migration.SiteSnapshotBuilder'; Csproj = 'Migration.SiteSnapshotBuilder/Migration.SiteSnapshotBuilder.csproj'; Kind = 'triggered';  Singleton = $false }
 )

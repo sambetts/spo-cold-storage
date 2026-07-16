@@ -61,10 +61,16 @@ public class SharePointFileDownloader : BaseComponent
 
     public static string GetTempFileNameAndCreateDir(BaseSharePointFileInfo sharePointFile)
     {
-        var tempFileName = Path.GetTempPath() + @"\SpoColdStorageMigration\" + DateTime.Now.Ticks + @"\" + sharePointFile.ServerRelativeFilePath.Replace("/", @"\");
-        var tempFileInfo = new FileInfo(tempFileName);
-        Directory.CreateDirectory(tempFileInfo.DirectoryName!);
-
-        return tempFileName;
+        // Use a short, unique, cross-platform temp path. The previous version
+        // replicated the file's full SharePoint server-relative path (with
+        // Windows backslashes) under the temp dir, which overflowed the OS path
+        // limit for deeply-nested files (PathTooLongException) and — on Linux,
+        // where '\' is not a separator — collapsed into one oversized filename
+        // component. The temp file only needs somewhere to stream the bytes; the
+        // original path is preserved on the item/placeholder + blob key elsewhere.
+        var ext = Path.GetExtension(sharePointFile.ServerRelativeFilePath);
+        var dir = Path.Combine(Path.GetTempPath(), "SpoColdStorageMigration", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        return Path.Combine(dir, "download" + ext);
     }
 }
