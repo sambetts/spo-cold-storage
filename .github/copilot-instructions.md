@@ -98,8 +98,14 @@ SPFx command set (site-owner only)  ──AadHttpClient──►  Web/Web.Server
 Two idempotent, phase-based PowerShell 7+ orchestrators in `deploy/`, both reading
 `deploy/params.json` (gitignored; copy from `params.example.json`):
 
-- `deploy.ps1` — Azure side (Bicep infra, Key Vault, SQL access, app publish/zip deploy). Phases: `All | Prereqs | Validate | Infra | Secrets | Sql | App | Smoke`.
+- `deploy.ps1` — Azure side (Bicep infra, Key Vault, SQL access, app publish/zip deploy, Function worker deploy). Phases: `All | Prereqs | Validate | Infra | Secrets | App | Sql | Function | Smoke`. In `All`, **App runs before Sql** — the private-SQL grant runs over the VNet via the Web App's Kudu (see below), so the VNet-integrated Web App must exist first.
 - `deploy-spo.ps1` — SharePoint side (AAD app + cert, SPA config, SPFx build + App Catalog upload). Phases: `All | Prereqs | AadApp | Cert | SpaConfig | Spfx | SpfxDeploy`.
+
+**Private-only governance (MCAPS-style subs) — the deploy handles it, but the mechanics are non-obvious:**
+- Set `sql.publicNetworkAccess: "Disabled"` in `params.json` when a policy forces private-only SQL (e.g. `DenyPublicEndpointEnabled`, which also rejects SQL firewall rules). The Bicep firewall rules then become conditional, and the `Sql` phase grants each MSI `db_owner` **over the VNet via the Web App's Kudu command API** — using `CREATE USER … WITH SID` (appId bytes; the server lacks Directory Reader so `FROM EXTERNAL PROVIDER` fails), and **uploading the script through the Kudu VFS API** to run by `-File` (the `-EncodedCommand` one-liner exceeds cmd.exe's ~8 KB limit once the SQL-token JWT is embedded). It waits for the Kudu (scm) site to be ready first (503 right after a zip deploy).
+- Key Vault is private-only too, so data-plane `az keyvault secret set` is Forbidden and re-enabling public access is reverted. Secrets are written via the **control plane** instead: Bicep writes all three (`aad-client-secret` passed as a `@secure()` param during `Infra`; storage/SB conn-strings via `listKeys`). The `Secrets` phase detects a private vault and just verifies existence via `az resource show`.
+- A purge-protected KV is **recovered** (`az keyvault recover`) by the `Infra` phase before Bicep on a same-name redeploy.
+- Storage shared-key + Service Bus local-auth are disabled, but the client factories (`BlobServiceClientFactory`/`ServiceBusClientFactory`) ignore the connection-string key/SAS and use the MSI when `config != null` (they only read the account name / namespace), so the key-based KV secrets still work.
 
 Any SPFx code or `elements.xml` change requires bumping **both** `solution.version`
 and `features[].version` in `config/package-solution.json`, or the upgrade skips

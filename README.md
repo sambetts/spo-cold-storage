@@ -120,7 +120,7 @@ a single `deploy/params.json` (copy from `params.example.json`):
 - **`deploy/deploy.ps1`** — the Azure side: Bicep infra (VNet + private endpoints,
   SQL, Service Bus, Key Vault, storage, the API Web App **and the Function
   worker** + alerts), Key Vault secrets, SQL access, and app/worker code deploy.
-  Phases: `Prereqs · Validate · Infra · Secrets · Sql · App · Function · Smoke`.
+  Phases: `Prereqs · Validate · Infra · Secrets · App · Sql · Function · Smoke`.
 - **`deploy/deploy-spo.ps1`** — the SharePoint side: the Entra app + certificate,
   SPA MSAL config, and the SPFx build + App Catalog upload.
 

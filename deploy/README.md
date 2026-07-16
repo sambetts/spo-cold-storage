@@ -1,7 +1,9 @@
 # SPO Cold Storage — Deployment
 
-Automated end-to-end deployment to a single **Windows App Service** hosting the
-Web.Server (ASP.NET Core API + React SPA) and three workers as WebJobs.
+Automated end-to-end deployment of the API (ASP.NET Core + React SPA on a **Windows
+App Service**) and the worker (a queue-triggered **Azure Function** on Flex
+Consumption). The whole stack is defined in `bicep/main.bicep` and has been torn down
+and redeployed from scratch to prove it's reproducible.
 
 Two PowerShell orchestrators in this folder:
 
@@ -77,7 +79,7 @@ The SPA redirect URI is set to `https://<naming.webApp>.azurewebsites.net` &mdas
 ./deploy/deploy.ps1
 ```
 
-This runs all phases in order: `Prereqs`, `Validate`, `Infra`, `Secrets`, `Sql`, `App`, `Smoke`. The `Secrets` phase picks up the AAD client secret from `deploy/.local/aad-client-secret.txt` automatically.
+This runs all phases in order: `Prereqs`, `Validate`, `Infra`, `Secrets`, `App`, `Sql`, `Function`, `Smoke`. The `Secrets` phase picks up the AAD client secret from `deploy/.local/aad-client-secret.txt` automatically. **`App` runs before `Sql`** because, on a private-only SQL sub, the `Sql` grant runs over the VNet through the Web App (see [Private-only governance](#private-only-governance)).
 
 Takes ~6&ndash;10 minutes the first time (Azure SQL + App Service Plan are the slowest). You'll see a "Deployment plan" summary and one `yes/no` confirmation; add `-SkipConfirm` to skip it.
 
@@ -135,11 +137,11 @@ Without this, SPFx Migrate / Restore commands fail with HTTP 401.
 
 **b. (If you didn't put a group in `storage.userDataReaders`)** &mdash; grant your end-users `Storage Blob Data Reader` on the storage account. The SPA calls Azure Blob Storage **directly** from the browser, so users need data-plane RBAC. See [Grant end-users storage access](#grant-end-users-storage-access) below.
 
-That's it. Visit the App URL, sign in, add a root SharePoint URL, and verify the WebJobs are running:
+That's it. Visit the App URL, sign in, add a root SharePoint URL, and verify the Function worker is running and draining the queue:
 
 ```powershell
-az webapp webjob continuous list -g <rg> -n <webApp> -o table
-az webapp webjob triggered  list -g <rg> -n <webApp> -o table
+az functionapp show -g <rg> -n <funcApp> --query "{state:properties.state, sku:properties.sku}" -o json
+az servicebus queue show -g <rg> --namespace-name <sbNs> -n filediscovery --query "countDetails" -o json
 ```
 
 ---
@@ -182,11 +184,11 @@ deploy/
 |---|---|
 | `Prereqs` | Verifies local tooling, az login, registers resource providers. |
 | `Validate` | Strict params validation; Azure-name rule checks; global uniqueness pre-flight. |
-| `Infra` | Creates the resource group if missing; recovers a soft-deleted (purge-protected) Key Vault if present; runs `bicep what-if`; deploys `main.bicep` (API Web App, the Flex Consumption **Function worker** + its plan, VNet + private endpoints incl. storage queue/table, Service Bus, SQL, Key Vault, storage, alerts). |
-| `Secrets` | Writes the AAD client secret to Key Vault. Other secrets are seeded by Bicep `listKeys`. |
-| `Sql` | Connects to Azure SQL as the Entra admin; grants **both** the Web App MSI and the Function worker MSI `db_owner` via `CREATE USER … FROM EXTERNAL PROVIDER`. |
+| `Infra` | Creates the resource group if missing; recovers a soft-deleted (purge-protected) Key Vault if present; runs `bicep what-if`; deploys `main.bicep` (API Web App, the Flex Consumption **Function worker** + its plan, VNet + private endpoints incl. storage queue/table, Service Bus, SQL, Key Vault, storage, alerts). Also writes the AAD client secret to Key Vault via the **control plane** (a `@secure()` Bicep param), so it works even on a private-only vault. |
+| `Secrets` | On a public vault: self-grants Secrets Officer and pushes `aad-client-secret` via the data plane. On a **private-only vault**: data-plane writes are Forbidden, so it just *verifies* the secret exists (written control-plane by `Infra`) via `az resource show`. Storage/Service-Bus conn-string secrets are seeded by Bicep `listKeys`. |
+| `Sql` | Grants **both** the Web App MSI and the Function worker MSI `db_owner`. Public SQL (`sql.publicNetworkAccess = "Enabled"`): adds a deploy-IP firewall rule and connects directly with `CREATE USER … FROM EXTERNAL PROVIDER`. **Private-only SQL** (`"Disabled"`): the deploy machine can't reach SQL, so it runs the grant **over the VNet via the Web App's Kudu** command API — `CREATE USER … WITH SID` (appId bytes; the server lacks Directory Reader) with the script uploaded through the Kudu **VFS** API and run by `-File`, then restarts the app + function. Requires `App` to have run first. |
 | `App` | `dotnet publish` Web.Server (self-contained); zip-deploys to the API Web App; sets app settings (Key Vault refs); restarts. |
-| `Function` | Sets the Flex Consumption Function app settings (identity-based storage + Service Bus trigger); `dotnet publish` Migration.Functions; zip-deploys the code. |
+| `Function` | Sets the Flex Consumption Function app settings (identity-based storage + Service Bus trigger); `dotnet publish` Migration.Functions; zip-deploys the code (always-ready + scale come from the Bicep `functionAppConfig`). |
 | `Smoke` | HTTP-probes the web app. |
 
 Useful flags: `-Phase <name>` (single phase), `-WhatIfPreview` (Infra dry-run), `-SkipConfirm`, `-ParamsFile path/to/other.json`.
@@ -259,23 +261,56 @@ Use the GUID from `src/SPFx/spfx-cold-storage/src/extensions/coldStorageStatusFi
   - Storage (`blob`), Key Vault (`vault`), Azure SQL (`sqlServer`), Service Bus (`namespace` — **only when `sku.serviceBus` ≠ `Basic`**, because Basic doesn't support Private Link).
 - Windows App Service Plan + Web App (system-assigned MSI, AlwaysOn, integrated with `snet-app`; `WEBSITE_DNS_SERVER=168.63.129.16` so DNS resolves the privatelink zones)
 - Storage Account (TLS 1.2, no anonymous blob access) + blob container, CORS for the Web App
-- Key Vault (RBAC mode, soft-delete on, purge protection on) seeded with: `aad-client-secret`, `storage-connection-string`, `servicebus-connection-string`, `search-query-key`, `search-admin-key`
-- Service Bus namespace + `filediscovery` queue (5 min lock, max delivery 1000)
+- Key Vault (RBAC mode, soft-delete on, purge protection on) seeded with: `aad-client-secret`, `storage-connection-string`, `servicebus-connection-string` (all written via the **control plane**, so seeding works even when the vault is private-only)
+- Service Bus namespace + `filediscovery` queue (5 min lock, max delivery 10 → dead-letters poison messages instead of retrying 1000×)
 - Azure SQL Server (Entra-only auth) + Database
-- Azure AI Search (basic SKU by default)
-- RBAC for the Web App MSI: Key Vault Secrets User, Storage Blob Data Contributor, Service Bus Sender + Receiver, Search Index Data Contributor + Service Contributor
+- RBAC for the Web App MSI: Key Vault Secrets User, Storage Blob Data Contributor, Service Bus Sender + Receiver
+- RBAC for the Function MSI: Storage Blob/Queue/Table Data Contributor, Key Vault Secrets User, Service Bus Receiver
 - RBAC for the AAD app SP: Key Vault Secrets User + Certificates User
 - RBAC for entries in `storage.userDataReaders`: Storage Blob Data Reader
 
 ### Network design — why a VNet + private endpoints?
 
-Tenants increasingly run governance policies (Microsoft's own MCAPS, Azure Policy `Deny`/`DeployIfNotExists` initiatives, customer landing-zone baselines, …) that flip `publicNetworkAccess` to `Disabled` on data-plane services minutes after they're created. The Bicep template intentionally **does not** disable those public endpoints itself — but it provisions the VNet, private endpoints, and DNS so that *if* a policy disables a public endpoint later, the Web App and WebJobs continue to reach SQL / Key Vault / Storage / Search via the private endpoint.
+Tenants increasingly run governance policies (Microsoft's own MCAPS, Azure Policy `Deny`/`DeployIfNotExists` initiatives, customer landing-zone baselines, …) that flip `publicNetworkAccess` to `Disabled` on data-plane services minutes after they're created. The Bicep template intentionally **does not** disable those public endpoints itself — but it provisions the VNet, private endpoints, and DNS so that *if* a policy disables a public endpoint later, the Web App and the Function worker continue to reach SQL / Key Vault / Storage / Service Bus via the private endpoint.
 
 The Web App uses **regional VNet integration with `vnetRouteAllEnabled=false`**. This routes only RFC1918 traffic through `snet-app` (so private-endpoint IPs are reachable), while internet-bound traffic (AAD, SharePoint Online, App Insights ingestion) continues to use the App Service platform's outbound IPs. No NAT Gateway needed.
 
 DNS resolution for the privatelink. zones is handled by setting `WEBSITE_DNS_SERVER=168.63.129.16` (Azure's recursive resolver, which honours private DNS zones linked to the VNet the App Service is integrated with). Hostnames like `<sqlServer>.database.windows.net` resolve to the PE's RFC1918 IP, and connections to that IP are routed through `snet-app`.
 
-> **Service Bus on Basic SKU has no private endpoint** because Azure Service Bus only supports Private Link on Standard and Premium tiers. If a governance policy disables Service Bus public access on a Basic namespace, the WebJobs lose Service Bus connectivity. Upgrade `sku.serviceBus` to `Standard` (or higher) in `params.json` to get the private path.
+> **Service Bus on Basic SKU has no private endpoint** because Azure Service Bus only supports Private Link on Standard and Premium tiers. If a governance policy disables Service Bus public access on a Basic namespace, the worker loses Service Bus connectivity. Upgrade `sku.serviceBus` to `Standard` (or higher) in `params.json` to get the private path.
+
+### Private-only governance
+
+Some subscriptions don't just *provision* private endpoints — a policy forces the
+data-plane services **private-only** and reverts any attempt to re-enable public
+access. On such a sub, the deploy machine can't reach SQL or Key Vault at all, and
+the naïve deploy would fail at the `Secrets` and `Sql` phases. `deploy.ps1` handles
+this end-to-end; the mechanics are worth knowing:
+
+- **`DenyPublicEndpointEnabled`** rejects SQL firewall-rule creation when SQL is
+  private. Set `sql.publicNetworkAccess: "Disabled"` in `params.json`; the Bicep
+  firewall rules then become conditional and are skipped.
+- **Key Vault secrets are written through the control plane** (ARM/Bicep), which the
+  network policy allows — unlike the data-plane `az keyvault secret set`, which
+  returns `Forbidden: Public network access is disabled`. The `aad-client-secret` is
+  passed to Bicep as a `@secure()` parameter during `Infra`; the storage/Service-Bus
+  connection strings are written by Bicep `listKeys()`. The `Secrets` phase only
+  *verifies* the secret exists (`az resource show`).
+- **The SQL grant runs over the VNet via the Web App's Kudu** (`/api/command`),
+  authenticating to SQL with the deploying admin's token. It uses
+  `CREATE USER … WITH SID` (the appId's bytes) because the server lacks Directory
+  Reader, so `FROM EXTERNAL PROVIDER` can't resolve the MSI. The grant script is
+  uploaded through the Kudu **VFS** API (`/api/vfs/...`) and run with
+  `powershell -File`, because a `-EncodedCommand` one-liner exceeds cmd.exe's ~8 KB
+  command-line limit once the large SQL-token JWT is embedded. This is why **`App`
+  must run before `Sql`** — the Web App has to exist and be VNet-integrated first.
+- **A purge-protected Key Vault is recovered** (`az keyvault recover`) by the `Infra`
+  phase before Bicep, so a same-name redeploy after a teardown doesn't fail on
+  create.
+- **Storage shared-key and Service Bus local-auth are disabled** by the policy, but
+  the client factories (`BlobServiceClientFactory` / `ServiceBusClientFactory`)
+  detect a `config` and use the managed identity, reading only the account name /
+  namespace from the connection string — so the key-based KV secrets remain valid.
 
 ### Worker layout
 
@@ -289,7 +324,7 @@ reintroduce a WebJob worker.
 
 - No secrets in `params.json` (gitignored anyway).
 - AAD client secret &mdash; auto-generated by `deploy-spo.ps1 -Phase AadApp` into `deploy/.local/aad-client-secret.txt`. `deploy.ps1 -Phase Secrets` reads it from there (or from `-AzureAdClientSecret` / `$env:SPOCS_AAD_CLIENT_SECRET`).
-- Storage / Service Bus / Search keys &mdash; pulled by Bicep `listKeys()` straight into Key Vault.
+- Storage / Service Bus keys &mdash; pulled by Bicep `listKeys()` straight into Key Vault (control plane).
 - SQL &mdash; no password; `Authentication=Active Directory Managed Identity` and the MSI is granted `db_owner` by the `Sql` phase.
 - All runtime app settings reference Key Vault via `@Microsoft.KeyVault(SecretUri=…)`.
 
@@ -297,15 +332,17 @@ reintroduce a WebJob worker.
 
 | Symptom | Fix |
 |---|---|
-| Bicep fails with `*AlreadyExists` for a globally-unique name (storage, KV, Search, SQL, Service Bus, Web App) | Edit `naming.*` in `params.json` and re-run `-Phase Infra`. |
+| Bicep fails with `*AlreadyExists` for a globally-unique name (storage, KV, SQL, Service Bus, Web App) | Edit `naming.*` in `params.json` and re-run `-Phase Infra`. |
 | Bicep fails with `ProvisioningDisabled` for Azure SQL | Your subscription is region-restricted. Switch `location` to one where SQL is allowed (try `westus3`, `northeurope`, etc.). |
 | `Sql` phase: "Login failed for user" | The deploying user isn't a member of the group in `sql.entraAdminObjectId`. Add yourself (or use a user that IS a member) and re-run `-Phase Sql`. |
-| Web App returns **HTTP 500.30**, `AppServiceAppLogs` show **SqlException 47073** "Connection was denied because Deny Public Network Access is set to Yes" | A governance/Azure Policy disabled `publicNetworkAccess` on the SQL server after Bicep set it to `Enabled`. The fix is the private endpoint that Bicep already provisions — re-run `-Phase Infra` to make sure the VNet + PE + DNS resources exist, then `-Phase App` to set `WEBSITE_DNS_SERVER=168.63.129.16` and restart. Verify with `nslookup <sqlServer>.database.windows.net` from the Web App's Kudu / SSH console — you should get an RFC1918 IP. The same fix applies to Storage / Key Vault / AI Search / Service Bus (Standard SKU). |
-| Web App returns 500.30, logs show **Service Bus** connectivity errors and `sku.serviceBus` is `Basic` | Basic-tier Service Bus doesn't support Private Link. Either re-enable Service Bus public access on the namespace, or upgrade `sku.serviceBus` to `Standard` and re-run `-Phase Infra` so the SB private endpoint gets provisioned. |
+| Web App returns **HTTP 500.30**, `AppServiceAppLogs` show **SqlException 47073** "Connection was denied because Deny Public Network Access is set to Yes" | A governance/Azure Policy forces `publicNetworkAccess=Disabled` on the SQL server. Set `sql.publicNetworkAccess: "Disabled"` in `params.json` and re-run `-Phase Infra` (VNet + PE + DNS), `-Phase App` (sets `WEBSITE_DNS_SERVER=168.63.129.16`), then `-Phase Sql` (grants the MSIs over the VNet via Kudu). Verify with `nslookup <sqlServer>.database.windows.net` from the Web App's Kudu console — you should get an RFC1918 IP. The same private-endpoint fix applies to Storage / Key Vault / Service Bus (Standard SKU). |
+| `Secrets` phase: `Forbidden: Public network access is disabled` on `az keyvault secret set` | The vault is private-only. This is expected — the secret is written via the control plane by `Infra` (the `@secure()` Bicep param), and the `Secrets` phase verifies it. Make sure `deploy/.local/aad-client-secret.txt` (or `-AzureAdClientSecret`) is available when you run `Infra`. |
+| `Sql` phase: `The command line is too long` / Kudu `503` | Both are handled by the current script (VFS upload + Kudu readiness wait). If you see them, you're on an old `deploy.ps1` — pull latest. |
+| Web app returns 500.30, logs show **Service Bus** connectivity errors and `sku.serviceBus` is `Basic` | Basic-tier Service Bus doesn't support Private Link. Either re-enable Service Bus public access on the namespace, or upgrade `sku.serviceBus` to `Standard` and re-run `-Phase Infra` so the SB private endpoint gets provisioned. |
 | Web app starts but throws `ConfigurationMissingException` | A Key Vault reference isn't resolving. Portal → App Service → Configuration → Application settings, look for red "Key Vault reference" badges. Usually means the Secrets phase wasn't run, or the Web App MSI doesn't yet have Key Vault Secrets User (re-run `-Phase Infra`). |
 | Web app: `AuthorizationPermissionMismatch` when browsing blobs | The signed-in user has no `Storage Blob Data Reader`. See [Grant end-users storage access](#grant-end-users-storage-access). Sign out + back in after granting. |
 | Sign-in fails with `AADSTS700016` | You ran `SpaConfig` but didn't re-run `deploy.ps1 -Phase App`. The deployed SPA bundle still has the old client ID baked in. Re-run the App phase. |
-| `WebJobs not visible` in the portal | `az webapp webjob continuous list -g <rg> -n <webApp> -o table`. If empty, confirm the App phase succeeded; the zip must contain `App_Data\jobs\…\<JobName>\run.cmd`. |
+| Function worker not draining the queue | `az functionapp show -g <rg> -n <funcApp> --query properties.state` should be `Running`. Check `func-*` in App Insights for "Job host started" + the `ColdStorageQueue` listener. On Flex Consumption keep **always-ready ≥ 1** (Bicep `functionAppConfig`) — scale-from-zero doesn't reliably wake the identity-based Service Bus trigger. |
 | SPFx commands return 401 from `AadHttpClient` | The webApiPermissionRequest from the SPFx package needs admin approval — see [step 7a](#7-two-manual-steps-that-cant-be-automated). |
 | `Add-PnPApp` prompts interactively despite `-Overwrite` | Add `-Force`. The script does this; if you're running PnP commands manually, you need it too. |
 | `SpfxDeploy` fails with `AADSTS700027: The certificate with identifier used to sign the client assertion is not registered on application` | AAD takes 30&ndash;90s to propagate a newly-registered cert. The script retries automatically (up to 12 × 15s) when using `-SpfxAuthMode Certificate`. If you're invoking PnP manually, just wait a minute and retry. |

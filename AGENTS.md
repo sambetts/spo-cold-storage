@@ -162,18 +162,43 @@ there is no legacy message path to preserve.
 
 ## 7. Deployment
 
-`deploy/deploy.ps1` is a single PowerShell 7+ script reading `deploy.parameters.json`. It builds, provisions Azure, deploys app code, and uploads the SPFx package. Idempotent — re-run any time. See `deploy/README.md` for the parameter reference and the `-SkipXxx` switches.
+Two idempotent PowerShell 7+ orchestrators in `deploy/`, both reading `deploy/params.json`
+(gitignored; copy from `params.example.json`). Re-run any phase any time. See
+`deploy/README.md` for the full parameter/phase reference.
+
+- `deploy.ps1` (Azure): `All | Prereqs | Validate | Infra | Secrets | App | Sql | Function | Smoke`.
+  In `All`, **App runs before Sql** (the private-SQL grant runs over the VNet via the Web App's Kudu).
+- `deploy-spo.ps1` (SharePoint): AAD app + cert, SPA `.env.production`, SPFx build + App Catalog upload.
 
 Key resources it creates / configures:
-- Resource group, App Insights, Storage account (with cold-storage blob containers), Service Bus namespace + `filediscovery` queue, SQL server + DB, App Service Plan, a Web App (`{prefix}-web`) for the API, and a queue-triggered Azure Function (`func-*`, Flex Consumption, always-ready) for the worker.
-- App settings on both apps: `ConnectionStrings__SQLConnectionString`, `ConnectionStrings__Storage`, `ConnectionStrings__ServiceBus`, `AzureAd__*`, `APPLICATIONINSIGHTS_CONNECTION_STRING`, `BlobContainerName`, `BaseServerAddress`.
-- The Entra app registration for the API is **not** auto-created — you put its IDs in the JSON.
+- Resource group, App Insights, Storage account (with cold-storage blob containers + soft-delete/versioning),
+  Service Bus namespace + `filediscovery` queue, SQL server + DB, App Service Plan, a Web App (`app-*`) for
+  the API, a queue-triggered Azure Function (`func-*`, Flex Consumption, always-ready=2) for the worker, a
+  VNet + private endpoints (blob/queue/table/SQL/KV) + DNS, and 3 Azure Monitor alerts (DLQ depth, queue
+  backlog, function exceptions) → an action group.
+- App settings use runtime **Key Vault references** (`@Microsoft.KeyVault(...)`) resolved by each app's MSI.
+- The Entra app registration for the API is **not** auto-created by `deploy.ps1` — `deploy-spo.ps1 -Phase AadApp` creates it (or you put its IDs in the JSON).
+
+**Private-only governance (MCAPS-style subs).** Some subscriptions force data-plane services private and
+revert public re-enablement. `deploy.ps1` handles this end-to-end — set `sql.publicNetworkAccess: "Disabled"`
+in params. Non-obvious mechanics (also in `deploy/README.md` + copilot-instructions):
+- **KV secrets go via the control plane** (Bicep/ARM), which bypasses the private data-plane block:
+  `aad-client-secret` is passed to Bicep as a `@secure()` param during `Infra`; the `Secrets` phase only
+  *verifies* existence. Data-plane `az keyvault secret set` is Forbidden here.
+- **The private-SQL grant runs over the VNet via the Web App's Kudu**: `CREATE USER … WITH SID` (appId bytes;
+  no Directory Reader for `FROM EXTERNAL PROVIDER`), script uploaded via the Kudu **VFS** API and run by
+  `-File` (an `-EncodedCommand` one-liner exceeds cmd.exe's ~8 KB limit once the SQL-token JWT is embedded).
+- A purge-protected KV is **recovered** before Bicep on a same-name redeploy.
+- Storage shared-key + SB local-auth are disabled; the client factories use the MSI anyway (they read only
+  the account name / namespace from the connection strings), so the key-based KV secrets still work.
+
+The whole stack has been **torn down and redeployed from scratch** to prove reproducibility (Function drains
+the queue in <10 s with always-ready=2; API returns 401 = SQL grant + DbInitializer healthy).
 
 ## 8. Branch / PR
 
-- Working branch: `feat/cold-storage-lifecycle`
-- All cold-storage work + deployment script lives here, not on `main`.
-- PR URL: https://github.com/sambetts/spo-cold-storage/pull/new/feat/cold-storage-lifecycle
+- Cold-storage lifecycle, greenfield cleanup, product-charter features, and the deployment scripts are all
+  merged to **`main`** and deployed. Do net-new work on a feature branch off `main`.
 
 ## 9. Things to be careful of in future sessions
 
@@ -181,10 +206,12 @@ Key resources it creates / configures:
 - **Don't add EF migrations**. Idempotent SQL in `DbInitializer` is the convention.
 - **Don't put package versions in csproj files.** Use `Directory.Packages.props`.
 - **The worker is the queue-triggered Azure Function** (`Migration.Functions`) — don't reintroduce a continuous WebJob / Always-On worker (governance disables Always On, so the item would idle-stop). The API only enqueues.
+- **Keep `always-ready ≥ 1` on the Function** — on Flex Consumption, scale-from-zero does **not** reliably wake the identity-based Service Bus trigger listener; always-ready keeps it warm (verified: probe drained in <10 s at always-ready=2).
 - **Don't disable `TreatWarningsAsErrors`** — fix the warning.
 - **Migration.Engine.Tests should be fully green** (125/0). The legacy SnapshotBuilder tests that used to fail were removed with the legacy code; a new failure is genuinely yours.
 - **Don't add `using Models.ColdStorage;` directly inside `Web.Server` controllers** without checking for the `Web.Models` collision. Either alias or use `global::`.
 - **The `BaseConfig` reflection in `Entities/Configuration/BaseConfig.cs`** is fragile — any new config property that isn't a string will need a corresponding default/converter or it will throw on missing values.
+- **On a private-only sub, don't try to write KV secrets or reach SQL from the deploy machine** — both are Forbidden. Use the control-plane (KV) / Kudu-over-VNet (SQL) paths the deploy already implements.
 
 ## 10. Session-state on disk
 
