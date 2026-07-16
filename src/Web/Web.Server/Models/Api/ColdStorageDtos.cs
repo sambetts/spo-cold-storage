@@ -354,6 +354,14 @@ public class RequeueRequest
     public string? Status { get; set; }
     public string? SiteUrl { get; set; }
     public int? Max { get; set; }
+
+    /// <summary>
+    /// Only used with <c>Status = "StaleQueued"</c>: the minimum age (minutes) a
+    /// <c>Queued</c> item must have to be treated as orphaned and re-published.
+    /// Defaults to 15. Guards against re-publishing an item that was legitimately
+    /// enqueued moments ago.
+    /// </summary>
+    public int? OlderThanMinutes { get; set; }
 }
 
 public class RequeueResultResponse

@@ -174,6 +174,12 @@ public class QueueController(
     /// *Failed lifecycle state are ever touched; in-flight, completed, cancelled
     /// and skipped items are left alone.
     ///
+    /// <c>Status = "StaleQueued"</c> instead recovers orphaned items whose row is
+    /// still <c>Queued</c> but whose bus message was lost (age-gated by
+    /// <c>OlderThanMinutes</c>, default 15, so freshly-enqueued items are never
+    /// re-published). Duplicate messages, if any, are coalesced by the pipeline's
+    /// in-flight + DB status guards.
+    ///
     /// SAFETY: requeuing is safe against the never-delete-source invariant. The
     /// migrate pipeline re-validates and re-copies from scratch and only deletes
     /// the source after a confirmed copy; an item whose source was already deleted
@@ -188,6 +194,11 @@ public class QueueController(
             return Forbid();
         }
         var upn = User.GetUpn();
+
+        // "StaleQueued" mode recovers orphaned items (row says Queued but the bus
+        // message was lost) rather than failed items. Tracked so the eligibility
+        // gate below allows Queued (not just *Failed) in this mode only.
+        var staleQueuedMode = false;
 
         IQueryable<MigrationJobItem> query = _db.MigrationJobItems.Include(i => i.Job);
         if (request?.ItemIds is { Count: > 0 } itemIds)
@@ -205,13 +216,20 @@ public class QueueController(
             {
                 query = query.Where(i => FailedStatuses.Contains(i.Status));
             }
+            else if (string.Equals(request.Status, "StaleQueued", StringComparison.OrdinalIgnoreCase))
+            {
+                staleQueuedMode = true;
+                var minutes = request.OlderThanMinutes is int mm ? Math.Clamp(mm, 1, 1440) : 15;
+                var cutoff = DateTime.UtcNow.AddMinutes(-minutes);
+                query = query.Where(i => i.Status == MigrationLifecycleStatus.Queued && i.UpdatedAt < cutoff);
+            }
             else if (Enum.TryParse<MigrationLifecycleStatus>(request.Status, true, out var st))
             {
                 query = query.Where(i => i.Status == st);
             }
             else
             {
-                return BadRequest($"Unknown status '{request.Status}'. Use a lifecycle status name or 'AllFailed'.");
+                return BadRequest($"Unknown status '{request.Status}'. Use a lifecycle status name, 'AllFailed', or 'StaleQueued'.");
             }
             if (!string.IsNullOrWhiteSpace(request.SiteUrl))
             {
@@ -221,7 +239,7 @@ public class QueueController(
         }
         else
         {
-            return BadRequest("Provide itemIds, jobId, or a failed status to requeue.");
+            return BadRequest("Provide itemIds, jobId, or a status ('AllFailed' / 'StaleQueued' / a lifecycle status) to requeue.");
         }
 
         var capped = request?.Max is int m ? Math.Clamp(m, 1, 5000) : 500;
@@ -236,7 +254,8 @@ public class QueueController(
 
         foreach (var item in candidates)
         {
-            if (!IsRequeueable(item.Status))
+            var eligible = staleQueuedMode ? item.Status == MigrationLifecycleStatus.Queued : IsRequeueable(item.Status);
+            if (!eligible)
             {
                 result.Skipped++;
                 continue;
@@ -264,7 +283,9 @@ public class QueueController(
                 ItemId = item.ItemId,
                 Status = MigrationLifecycleStatus.Queued,
                 Level = (int)LogLevel.Information,
-                Message = $"Requeued by {upn} (was {previous}).",
+                Message = staleQueuedMode
+                    ? $"Re-published orphaned Queued item by {upn}."
+                    : $"Requeued by {upn} (was {previous}).",
                 ActorUpn = upn,
                 Action = "Requeue",
             });

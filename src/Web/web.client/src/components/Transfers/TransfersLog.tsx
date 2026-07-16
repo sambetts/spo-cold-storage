@@ -176,6 +176,42 @@ function TransfersList() {
     }
   }, [api, load]);
 
+  const recoverStuckQueued = useCallback(async () => {
+    if (
+      !window.confirm(
+        `Recover stuck transfers? Items that have sat in 'Queued' for over 15 minutes (a lost worker ` +
+          `message) are re-published. This is safe — duplicates are coalesced and no source is ever ` +
+          `deleted without a confirmed copy.`,
+      )
+    ) {
+      return;
+    }
+    setRecovering(true);
+    setRecoverMsg(null);
+    try {
+      const res = await api.post<{ requeued: number; skipped: number; publishFailed: number }>(
+        "/api/admin/queue/requeue",
+        { status: "StaleQueued", olderThanMinutes: 15, max: 5000 },
+      );
+      setRecoverMsg(
+        res.requeued > 0
+          ? `Re-published ${res.requeued} stuck item(s).`
+          : "No stuck queued items found (older than 15 minutes).",
+      );
+      await load();
+    } catch (err) {
+      setRecoverMsg(
+        err instanceof ApiError
+          ? err.status === 403
+            ? "Administrator access is required to recover stuck transfers."
+            : err.message
+          : String(err),
+      );
+    } finally {
+      setRecovering(false);
+    }
+  }, [api, load]);
+
   return (
     <div style={{ maxWidth: 1200, margin: "0 auto" }}>
       <h2 style={{ margin: "0 0 2px 0" }}>Transfers &amp; logs</h2>
@@ -218,6 +254,9 @@ function TransfersList() {
             {recovering ? "Recovering…" : `Recover ${totalFailed} failed`}
           </Button>
         )}
+        <Button icon={<ArrowSync20Regular />} appearance="subtle" disabled={recovering} onClick={() => void recoverStuckQueued()}>
+          Recover stuck queued
+        </Button>
       </div>
       {recoverMsg && <div style={{ fontSize: 13, color: "#605e5c", marginBottom: 12 }}>{recoverMsg}</div>}
 
