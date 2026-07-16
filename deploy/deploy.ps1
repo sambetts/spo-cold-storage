@@ -218,6 +218,10 @@ function Invoke-Phase-Infra {
     $deployIp = Get-PublicIp
     Write-Info "Detected public IP for SQL firewall: $deployIp"
 
+    # Private-only SQL (governance policy) skips the firewall rules; the deploy then
+    # reaches SQL over the VNet via the Web App in the Sql phase.
+    $sqlPublicAccess = if ($p.sql.PSObject.Properties['publicNetworkAccess']) { [string]$p.sql.publicNetworkAccess } else { 'Enabled' }
+
     # Build bicep parameters file in temp
     $bicepParams = @{
         '$schema'      = 'https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#'
@@ -229,6 +233,7 @@ function Invoke-Phase-Infra {
             sku                    = @{ value = (ConvertTo-PlainObject $p.sku) }
             azureAd                = @{ value = (ConvertTo-PlainObject $p.azureAd) }
             sql                    = @{ value = (ConvertTo-PlainObject $p.sql) }
+            sqlPublicNetworkAccess = @{ value = $sqlPublicAccess }
             sharePoint             = @{ value = (ConvertTo-PlainObject $p.sharePoint) }
             deployClientIpAddress  = @{ value = $deployIp }
             storageUserDataReaderPrincipals = @{ value = @(Get-StorageUserReaderOids $p) }
@@ -457,34 +462,98 @@ END
 "@
     }) -join "`n") + "`nSELECT name, type_desc FROM sys.database_principals WHERE type = 'E';"
 
-    # Ensure deploy IP is in the firewall (bicep already did this, but guard against drift).
-    $deployIp = Get-PublicIp
-    Write-Info "Ensuring SQL firewall rule for deploy IP $deployIp…"
-    Invoke-Native az 'sql' 'server' 'firewall-rule' 'create' `
-        '-g' $p.resourceGroupName '-s' $sqlServer `
-        '-n' 'AllowDeployClientIp' `
-        '--start-ip-address' $deployIp '--end-ip-address' $deployIp `
-        '-o' 'none' -Quiet -AllowNonZero | Out-Null
+    $sqlPublic = if ($p.sql.PSObject.Properties['publicNetworkAccess']) { [string]$p.sql.publicNetworkAccess } else { 'Enabled' }
 
-    Write-Info "Connecting to $serverFqdn / $dbName as Entra admin…"
-    try {
-        Invoke-AzureSqlCommand -ServerFqdn $serverFqdn -Database $dbName -Sql $sqlScript | Format-Table | Out-String | Write-Host
-        Write-Ok "Granted db_owner to MSI(s) '$userLabel' (SID derived from appId via FROM EXTERNAL PROVIDER)."
-    } catch {
-        throw "SQL grant failed: $($_.Exception.Message)`nEnsure the deploying user is a member of the Entra SQL admin group/user '$($p.sql.entraAdminLogin)'."
-    } finally {
-        if ($p.PSObject.Properties['network'] -and $p.network.PSObject.Properties['removeDeployIpAfterSqlGrants'] -and $p.network.removeDeployIpAfterSqlGrants) {
-            Write-Info 'Removing deploy IP from SQL firewall…'
-            Invoke-Native az 'sql' 'server' 'firewall-rule' 'delete' `
-                '-g' $p.resourceGroupName '-s' $sqlServer `
-                '-n' 'AllowDeployClientIp' `
-                '-o' 'none' -Quiet -AllowNonZero | Out-Null
+    if ($sqlPublic -eq 'Enabled') {
+        # Public SQL: connect directly from the deploy machine (firewall + Entra token).
+        $deployIp = Get-PublicIp
+        Write-Info "Ensuring SQL firewall rule for deploy IP $deployIp…"
+        Invoke-Native az 'sql' 'server' 'firewall-rule' 'create' `
+            '-g' $p.resourceGroupName '-s' $sqlServer `
+            '-n' 'AllowDeployClientIp' `
+            '--start-ip-address' $deployIp '--end-ip-address' $deployIp `
+            '-o' 'none' -Quiet -AllowNonZero | Out-Null
+        Write-Info "Connecting to $serverFqdn / $dbName as Entra admin…"
+        try {
+            Invoke-AzureSqlCommand -ServerFqdn $serverFqdn -Database $dbName -Sql $sqlScript | Format-Table | Out-String | Write-Host
+            Write-Ok "Granted db_owner to MSI(s) '$userLabel' (FROM EXTERNAL PROVIDER)."
+        } catch {
+            throw "SQL grant failed: $($_.Exception.Message)`nEnsure the deploying user is a member of the Entra SQL admin '$($p.sql.entraAdminLogin)'."
+        } finally {
+            if ($p.PSObject.Properties['network'] -and $p.network.PSObject.Properties['removeDeployIpAfterSqlGrants'] -and $p.network.removeDeployIpAfterSqlGrants) {
+                Write-Info 'Removing deploy IP from SQL firewall…'
+                Invoke-Native az 'sql' 'server' 'firewall-rule' 'delete' `
+                    '-g' $p.resourceGroupName '-s' $sqlServer '-n' 'AllowDeployClientIp' `
+                    '-o' 'none' -Quiet -AllowNonZero | Out-Null
+            }
+        }
+    } else {
+        # Private-only SQL (policy): the deploy machine can't reach it. Run the grant
+        # from the VNet-integrated Web App via Kudu, authenticating to SQL with the
+        # deploying admin's token. FROM EXTERNAL PROVIDER needs Directory Reader (which
+        # the server lacks), so create each MSI user WITH SID derived from its appId.
+        Write-Info 'Private SQL: granting MSI users over the VNet via the Web App (Kudu)…'
+        $o = $global:Outputs
+        $sidScript = (($msiUsers | ForEach-Object {
+            $u = $_
+            $principalId = if ($u -eq $webAppName) { $o['webAppPrincipalId'] } else { $o['functionPrincipalId'] }
+            $appId = (Invoke-Native az 'ad' 'sp' 'show' '--id' $principalId '--query' 'appId' '-o' 'tsv' -Quiet).Trim()
+            $sid = ConvertTo-SqlSid $appId
+@"
+IF NOT EXISTS (SELECT 1 FROM sys.database_principals WHERE name = N'$u')
+    CREATE USER [$u] WITH SID = $sid, TYPE = E;
+IF NOT EXISTS (SELECT 1 FROM sys.database_role_members rm JOIN sys.database_principals r ON rm.role_principal_id = r.principal_id JOIN sys.database_principals m ON rm.member_principal_id = m.principal_id WHERE r.name = N'db_owner' AND m.name = N'$u')
+    ALTER ROLE db_owner ADD MEMBER [$u];
+"@
+        }) -join "`n")
+        Invoke-SqlViaKudu -WebApp $webAppName -ServerFqdn $serverFqdn -Db $dbName -Sql $sidScript
+        Write-Ok "Granted db_owner to MSI(s) '$userLabel' (WITH SID via Kudu on the VNet)."
+        Write-Info 'Restarting app + function so DbInitializer re-runs with the granted identities…'
+        Invoke-Native az 'webapp' 'restart' '-g' $p.resourceGroupName '-n' $webAppName '-o' 'none' -Quiet -AllowNonZero | Out-Null
+        if ($funcName) {
+            Invoke-Native az 'functionapp' 'restart' '-g' $p.resourceGroupName '-n' $funcName '-o' 'none' -Quiet -AllowNonZero | Out-Null
         }
     }
 }
 
-# Kept for reference; not used anymore — SQL SIDs for MSIs use appId, not principalId.
-# function ConvertTo-SqlSidFromGuid { ... }
+# Convert an Entra app/MSI appId (GUID) to the SQL binary SID literal used by
+# CREATE USER … WITH SID. Azure SQL derives an MSI's SID from its appId's byte
+# array (Guid.ToByteArray order), not from the object id.
+function ConvertTo-SqlSid([string]$appId) {
+    $bytes = ([Guid]$appId).ToByteArray()
+    '0x' + (-join ($bytes | ForEach-Object { $_.ToString('x2') }))
+}
+
+# Run a T-SQL batch against a private-only Azure SQL DB from the VNet-integrated
+# Web App: POST a PowerShell one-liner to the app's Kudu command API that opens a
+# System.Data.SqlClient connection (private endpoint, reached via the app's VNet
+# integration + private DNS) authenticated with the deploying admin's SQL token.
+function Invoke-SqlViaKudu {
+    param([string]$WebApp, [string]$ServerFqdn, [string]$Db, [string]$Sql)
+    $armToken = (Invoke-Native az 'account' 'get-access-token' '--resource' 'https://management.core.windows.net/' '--query' 'accessToken' '-o' 'tsv' -Quiet).Trim()
+    $sqlToken = (Invoke-Native az 'account' 'get-access-token' '--resource' 'https://database.windows.net/' '--query' 'accessToken' '-o' 'tsv' -Quiet).Trim()
+    $inner = @"
+`$ErrorActionPreference='Stop'
+`$c = New-Object System.Data.SqlClient.SqlConnection
+`$c.ConnectionString = 'Server=tcp:$ServerFqdn,1433;Database=$Db;Encrypt=True;TrustServerCertificate=False;Connection Timeout=60;'
+`$c.AccessToken = '$sqlToken'
+`$c.Open()
+`$cmd = `$c.CreateCommand()
+`$cmd.CommandText = @'
+$Sql
+'@
+`$cmd.ExecuteNonQuery() | Out-Null
+Write-Output 'SQL grant applied.'
+`$c.Close()
+"@
+    $enc  = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($inner))
+    $body = @{ command = "powershell -NoProfile -EncodedCommand $enc"; dir = 'site\wwwroot' } | ConvertTo-Json
+    $resp = Invoke-RestMethod -Method Post -Uri "https://$WebApp.scm.azurewebsites.net/api/command" `
+        -Headers @{ Authorization = "Bearer $armToken" } -ContentType 'application/json' -Body $body
+    if ($resp.ExitCode -ne 0) {
+        throw "Kudu SQL grant failed (exit $($resp.ExitCode)): $($resp.Error) $($resp.Output)"
+    }
+}
 
 function Invoke-Phase-App {
     Write-Step 'App: publish + package + deploy to App Service'
@@ -854,7 +923,7 @@ function Run-Phase {
 
 try {
     $phases = if ($Phase -eq 'All') {
-        @('Prereqs','Validate','Infra','Secrets','Sql','App','Function','Smoke')
+        @('Prereqs','Validate','Infra','Secrets','App','Sql','Function','Smoke')
     } else {
         # For standalone phases, ensure params are at least loaded for context (except phases
         # that do this themselves, or Prereqs which is pre-params).

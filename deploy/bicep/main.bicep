@@ -35,6 +35,9 @@ param azureAd object
 @description('SQL Entra admin configuration')
 param sql object
 
+@description('SQL public network access: Enabled | Disabled. Set Disabled on subscriptions where a policy forces private-only SQL — the firewall rules are then skipped and the deploy reaches SQL over the VNet via the Web App (Kudu).')
+param sqlPublicNetworkAccess string = 'Enabled'
+
 @description('SharePoint configuration')
 param sharePoint object
 
@@ -335,7 +338,7 @@ resource sqlServer 'Microsoft.Sql/servers@2023-08-01-preview' = {
   properties: {
     version: '12.0'
     minimalTlsVersion: '1.2'
-    publicNetworkAccess: 'Enabled'
+    publicNetworkAccess: sqlPublicNetworkAccess
     administrators: {
       administratorType: 'ActiveDirectory'
       principalType: sql.entraAdminIsGroup ? 'Group' : 'User'
@@ -359,7 +362,10 @@ resource sqlDb 'Microsoft.Sql/servers/databases@2023-08-01-preview' = {
   }
 }
 
-resource sqlFwAzure 'Microsoft.Sql/servers/firewallRules@2023-08-01-preview' = {
+// Firewall rules only exist when public access is enabled; a private-only
+// (policy-enforced) SQL server rejects firewall-rule creation, and the deploy
+// reaches it over the VNet instead.
+resource sqlFwAzure 'Microsoft.Sql/servers/firewallRules@2023-08-01-preview' = if (sqlPublicNetworkAccess == 'Enabled') {
   parent: sqlServer
   name: 'AllowAllAzureServices'
   properties: {
@@ -368,7 +374,7 @@ resource sqlFwAzure 'Microsoft.Sql/servers/firewallRules@2023-08-01-preview' = {
   }
 }
 
-resource sqlFwDeploy 'Microsoft.Sql/servers/firewallRules@2023-08-01-preview' = if (!empty(deployClientIpAddress)) {
+resource sqlFwDeploy 'Microsoft.Sql/servers/firewallRules@2023-08-01-preview' = if (sqlPublicNetworkAccess == 'Enabled' && !empty(deployClientIpAddress)) {
   parent: sqlServer
   name: 'AllowDeployClientIp'
   properties: {

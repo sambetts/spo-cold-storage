@@ -63,10 +63,11 @@
   },
 
   "sql": {
-    "_comment": "Entra-only auth. Provide an Entra group (recommended) or user that will be SQL admin. The deploying user MUST be a member, because the script grants the Web App MSI db_owner via T-SQL post-deploy.",
+    "_comment": "Entra-only auth. Provide an Entra group (recommended) or user that will be SQL admin. The deploying user MUST be a member. publicNetworkAccess: 'Enabled' (default) grants MSI users directly from the deploy machine; set 'Disabled' where a policy forces private-only SQL — the deploy then runs the grant over the VNet via the Web App (Kudu).",
     "entraAdminLogin": "sg-spocs-sqladmins",
     "entraAdminObjectId": "00000000-0000-0000-0000-000000000000",
-    "entraAdminIsGroup": true
+    "entraAdminIsGroup": true,
+    "publicNetworkAccess": "Enabled"
   },
 
   "sharePoint": {
