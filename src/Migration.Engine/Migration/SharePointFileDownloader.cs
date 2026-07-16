@@ -47,10 +47,27 @@ public class SharePointFileDownloader : BaseComponent
         // Get response but don't buffer full content (which will buffer overlflow for large files)
         using (var response = await _client.GetAsyncWithThrottleRetries(url, HttpCompletionOption.ResponseHeadersRead, _logger))
         {
+            // FAILSAFE: the throttle client only retries HTTP 429 and returns any
+            // other non-success (403/404/500 or an auth-expired HTML login page)
+            // as-is. Without this, that error body would be written to the temp
+            // file, later pass length/MD5 validation (which only compare to the
+            // downloaded bytes), and the good SharePoint source could then be
+            // deleted. Throwing here keeps the source safe (copy step fails).
+            response.EnsureSuccessStatusCode();
+            var declaredLength = response.Content.Headers.ContentLength;
+
             using var streamToReadFrom = await response.Content.ReadAsStreamAsync();
             using var streamToWriteTo = File.Open(tempFileName, FileMode.Create);
             await streamToReadFrom.CopyToAsync(streamToWriteTo);
             fileSize = streamToWriteTo.Length;
+
+            // Detect a truncated stream: if SharePoint declared a Content-Length,
+            // the bytes we wrote must match it exactly.
+            if (declaredLength.HasValue && declaredLength.Value != fileSize)
+            {
+                throw new IOException(
+                    $"Download of '{sharePointFile.FullSharePointUrl}' was truncated: wrote {fileSize:N0} bytes, expected {declaredLength.Value:N0}.");
+            }
         }
 
         _logger.LogDebug($"Wrote {fileSize:N0} bytes to '{tempFileName}'.");

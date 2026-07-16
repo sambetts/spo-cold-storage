@@ -13,7 +13,7 @@
       "autoCompleteMessages": false,
       "maxConcurrentCalls": 10,
       "prefetchCount": 0,
-      "maxAutoLockRenewalDuration": "01:00:00"
+      "maxAutoLockRenewalDuration": "12:00:00"
     }
   }
 }

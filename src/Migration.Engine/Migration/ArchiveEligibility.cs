@@ -111,6 +111,11 @@ public sealed class ArchiveEligibilityEvaluator : IArchiveEligibilityEvaluator
     {
         _minSizeBytes = minSizeBytes > 0 ? minSizeBytes : 0;
         _excluded = ParseExtensions(excludedExtensions);
+        // A .url file is a cold-storage placeholder. Archiving one would create a
+        // nested/duplicate placeholder and, on a folder re-migration, "archive the
+        // archive". Always exclude it regardless of configuration so a
+        // misconfigured exclude-list can never turn this safety off.
+        _excluded.Add(".url");
         _included = ParseExtensions(includedExtensions);
         _exclusionSource = exclusionSource;
         _readActivitySource = readActivitySource;

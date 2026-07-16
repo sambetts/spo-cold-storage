@@ -1,6 +1,7 @@
 using Azure.Storage.Blobs;
 using Azure.Storage.Blobs.Models;
 using Entities.Configuration;
+using Entities.DBEntities.ColdStorage;
 using Microsoft.Extensions.Logging;
 using Microsoft.Identity.Client;
 using Migration.Engine.Lifecycle;
@@ -70,6 +71,18 @@ public sealed class ColdStorageMigratorPipeline : BaseComponent
         }
 
         var file = envelope.File;
+
+        // FAILSAFE / resumability: if a previous attempt already copied AND deleted
+        // the source but didn't finish (e.g., the worker crashed before the
+        // placeholder was written), do NOT re-download a source that no longer
+        // exists — that would fail and wrongly mark an already-archived item as a
+        // copy failure. Instead resume by recreating the placeholder from the
+        // persisted blob coordinates.
+        var priorItem = await _statusWriter.FindItemAsync(envelope.ItemId, cancellationToken).ConfigureAwait(false);
+        if (priorItem is not null && priorItem.SourceDeletedAt is not null && !priorItem.Status.IsTerminal())
+        {
+            return await ResumeAfterSourceDeletedAsync(envelope, priorItem, cancellationToken).ConfigureAwait(false);
+        }
 
         // --- Validating ----------------------------------------------------
         await _statusWriter.TransitionAsync(envelope.ItemId, MigrationLifecycleStatus.Validating,
@@ -194,7 +207,7 @@ public sealed class ColdStorageMigratorPipeline : BaseComponent
         {
             spCtx = await AuthUtils.GetClientContext(_config, file.SiteUrl, _logger, null).ConfigureAwait(false);
             var spFile = spCtx.Web.GetFileByServerRelativeUrl(file.ServerRelativeFilePath);
-            spCtx.Load(spFile, f => f.Exists, f => f.CheckOutType, f => f.ListItemAllFields);
+            spCtx.Load(spFile, f => f.Exists, f => f.Length, f => f.CheckOutType, f => f.ListItemAllFields);
             await spCtx.ExecuteQueryAsync().ConfigureAwait(false);
 
             if (!spFile.Exists)
@@ -203,6 +216,20 @@ public sealed class ColdStorageMigratorPipeline : BaseComponent
             }
             else
             {
+                // FAILSAFE: the source must still be byte-for-byte what we archived.
+                // If its current length differs from the copied size, the file was
+                // changed after we copied it (or the copy was short) — never delete
+                // on a mismatch; fail so the (now-stale) copy is retried.
+                if (spFile.Length != size)
+                {
+                    _logger.LogError("Source '{Url}' length {Actual} no longer matches the archived copy ({Copied}); refusing to delete.",
+                        file.FullSharePointUrl, spFile.Length, size);
+                    await _statusWriter.TransitionAsync(envelope.ItemId, MigrationLifecycleStatus.CopyToColdStorageFailed,
+                        $"Source length {spFile.Length} no longer matches the archived copy ({size}); not deleting.",
+                        level: LogLevel.Error, cancellationToken: cancellationToken);
+                    return false;
+                }
+
                 CaptureSourceAuthorship(spFile, ref originalCreatedBy, ref originalModifiedBy, ref originalCreated, ref originalModified);
 
                 // Capture prior version history to cold storage BEFORE the source
@@ -220,6 +247,22 @@ public sealed class ColdStorageMigratorPipeline : BaseComponent
                         level: LogLevel.Warning, cancellationToken: cancellationToken);
                     return false;
                 }
+
+                // FAILSAFE: re-read the item's persisted status and refuse to delete
+                // unless the lifecycle explicitly permits it. Guards against a
+                // reordered pipeline and against a concurrent cancel/state change
+                // between copy and delete.
+                var itemNow = await _statusWriter.FindItemAsync(envelope.ItemId, cancellationToken).ConfigureAwait(false);
+                if (itemNow is null || !itemNow.Status.SourceDeleteAllowed())
+                {
+                    _logger.LogError("Refusing to delete source '{Url}': item status {Status} does not permit deletion.",
+                        file.FullSharePointUrl, itemNow?.Status);
+                    await _statusWriter.TransitionAsync(envelope.ItemId, MigrationLifecycleStatus.CopyToColdStorageFailed,
+                        "Source delete blocked by lifecycle guard (status did not permit deletion).",
+                        level: LogLevel.Error, cancellationToken: cancellationToken);
+                    return false;
+                }
+
                 spFile.DeleteObject();
                 await spCtx.ExecuteQueryAsync().ConfigureAwait(false);
             }
@@ -280,6 +323,90 @@ public sealed class ColdStorageMigratorPipeline : BaseComponent
             await _statusWriter.TransitionAsync(envelope.ItemId, MigrationLifecycleStatus.PlaceholderFailed,
                 $"Failed to create placeholder: {ex.Message}", exception: ex, level: LogLevel.Error,
                 cancellationToken: cancellationToken);
+            return false;
+        }
+        finally
+        {
+            spCtx?.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// Recovery path for an item whose source was already deleted by a prior
+    /// attempt that didn't finish. Verifies the archived blob still exists and
+    /// (re)creates the .url placeholder from the item's persisted coordinates,
+    /// rather than re-downloading a source that no longer exists.
+    /// </summary>
+    private async Task<bool> ResumeAfterSourceDeletedAsync(ColdStorageBusEnvelope envelope, MigrationJobItem item, CancellationToken cancellationToken)
+    {
+        var file = envelope.File!;
+        _logger.LogWarning("Item {ItemId} ('{Url}') already had its source deleted in a prior run; resuming without re-downloading.",
+            envelope.ItemId, file.FullSharePointUrl);
+
+        if (string.IsNullOrEmpty(item.BlobContainerName) || string.IsNullOrEmpty(item.BlobPath))
+        {
+            await _statusWriter.TransitionAsync(envelope.ItemId, MigrationLifecycleStatus.PlaceholderFailed,
+                "Resume failed: source was deleted but the archived blob coordinates are missing.",
+                level: LogLevel.Error, cancellationToken: cancellationToken).ConfigureAwait(false);
+            return false;
+        }
+
+        // The archived copy MUST still exist before we finalise — otherwise both
+        // the source and the copy are gone and we must surface that loudly.
+        var blob = GetContainerClient(item.BlobContainerName).GetBlobClient(item.BlobPath);
+        if (!await blob.ExistsAsync(cancellationToken).ConfigureAwait(false))
+        {
+            _logger.LogError("Resume for item {ItemId}: source is deleted AND the archived blob '{Container}/{Path}' is missing.",
+                envelope.ItemId, item.BlobContainerName, item.BlobPath);
+            await _statusWriter.TransitionAsync(envelope.ItemId, MigrationLifecycleStatus.PlaceholderFailed,
+                "Resume failed: the archived blob is missing. Manual recovery required.",
+                level: LogLevel.Error, cancellationToken: cancellationToken).ConfigureAwait(false);
+            return false;
+        }
+
+        // Placeholder already written by the prior run — nothing left to do.
+        if (item.PlaceholderCreatedAt is not null && !string.IsNullOrEmpty(item.PlaceholderServerRelativeUrl))
+        {
+            _logger.LogInformation("Item {ItemId} already has a placeholder; treating as complete.", envelope.ItemId);
+            return true;
+        }
+
+        ClientContext? spCtx = null;
+        try
+        {
+            var metadata = new PlaceholderFileMetadata
+            {
+                OriginalSiteUrl = file.SiteUrl,
+                OriginalWebUrl = file.WebUrl,
+                OriginalServerRelativeUrl = file.ServerRelativeFilePath,
+                OriginalFileName = Path.GetFileName(file.ServerRelativeFilePath),
+                OriginalFileSize = item.FileSize,
+                OriginalLastModified = item.SourceLastModified ?? file.LastModified,
+                OriginalCreatedBy = item.OriginalCreatedBy ?? string.Empty,
+                OriginalModifiedBy = item.OriginalModifiedBy ?? string.Empty,
+                OriginalCreated = item.OriginalCreated ?? (file.CreatedDate ?? DateTime.MinValue),
+                ContainerName = item.BlobContainerName,
+                BlobPath = item.BlobPath,
+                BlobUrl = item.BlobUrl ?? BuildBlobUrl(item.BlobContainerName, item.BlobPath),
+                ContentMd5Base64 = item.ContentMd5Base64 ?? string.Empty,
+                MigratedAt = item.CopiedAt ?? DateTime.UtcNow,
+                JobId = envelope.JobId,
+            };
+
+            spCtx = await AuthUtils.GetClientContext(_config, file.SiteUrl, _logger, null).ConfigureAwait(false);
+            var placeholderUrl = await _placeholderWriter.WritePlaceholderAsync(
+                spCtx, file.ServerRelativeFilePath, metadata, cancellationToken,
+                userFacingUrl: BuildPlaceholderUserFacingUrl(envelope.ItemId)).ConfigureAwait(false);
+            await _placeholderWriter.StampOriginalMetadataAsync(spCtx, placeholderUrl, metadata, cancellationToken).ConfigureAwait(false);
+            await _statusWriter.RecordPlaceholderCreatedAsync(envelope.ItemId, placeholderUrl, cancellationToken).ConfigureAwait(false);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Resume: failed to recreate placeholder for '{Url}'.", file.FullSharePointUrl);
+            await _statusWriter.TransitionAsync(envelope.ItemId, MigrationLifecycleStatus.PlaceholderFailed,
+                $"Resume: failed to recreate placeholder: {ex.Message}", exception: ex, level: LogLevel.Error,
+                cancellationToken: cancellationToken).ConfigureAwait(false);
             return false;
         }
         finally
@@ -370,7 +497,17 @@ public sealed class ColdStorageMigratorPipeline : BaseComponent
             [BlobMetadataKeys.OriginalLastModifiedUtc] = envelope.File.LastModified.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture),
             [BlobMetadataKeys.SourceContentMd5] = md5Base64,
         };
-        var options = new BlobUploadOptions { Metadata = metadata };
+        var options = new BlobUploadOptions
+        {
+            Metadata = metadata,
+            // FAILSAFE: give Azure the expected MD5 so it validates the uploaded
+            // bytes server-side, and so VerifyBlobAsync can compare the blob's
+            // ContentHash (which would otherwise be null for chunked uploads).
+            HttpHeaders = new Azure.Storage.Blobs.Models.BlobHttpHeaders
+            {
+                ContentHash = Convert.FromBase64String(md5Base64),
+            },
+        };
         await blob.UploadAsync(fs, options, cancellationToken).ConfigureAwait(false);
     }
 

@@ -198,7 +198,7 @@ resource storage 'Microsoft.Storage/storageAccounts@2023-05-01' = {
   name: naming.storageAccount
   location: location
   tags: tags
-  sku: { name: 'Standard_LRS' }
+  sku: { name: 'Standard_GRS' }
   kind: 'StorageV2'
   properties: {
     minimumTlsVersion: 'TLS1_2'
@@ -213,6 +213,15 @@ resource blobSvc 'Microsoft.Storage/storageAccounts/blobServices@2023-05-01' = {
   parent: storage
   name: 'default'
   properties: {
+    isVersioningEnabled: true
+    deleteRetentionPolicy: {
+      enabled: true
+      days: 30
+    }
+    containerDeleteRetentionPolicy: {
+      enabled: true
+      days: 30
+    }
     cors: {
       corsRules: [
         {
@@ -272,7 +281,7 @@ resource sbQueue 'Microsoft.ServiceBus/namespaces/queues@2022-10-01-preview' = {
   name: naming.serviceBusQueue
   properties: {
     lockDuration: 'PT5M'
-    maxDeliveryCount: 1000
+    maxDeliveryCount: 10
     enablePartitioning: false
     requiresSession: false
     deadLetteringOnMessageExpiration: true

@@ -52,10 +52,12 @@ public class Config(Microsoft.Extensions.Configuration.IConfiguration config) : 
     /// <summary>
     /// Comma/semicolon-separated list of file extensions that must NEVER be
     /// archived, e.g. <c>.tmp;.ds_store;.lnk</c>. Leading dots optional, case
-    /// insensitive. Empty (default) excludes nothing (issue #2).
+    /// insensitive. Defaults to <c>.url</c> so cold-storage placeholder files are
+    /// never (re-)archived. <c>.url</c> is always excluded regardless of this
+    /// value (see ArchiveEligibilityEvaluator) (issue #2).
     /// </summary>
     [ConfigValue(true)]
-    public string ColdStorageExcludedExtensions { get; set; } = string.Empty;
+    public string ColdStorageExcludedExtensions { get; set; } = ".url";
 
     /// <summary>
     /// Optional allow-list of file extensions. When non-empty, ONLY these

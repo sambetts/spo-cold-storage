@@ -91,6 +91,12 @@ public sealed class SharePointFolderExpansionService(Config config, ILogger<Shar
 
                 foreach (var file in folder.Files)
                 {
+                    // Skip cold-storage placeholders — re-archiving a .url is never
+                    // valid (the eligibility gate also excludes them as a backstop).
+                    if (file.ServerRelativeUrl.EndsWith(".url", StringComparison.OrdinalIgnoreCase))
+                    {
+                        continue;
+                    }
                     if (result.Files.Count >= maxFiles)
                     {
                         capped = true;
