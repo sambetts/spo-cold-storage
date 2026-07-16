@@ -133,6 +133,31 @@ public class Program
 
         // https://learn.microsoft.com/en-us/visualstudio/javascript/tutorial-asp-net-core-with-react?view=vs-2022#publish-the-project
 
+        // Security response headers (defence-in-depth). The MSAL token lives in
+        // localStorage, so a strict Content-Security-Policy that blocks injected /
+        // inline scripts is the main mitigation against token theft via XSS. The
+        // allow-lists cover exactly what the SPA needs: the SharePoint Fabric CSS
+        // CDN (styles/fonts), Entra ID (MSAL redirect + silent-renew iframe), and
+        // Azure Blob (the browser browses cold storage directly).
+        app.Use(async (context, next) =>
+        {
+            var headers = context.Response.Headers;
+            headers["X-Content-Type-Options"] = "nosniff";
+            headers["Referrer-Policy"] = "strict-origin-when-cross-origin";
+            headers["X-Frame-Options"] = "DENY";
+            headers["Content-Security-Policy"] =
+                "default-src 'self'; " +
+                "script-src 'self'; " +
+                "style-src 'self' 'unsafe-inline' https://static2.sharepointonline.com; " +
+                "img-src 'self' data: https://static2.sharepointonline.com; " +
+                "font-src 'self' data: https://static2.sharepointonline.com; " +
+                "connect-src 'self' https://login.microsoftonline.com https://*.blob.core.windows.net https://graph.microsoft.com; " +
+                "frame-src 'self' https://login.microsoftonline.com; " +
+                "form-action 'self' https://login.microsoftonline.com; " +
+                "frame-ancestors 'none'; base-uri 'self'; object-src 'none'";
+            await next();
+        });
+
         // In non-development, translate unhandled exceptions into a JSON 500 that
         // still carries the CORS headers. Without this, a server-side error returns
         // a bare 500 whose missing Access-Control-Allow-Origin makes the browser
