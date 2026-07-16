@@ -23,6 +23,8 @@
     "@microsoft/sp-webpart-base": "1.22.2",
     "@microsoft/sp-lodash-subset": "1.22.2",
     "@microsoft/sp-office-ui-fabric-core": "1.22.2",
+    "react": "17.0.1",
+    "react-dom": "17.0.1",
     "tslib": "2.3.1"
   },
   "devDependencies": {
@@ -30,6 +32,8 @@
     "@microsoft/sp-module-interfaces": "1.22.2",
     "@microsoft/eslint-config-spfx": "1.22.2",
     "@microsoft/rush-stack-compiler-4.7": "0.1.1",
+    "@types/react": "17.0.45",
+    "@types/react-dom": "17.0.17",
     "@types/webpack-env": "~1.15.2",
     "ajv": "^6.12.5",
     "eslint": "8.7.0",
