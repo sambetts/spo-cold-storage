@@ -95,6 +95,10 @@ public class Program
             new Migration.Engine.Migration.DbArchiveExclusionSource(
                 sp.GetRequiredService<Config>(),
                 sp.GetRequiredService<ILoggerFactory>().CreateLogger("ArchiveExclusions")));
+        builder.Services.AddSingleton<Migration.Engine.Migration.IArchiveExtensionPolicySource>(sp =>
+            new Migration.Engine.Migration.DbArchiveExtensionPolicySource(
+                sp.GetRequiredService<Config>(),
+                sp.GetRequiredService<ILoggerFactory>().CreateLogger("ArchiveExtensionRules")));
         builder.Services.AddSingleton<Migration.Engine.Migration.IFileReadActivitySource>(sp =>
             new Migration.Engine.Migration.DbFileReadActivitySource(
                 sp.GetRequiredService<Config>(),

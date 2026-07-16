@@ -7,6 +7,7 @@ import { FileBrowser } from "./components/FileBrowser/FileBrowser";
 import { SavingsDashboard } from "./components/Savings/SavingsDashboard";
 import { TransfersLog } from "./components/Transfers/TransfersLog";
 import { ColdStorageDownload } from "./components/ColdStorage/ColdStorageDownload";
+import { ArchiveRules } from "./components/Admin/ArchiveRules";
 
 import "./custom.css";
 
@@ -34,6 +35,7 @@ export default function App() {
         <Route path="/transfers" element={<RequireAuth><TransfersLog /></RequireAuth>} />
         <Route path="/transfers/:jobId" element={<RequireAuth><TransfersLog /></RequireAuth>} />
         <Route path="/savings" element={<RequireAuth><SavingsDashboard /></RequireAuth>} />
+        <Route path="/admin/rules" element={<RequireAuth><ArchiveRules /></RequireAuth>} />
         <Route path="/cold-storage/download/:itemId" element={<RequireAuth><ColdStorageDownload /></RequireAuth>} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>

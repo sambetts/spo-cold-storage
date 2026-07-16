@@ -60,6 +60,30 @@ public interface IArchiveExclusionSource
 }
 
 /// <summary>
+/// The runtime-editable file-extension archiving policy: an exclude (deny) set
+/// and an optional include (allow) set, both of normalised extensions (leading
+/// dot, lower-case). Supplied separately from <see cref="Config"/> so an admin can
+/// change which file types are archived without a redeploy. <c>.url</c> is NOT
+/// carried here — it is always excluded in <see cref="ArchiveEligibilityEvaluator"/>.
+/// </summary>
+public sealed record ArchiveExtensionPolicy(IReadOnlySet<string> Excluded, IReadOnlySet<string> Included)
+{
+    public static readonly ArchiveExtensionPolicy Empty =
+        new(new HashSet<string>(StringComparer.OrdinalIgnoreCase), new HashSet<string>(StringComparer.OrdinalIgnoreCase));
+}
+
+/// <summary>
+/// Supplies the current runtime extension policy. Abstracted so the evaluator can
+/// be unit-tested without a database and so the live implementation can cache DB
+/// reads. Returns <see cref="ArchiveExtensionPolicy.Empty"/> (not null) when no
+/// rules exist, so the evaluator simply falls back to its config baseline.
+/// </summary>
+public interface IArchiveExtensionPolicySource
+{
+    Task<ArchiveExtensionPolicy> GetPolicyAsync(CancellationToken cancellationToken = default);
+}
+
+/// <summary>
 /// Supplies a file's persisted read-activity signal (all-time access count from
 /// indexer analytics) so heavily-read files can be kept out of cold storage
 /// (issue #11). Returns null when no signal is available — the rule then does
@@ -82,17 +106,19 @@ public sealed class ArchiveEligibilityEvaluator : IArchiveEligibilityEvaluator
     private readonly HashSet<string> _excluded;
     private readonly HashSet<string> _included;
     private readonly IArchiveExclusionSource? _exclusionSource;
+    private readonly IArchiveExtensionPolicySource? _extensionPolicySource;
     private readonly IFileReadActivitySource? _readActivitySource;
     private readonly int _maxAccessCount;
 
-    public ArchiveEligibilityEvaluator(Config config, IArchiveExclusionSource? exclusionSource = null, IFileReadActivitySource? readActivitySource = null)
+    public ArchiveEligibilityEvaluator(Config config, IArchiveExclusionSource? exclusionSource = null, IFileReadActivitySource? readActivitySource = null, IArchiveExtensionPolicySource? extensionPolicySource = null)
         : this(
             (config ?? throw new ArgumentNullException(nameof(config))).ColdStorageMinFileSizeBytes,
             config.ColdStorageExcludedExtensions,
             config.ColdStorageIncludedExtensions,
             exclusionSource,
             readActivitySource,
-            config.ColdStorageMaxAccessCount)
+            config.ColdStorageMaxAccessCount,
+            extensionPolicySource)
     {
     }
 
@@ -107,17 +133,19 @@ public sealed class ArchiveEligibilityEvaluator : IArchiveEligibilityEvaluator
         string? includedExtensions,
         IArchiveExclusionSource? exclusionSource = null,
         IFileReadActivitySource? readActivitySource = null,
-        int maxAccessCount = 0)
+        int maxAccessCount = 0,
+        IArchiveExtensionPolicySource? extensionPolicySource = null)
     {
         _minSizeBytes = minSizeBytes > 0 ? minSizeBytes : 0;
         _excluded = ParseExtensions(excludedExtensions);
         // A .url file is a cold-storage placeholder. Archiving one would create a
         // nested/duplicate placeholder and, on a folder re-migration, "archive the
-        // archive". Always exclude it regardless of configuration so a
-        // misconfigured exclude-list can never turn this safety off.
+        // archive". Always exclude it regardless of configuration — including the
+        // runtime extension policy below — so nothing can ever turn this safety off.
         _excluded.Add(".url");
         _included = ParseExtensions(includedExtensions);
         _exclusionSource = exclusionSource;
+        _extensionPolicySource = extensionPolicySource;
         _readActivitySource = readActivitySource;
         _maxAccessCount = maxAccessCount > 0 ? maxAccessCount : 0;
     }
@@ -147,13 +175,25 @@ public sealed class ArchiveEligibilityEvaluator : IArchiveEligibilityEvaluator
 
         var ext = NormalizeExtension(candidate.ServerRelativeUrl);
 
-        if (_included.Count > 0 && (ext.Length == 0 || !_included.Contains(ext)))
+        // Runtime, admin-editable extension policy (DB) layered on top of the
+        // config baseline. .url stays in _excluded no matter what, so a placeholder
+        // can never become archivable by editing rules in the UI.
+        var extPolicy = _extensionPolicySource is null
+            ? ArchiveExtensionPolicy.Empty
+            : await _extensionPolicySource.GetPolicyAsync(cancellationToken).ConfigureAwait(false);
+
+        var includeActive = _included.Count > 0 || extPolicy.Included.Count > 0;
+        if (includeActive)
         {
-            return ArchiveEligibilityResult.Skip(
-                $"file type '{DisplayExtension(ext)}' is not in the archive include-list");
+            var isIncluded = _included.Contains(ext) || extPolicy.Included.Contains(ext);
+            if (ext.Length == 0 || !isIncluded)
+            {
+                return ArchiveEligibilityResult.Skip(
+                    $"file type '{DisplayExtension(ext)}' is not in the archive include-list");
+            }
         }
 
-        if (ext.Length > 0 && _excluded.Contains(ext))
+        if (ext.Length > 0 && (_excluded.Contains(ext) || extPolicy.Excluded.Contains(ext)))
         {
             return ArchiveEligibilityResult.Skip(
                 $"file type '{ext}' is excluded from archiving");

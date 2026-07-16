@@ -41,6 +41,8 @@ export interface ApiClient {
   getResponse(path: string, signal?: AbortSignal): Promise<Response>;
   /** POST JSON + parse JSON. Throws ApiError on non-2xx. */
   post<T>(path: string, body?: unknown, signal?: AbortSignal): Promise<T>;
+  /** DELETE. Throws ApiError on non-2xx. */
+  del(path: string, signal?: AbortSignal): Promise<void>;
 }
 
 export function createApiClient(instance: IPublicClientApplication, account: AccountInfo | undefined): ApiClient {
@@ -82,6 +84,9 @@ export function createApiClient(instance: IPublicClientApplication, account: Acc
         }),
       );
       return response.status === 204 ? (undefined as T) : ((await response.json()) as T);
+    },
+    async del(path: string, signal?: AbortSignal): Promise<void> {
+      await ensureOk(await request(path, { method: "DELETE", signal }));
     },
   };
 }

@@ -265,6 +265,32 @@ public class CreateExclusionRequest
 }
 
 /// <summary>
+/// A runtime file-extension archiving rule as returned by the admin API.
+/// <see cref="Mode"/> is "Exclude" (denylist) or "Include" (allowlist).
+/// </summary>
+public class ExtensionRuleResponse
+{
+    public int Id { get; set; }
+    public string Extension { get; set; } = string.Empty;
+    public string Mode { get; set; } = "Exclude";
+    public string? Description { get; set; }
+    public bool Enabled { get; set; }
+    public string? CreatedBy { get; set; }
+    public DateTime CreatedAt { get; set; }
+}
+
+/// <summary>
+/// Request body for <c>POST /api/exclusions/extensions</c>. <see cref="Extension"/>
+/// is required; <see cref="Mode"/> defaults to "Exclude".
+/// </summary>
+public class CreateExtensionRuleRequest
+{
+    public string? Extension { get; set; }
+    public string? Mode { get; set; }
+    public string? Description { get; set; }
+}
+
+/// <summary>
 /// Result of an orphan-reconciliation run (issue #3).
 /// </summary>
 public class ReconcileSummaryResponse

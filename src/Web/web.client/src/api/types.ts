@@ -148,3 +148,27 @@ export interface DownloadUrl {
   fileName?: string | null;
   contentLength: number;
 }
+
+export type ExtensionRuleMode = "Exclude" | "Include";
+
+/** GET /api/exclusions/extensions — a runtime file-type archiving rule. */
+export interface ExtensionRule {
+  id: number;
+  extension: string;
+  mode: ExtensionRuleMode;
+  description?: string | null;
+  enabled: boolean;
+  createdBy?: string | null;
+  createdAt: string;
+}
+
+/** GET /api/exclusions — a runtime site/folder archiving exclusion scope. */
+export interface ExclusionScope {
+  id: number;
+  siteUrl?: string | null;
+  serverRelativePrefix?: string | null;
+  description?: string | null;
+  enabled: boolean;
+  createdBy?: string | null;
+  createdAt: string;
+}

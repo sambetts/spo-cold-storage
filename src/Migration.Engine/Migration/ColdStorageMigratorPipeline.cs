@@ -42,7 +42,8 @@ public sealed class ColdStorageMigratorPipeline : BaseComponent
         _eligibility = new ArchiveEligibilityEvaluator(
             config,
             new DbArchiveExclusionSource(config, logger),
-            new DbFileReadActivitySource(config, logger));
+            new DbFileReadActivitySource(config, logger),
+            new DbArchiveExtensionPolicySource(config, logger));
         // Only stand up the (per-item, CSOM round-trip) hold detector when enabled.
         _holdDetector = config.ColdStorageSkipRetentionLabeled > 0
             ? new RetentionLabelHoldDetector(logger)

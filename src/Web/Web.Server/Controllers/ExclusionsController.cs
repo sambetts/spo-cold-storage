@@ -105,4 +105,119 @@ public class ExclusionsController(
         CreatedBy = e.CreatedBy,
         CreatedAt = e.CreatedAt,
     };
+
+    // ---- File-extension rules (runtime denylist / allowlist) ----
+
+    [HttpGet("extensions")]
+    public async Task<ActionResult<IEnumerable<ExtensionRuleResponse>>> ListExtensionsAsync(CancellationToken cancellationToken)
+    {
+        if (!await _admin.IsAdminAsync(User, cancellationToken).ConfigureAwait(false))
+        {
+            return Forbid();
+        }
+        var rows = await _db.ColdStorageExtensionRules
+            .AsNoTracking()
+            .OrderBy(r => r.Mode).ThenBy(r => r.Extension)
+            .Select(r => MapExtension(r))
+            .ToListAsync(cancellationToken)
+            .ConfigureAwait(false);
+        return rows;
+    }
+
+    [HttpPost("extensions")]
+    public async Task<ActionResult<ExtensionRuleResponse>> CreateExtensionAsync([FromBody] CreateExtensionRuleRequest request, CancellationToken cancellationToken)
+    {
+        if (!await _admin.IsAdminAsync(User, cancellationToken).ConfigureAwait(false))
+        {
+            return Forbid();
+        }
+        if (request is null || string.IsNullOrWhiteSpace(request.Extension))
+        {
+            return BadRequest("An extension is required, e.g. \".tmp\".");
+        }
+
+        var ext = NormalizeExtension(request.Extension);
+        if (ext.Length <= 1)
+        {
+            return BadRequest("Enter a valid file extension, e.g. \".tmp\".");
+        }
+        // .url is a cold-storage placeholder and is ALWAYS excluded in code — refuse
+        // to create a rule for it so the UI can never imply it's editable.
+        if (string.Equals(ext, ".url", StringComparison.OrdinalIgnoreCase))
+        {
+            return BadRequest("\".url\" is always excluded and cannot be changed — cold-storage placeholders must never be archived.");
+        }
+
+        var mode = ParseMode(request.Mode);
+
+        var already = await _db.ColdStorageExtensionRules
+            .FirstOrDefaultAsync(r => r.Extension == ext && r.Mode == mode, cancellationToken)
+            .ConfigureAwait(false);
+        if (already is not null)
+        {
+            if (!already.Enabled) { already.Enabled = true; await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false); DbArchiveExtensionPolicySource.InvalidateCache(); }
+            return Ok(MapExtension(already));
+        }
+
+        var entity = new ColdStorageExtensionRule
+        {
+            Extension = ext,
+            Mode = mode,
+            Description = request.Description,
+            Enabled = true,
+            CreatedBy = User.GetUpn(),
+            CreatedAt = DateTime.UtcNow,
+        };
+        _db.ColdStorageExtensionRules.Add(entity);
+        await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+        DbArchiveExtensionPolicySource.InvalidateCache();
+
+        _logger.LogInformation("Extension rule {Id} added by {Upn}: '{Ext}' mode={Mode}.",
+            entity.ID, entity.CreatedBy, entity.Extension, entity.Mode);
+        return CreatedAtAction(nameof(ListExtensionsAsync), new { id = entity.ID }, MapExtension(entity));
+    }
+
+    [HttpDelete("extensions/{id:int}")]
+    public async Task<IActionResult> DeleteExtensionAsync(int id, CancellationToken cancellationToken)
+    {
+        if (!await _admin.IsAdminAsync(User, cancellationToken).ConfigureAwait(false))
+        {
+            return Forbid();
+        }
+        var entity = await _db.ColdStorageExtensionRules.FirstOrDefaultAsync(r => r.ID == id, cancellationToken).ConfigureAwait(false);
+        if (entity is null)
+        {
+            return NotFound();
+        }
+        _db.ColdStorageExtensionRules.Remove(entity);
+        await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+        DbArchiveExtensionPolicySource.InvalidateCache();
+
+        _logger.LogInformation("Extension rule {Id} removed by {Upn}.", id, User.GetUpn());
+        return NoContent();
+    }
+
+    private static ExtensionRuleResponse MapExtension(ColdStorageExtensionRule r) => new()
+    {
+        Id = r.ID,
+        Extension = r.Extension,
+        Mode = r.Mode.ToString(),
+        Description = r.Description,
+        Enabled = r.Enabled,
+        CreatedBy = r.CreatedBy,
+        CreatedAt = r.CreatedAt,
+    };
+
+    private static string NormalizeExtension(string raw)
+    {
+        var e = raw.Trim();
+        if (e.Length == 0) return string.Empty;
+        if (!e.StartsWith('.')) e = "." + e;
+        return e.ToLowerInvariant();
+    }
+
+    private static ArchiveExtensionRuleMode ParseMode(string? raw)
+        => string.Equals(raw?.Trim(), "Include", StringComparison.OrdinalIgnoreCase)
+            ? ArchiveExtensionRuleMode.Include
+            : ArchiveExtensionRuleMode.Exclude;
 }

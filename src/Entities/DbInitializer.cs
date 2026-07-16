@@ -247,6 +247,22 @@ BEGIN
     );
 END;";
 
+        const string createExtensionRulesSql = @"
+IF OBJECT_ID('dbo.cold_storage_extension_rules', 'U') IS NULL
+BEGIN
+    CREATE TABLE dbo.cold_storage_extension_rules (
+        id INT IDENTITY(1,1) PRIMARY KEY,
+        extension NVARCHAR(64) NOT NULL,
+        mode INT NOT NULL CONSTRAINT DF_cs_extrule_mode DEFAULT(0),
+        description NVARCHAR(512) NULL,
+        enabled BIT NOT NULL CONSTRAINT DF_cs_extrule_enabled DEFAULT(1),
+        created_by NVARCHAR(256) NULL,
+        created_at DATETIME2 NOT NULL CONSTRAINT DF_cs_extrule_created DEFAULT(SYSUTCDATETIME())
+    );
+END;
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_cs_extension_rules_ext_mode' AND object_id = OBJECT_ID('dbo.cold_storage_extension_rules'))
+    CREATE INDEX IX_cs_extension_rules_ext_mode ON dbo.cold_storage_extension_rules(extension, mode);";
+
         const string createPreArchiveNoticesSql = @"
 IF OBJECT_ID('dbo.pre_archive_notices', 'U') IS NULL
 BEGIN
@@ -296,6 +312,7 @@ IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_migration_job_logs_act
         await context.Database.ExecuteSqlRawAsync(createContainersSql);
         await context.Database.ExecuteSqlRawAsync(createJobsSql);
         await context.Database.ExecuteSqlRawAsync(createExclusionsSql);
+        await context.Database.ExecuteSqlRawAsync(createExtensionRulesSql);
         await context.Database.ExecuteSqlRawAsync(createPreArchiveNoticesSql);
         await context.Database.ExecuteSqlRawAsync(addColdStorageItemColumnsSql);
         await context.Database.ExecuteSqlRawAsync(addColdStorageLogColumnsSql);

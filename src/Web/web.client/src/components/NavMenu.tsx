@@ -2,12 +2,13 @@ import { Link, useLocation } from "react-router-dom";
 import "./NavMenu.css";
 import { AuthenticatedTemplate, useMsal } from "@azure/msal-react";
 import { Button } from "@fluentui/react-components";
-import { Apps24Regular, History24Regular, Home24Regular, Money24Regular } from "@fluentui/react-icons";
+import { Apps24Regular, History24Regular, Home24Regular, Money24Regular, Options24Regular } from "@fluentui/react-icons";
 
 const NAV_ITEMS = [
   { to: "/", label: "Cold Storage", icon: <Home24Regular className="spo-nav-icon" /> },
   { to: "/transfers", label: "Transfers & Logs", icon: <History24Regular className="spo-nav-icon" /> },
   { to: "/savings", label: "Savings", icon: <Money24Regular className="spo-nav-icon" /> },
+  { to: "/admin/rules", label: "Archive Rules", icon: <Options24Regular className="spo-nav-icon" /> },
 ];
 
 export function NavMenu() {

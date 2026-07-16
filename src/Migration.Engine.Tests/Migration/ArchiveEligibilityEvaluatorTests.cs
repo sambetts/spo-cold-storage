@@ -158,10 +158,57 @@ public class ArchiveEligibilityEvaluatorTests
         Assert.True((await sut.EvaluateAsync(File("/x/a.docx"))).IsEligible);
     }
 
-    [Fact]
-    public async Task ReadActivityRule_DisabledWhenThresholdZero()
+    private sealed class FakeExtensionPolicySource : IArchiveExtensionPolicySource
     {
-        var sut = new ArchiveEligibilityEvaluator(0, null, null, readActivitySource: new FakeReadActivitySource(99_999), maxAccessCount: 0);
+        private readonly ArchiveExtensionPolicy _policy;
+        public FakeExtensionPolicySource(string[]? excluded = null, string[]? included = null)
+            => _policy = new ArchiveExtensionPolicy(
+                new HashSet<string>(excluded ?? [], StringComparer.OrdinalIgnoreCase),
+                new HashSet<string>(included ?? [], StringComparer.OrdinalIgnoreCase));
+        public Task<ArchiveExtensionPolicy> GetPolicyAsync(CancellationToken cancellationToken = default)
+            => Task.FromResult(_policy);
+    }
+
+    [Fact]
+    public async Task RuntimeExcludeRule_SkipsMatchingExtension()
+    {
+        var sut = new ArchiveEligibilityEvaluator(0, null, null, extensionPolicySource: new FakeExtensionPolicySource(excluded: [".tmp"]));
+        Assert.False((await sut.EvaluateAsync(File("/x/a.tmp"))).IsEligible);
+        Assert.True((await sut.EvaluateAsync(File("/x/a.docx"))).IsEligible);
+    }
+
+    [Fact]
+    public async Task RuntimeIncludeRule_OnlyAllowsListedExtensions()
+    {
+        var sut = new ArchiveEligibilityEvaluator(0, null, null, extensionPolicySource: new FakeExtensionPolicySource(included: [".docx"]));
+        Assert.True((await sut.EvaluateAsync(File("/x/a.docx"))).IsEligible);
+        Assert.False((await sut.EvaluateAsync(File("/x/a.zip"))).IsEligible);
+    }
+
+    [Fact]
+    public async Task RuntimeAndConfigExcludes_BothApply()
+    {
+        var sut = new ArchiveEligibilityEvaluator(0, ".tmp", null, extensionPolicySource: new FakeExtensionPolicySource(excluded: [".bak"]));
+        Assert.False((await sut.EvaluateAsync(File("/x/a.tmp"))).IsEligible);  // from config
+        Assert.False((await sut.EvaluateAsync(File("/x/a.bak"))).IsEligible);  // from runtime rule
+        Assert.True((await sut.EvaluateAsync(File("/x/a.docx"))).IsEligible);
+    }
+
+    [Fact]
+    public async Task UrlPlaceholder_AlwaysExcluded_EvenWithEmptyRuntimePolicyAndNoConfig()
+    {
+        var sut = new ArchiveEligibilityEvaluator(0, null, null, extensionPolicySource: new FakeExtensionPolicySource());
+        var result = await sut.EvaluateAsync(File("/x/report.docx.url"));
+        Assert.False(result.IsEligible);
+        Assert.Contains("excluded", result.SkipReason);
+    }
+
+    [Fact]
+    public async Task UrlPlaceholder_AlwaysExcluded_EvenIfAnIncludeRuleNamesIt()
+    {
+        // Even if a (mis)configured allow-list contains .url, the hardcoded exclusion wins.
+        var sut = new ArchiveEligibilityEvaluator(0, null, null, extensionPolicySource: new FakeExtensionPolicySource(included: [".url", ".docx"]));
+        Assert.False((await sut.EvaluateAsync(File("/x/a.docx.url"))).IsEligible);
         Assert.True((await sut.EvaluateAsync(File("/x/a.docx"))).IsEligible);
     }
 }
