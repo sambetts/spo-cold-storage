@@ -199,10 +199,20 @@ public class QueueController(
         {
             query = query.Where(i => i.JobId == jobId);
         }
-        else if (!string.IsNullOrWhiteSpace(request?.Status)
-                 && Enum.TryParse<MigrationLifecycleStatus>(request.Status, true, out var st))
+        else if (!string.IsNullOrWhiteSpace(request?.Status))
         {
-            query = query.Where(i => i.Status == st);
+            if (string.Equals(request.Status, "AllFailed", StringComparison.OrdinalIgnoreCase))
+            {
+                query = query.Where(i => FailedStatuses.Contains(i.Status));
+            }
+            else if (Enum.TryParse<MigrationLifecycleStatus>(request.Status, true, out var st))
+            {
+                query = query.Where(i => i.Status == st);
+            }
+            else
+            {
+                return BadRequest($"Unknown status '{request.Status}'. Use a lifecycle status name or 'AllFailed'.");
+            }
             if (!string.IsNullOrWhiteSpace(request.SiteUrl))
             {
                 var site = request.SiteUrl.TrimEnd('/');
@@ -316,16 +326,17 @@ public class QueueController(
     }
 
     // Only failed lifecycle states may be requeued.
-    private static bool IsRequeueable(MigrationLifecycleStatus status) => status switch
-    {
-        MigrationLifecycleStatus.ValidationFailed => true,
-        MigrationLifecycleStatus.CopyToColdStorageFailed => true,
-        MigrationLifecycleStatus.DeleteFailed => true,
-        MigrationLifecycleStatus.PlaceholderFailed => true,
-        MigrationLifecycleStatus.RestoreFailed => true,
-        MigrationLifecycleStatus.PlaceholderRemoveFailed => true,
-        _ => false,
-    };
+    private static readonly MigrationLifecycleStatus[] FailedStatuses =
+    [
+        MigrationLifecycleStatus.ValidationFailed,
+        MigrationLifecycleStatus.CopyToColdStorageFailed,
+        MigrationLifecycleStatus.DeleteFailed,
+        MigrationLifecycleStatus.PlaceholderFailed,
+        MigrationLifecycleStatus.RestoreFailed,
+        MigrationLifecycleStatus.PlaceholderRemoveFailed,
+    ];
+
+    private static bool IsRequeueable(MigrationLifecycleStatus status) => FailedStatuses.Contains(status);
 
     // Reconstruct the bus envelope from the persisted item so the worker can
     // reprocess it. Returns null when required coordinates are missing.

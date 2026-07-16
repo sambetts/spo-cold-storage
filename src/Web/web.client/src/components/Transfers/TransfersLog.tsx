@@ -87,6 +87,8 @@ function TransfersList() {
   const [search, setSearch] = useState("");
   const [result, setResult] = useState<ResultFilter>("all");
   const [auto, setAuto] = useState(false);
+  const [recovering, setRecovering] = useState(false);
+  const [recoverMsg, setRecoverMsg] = useState<string | null>(null);
   const reqId = useRef(0);
 
   const load = useCallback(async () => {
@@ -136,6 +138,44 @@ function TransfersList() {
     return rows;
   }, [jobs, search, result]);
 
+  const totalFailed = useMemo(() => (jobs ?? []).reduce((n, j) => n + j.failedCount, 0), [jobs]);
+
+  const recoverAllFailed = useCallback(async () => {
+    if (
+      !window.confirm(
+        `Recover all failed transfers? Every failed file is re-queued and re-processed from scratch; ` +
+          `a source file is never deleted without a confirmed good copy.`,
+      )
+    ) {
+      return;
+    }
+    setRecovering(true);
+    setRecoverMsg(null);
+    try {
+      const res = await api.post<{ requeued: number; skipped: number; publishFailed: number }>(
+        "/api/admin/queue/requeue",
+        { status: "AllFailed", max: 5000 },
+      );
+      setRecoverMsg(
+        `Recovered ${res.requeued}` +
+          (res.skipped ? `, skipped ${res.skipped}` : "") +
+          (res.publishFailed ? `, ${res.publishFailed} failed to publish` : "") +
+          ".",
+      );
+      await load();
+    } catch (err) {
+      setRecoverMsg(
+        err instanceof ApiError
+          ? err.status === 403
+            ? "Administrator access is required to recover failed transfers."
+            : err.message
+          : String(err),
+      );
+    } finally {
+      setRecovering(false);
+    }
+  }, [api, load]);
+
   return (
     <div style={{ maxWidth: 1200, margin: "0 auto" }}>
       <h2 style={{ margin: "0 0 2px 0" }}>Transfers &amp; logs</h2>
@@ -168,7 +208,18 @@ function TransfersList() {
           Refresh
         </Button>
         <Checkbox label="Auto-refresh" checked={auto} onChange={(_, d) => setAuto(!!d.checked)} />
+        {totalFailed > 0 && (
+          <Button
+            icon={<ArrowSync20Regular />}
+            appearance="primary"
+            disabled={recovering}
+            onClick={() => void recoverAllFailed()}
+          >
+            {recovering ? "Recovering…" : `Recover ${totalFailed} failed`}
+          </Button>
+        )}
       </div>
+      {recoverMsg && <div style={{ fontSize: 13, color: "#605e5c", marginBottom: 12 }}>{recoverMsg}</div>}
 
       {loading && !jobs && <Spinner label="Loading transfers…" size="small" />}
       {error && (
