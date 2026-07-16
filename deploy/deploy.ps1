@@ -583,18 +583,16 @@ $Sql
 Write-Output 'SQL grant applied.'
 `$c.Close()
 "@
-    $enc  = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($inner))
-    $body = @{ command = "powershell -NoProfile -EncodedCommand $enc"; dir = 'site\wwwroot' } | ConvertTo-Json
+    $scmBase = "https://$WebApp.scm.azurewebsites.net"
+    $hdr = @{ Authorization = "Bearer $armToken" }
 
     # The Kudu (scm) site returns 503 for a minute or two right after a zip deploy +
-    # restart while the container warms up. Wait for it to come ready before POSTing
-    # the command, otherwise the grant fails transiently.
+    # restart while the container warms up. Wait for it to come ready first.
     Write-Info 'Waiting for the Web App Kudu (scm) site to be ready…'
     $kuduReady = $false
     for ($k = 1; $k -le 36; $k++) {
         try {
-            Invoke-RestMethod -Method Get -Uri "https://$WebApp.scm.azurewebsites.net/api/settings" `
-                -Headers @{ Authorization = "Bearer $armToken" } -TimeoutSec 30 | Out-Null
+            Invoke-RestMethod -Method Get -Uri "$scmBase/api/settings" -Headers $hdr -TimeoutSec 30 | Out-Null
             $kuduReady = $true; break
         } catch {
             Start-Sleep -Seconds 10
@@ -603,10 +601,23 @@ Write-Output 'SQL grant applied.'
     if ($kuduReady) { Write-Ok 'Kudu site is ready.' }
     else { Write-Info 'Kudu readiness not confirmed after ~6 min; attempting the command anyway.' }
 
-    $resp = Invoke-RestMethod -Method Post -Uri "https://$WebApp.scm.azurewebsites.net/api/command" `
-        -Headers @{ Authorization = "Bearer $armToken" } -ContentType 'application/json' -Body $body
-    if ($resp.ExitCode -ne 0) {
-        throw "Kudu SQL grant failed (exit $($resp.ExitCode)): $($resp.Error) $($resp.Output)"
+    # A 'powershell -EncodedCommand <base64>' one-liner exceeds the cmd.exe ~8KB
+    # command-line limit because the SQL access token is a large JWT. Upload the
+    # script through the Kudu VFS API and run it by path instead. The temp file
+    # holds the short-lived SQL token, so it is deleted in the finally block.
+    $vfsUri = "$scmBase/api/vfs/site/wwwroot/_deploy_sqlgrant.ps1"
+    $vfsHdr = @{ Authorization = "Bearer $armToken"; 'If-Match' = '*' }
+    try {
+        Invoke-RestMethod -Method Put -Uri $vfsUri -Headers $vfsHdr `
+            -ContentType 'application/octet-stream' -Body ([Text.Encoding]::UTF8.GetBytes($inner)) | Out-Null
+        $body = @{ command = 'powershell -NoProfile -ExecutionPolicy Bypass -File _deploy_sqlgrant.ps1'; dir = 'site\wwwroot' } | ConvertTo-Json
+        $resp = Invoke-RestMethod -Method Post -Uri "$scmBase/api/command" -Headers $hdr `
+            -ContentType 'application/json' -Body $body
+        if ($resp.ExitCode -ne 0) {
+            throw "Kudu SQL grant failed (exit $($resp.ExitCode)): $($resp.Error) $($resp.Output)"
+        }
+    } finally {
+        try { Invoke-RestMethod -Method Delete -Uri $vfsUri -Headers $vfsHdr -TimeoutSec 30 | Out-Null } catch { }
     }
 }
 

@@ -1,0 +1,12 @@
+Grant private SQL via Kudu VFS upload (command line was too long)
+
+The powershell -EncodedCommand base64 one-liner posted to Kudu /api/command
+exceeded the cmd.exe ~8KB command-line limit because the embedded SQL access
+token is a large JWT (the command line is too long). Upload the grant script
+through the Kudu VFS API (/api/vfs/site/wwwroot) and execute it by path with
+powershell -File instead; delete the temp script (holds the short-lived token)
+in a finally block. Verified: db_owner granted to both the Web App and Function
+MSIs over the VNet.
+
+Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
+Copilot-Session: 3c9a3d72-9a3c-4b9e-99df-a1acc0409a1b
