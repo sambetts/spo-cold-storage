@@ -2,7 +2,7 @@ import { Log } from '@microsoft/sp-core-library';
 import { BaseListViewCommandSet, Command, IListViewCommandSetExecuteEventParameters, IListViewCommandSetListViewUpdatedParameters } from '@microsoft/sp-listview-extensibility';
 import { AadHttpClient } from '@microsoft/sp-http';
 
-import { ColdStorageApiClient, ColdStorageApiError, IStartMigrationItem } from '../../common/ColdStorageApiClient';import { MigrationProgressDialog } from './MigrationProgressDialog';
+import { ColdStorageApiClient, ColdStorageApiError, IContainerResponse, IStartMigrationItem } from '../../common/ColdStorageApiClient';import { MigrationProgressDialog } from './MigrationProgressDialog';
 
 export interface IColdStorageCommandSetProperties {
   apiBaseUrl: string;
@@ -89,7 +89,7 @@ export default class ColdStorageCommandSet extends BaseListViewCommandSet<IColdS
     const dialog = this.openDialog('Migrate');
     dialog.setStatusMessage('Looking up available cold-storage containers…');
 
-    let target;
+    let target: IContainerResponse | undefined;
     try {
       const containers = await client.listContainers();
       target = containers.find(c => c.canMigrate);
@@ -102,6 +102,7 @@ export default class ColdStorageCommandSet extends BaseListViewCommandSet<IColdS
       dialog.showError('You do not have permission to migrate to any configured cold-storage container.');
       return;
     }
+    const container = target;
 
     const siteUrl = this.context.pageContext.site.absoluteUrl;
     const webUrl = this.context.pageContext.web.absoluteUrl;
@@ -117,19 +118,28 @@ export default class ColdStorageCommandSet extends BaseListViewCommandSet<IColdS
       lastModified: ColdStorageCommandSet.tryParseIsoDate(row.getValueByName('Modified')),
     }));
 
-    dialog.setStatusMessage(`Submitting migration for ${items.length} item${items.length === 1 ? '' : 's'} to container "${target.displayName ?? target.name}"…`);
+    const containerName = container.displayName ?? container.name;
+    const submit = async (): Promise<void> => {
+      dialog.setStatusMessage(`Submitting migration for ${items.length} item${items.length === 1 ? '' : 's'} to container "${containerName}"…`);
+      try {
+        const response = await client.startMigration({
+          siteUrl, webUrl,
+          containerName: container.name,
+          recursive: true,
+          items,
+        });
+        dialog.addAcceptedJob(response.jobId, response, `Migration job (${items.length} item${items.length === 1 ? '' : 's'})`);
+      } catch (err) {
+        dialog.showError(this.describeError(err, 'Failed to submit migration'), () => { void submit(); });
+      }
+    };
 
-    try {
-      const response = await client.startMigration({
-        siteUrl, webUrl,
-        containerName: target.name,
-        recursive: true,
-        items,
-      });
-      dialog.addAcceptedJob(response.jobId, response, `Migration job (${items.length} item${items.length === 1 ? '' : 's'})`);
-    } catch (err) {
-      dialog.showError(this.describeError(err, 'Failed to submit migration'), () => this.runMigrate(event));
-    }
+    // Confirm before submitting — migration replaces the source with a .url shortcut.
+    dialog.confirm({
+      message: `These items will be migrated to cold-storage container “${containerName}”. Each is copied to cold storage and then replaced with a .url shortcut in place — the original is only removed after the copy is verified. Folders include everything inside them.`,
+      confirmLabel: `Migrate ${items.length} item${items.length === 1 ? '' : 's'}`,
+      items: items.map(i => ({ name: ColdStorageCommandSet.basename(i.serverRelativeUrl), kind: i.itemKind })),
+    }, () => { void submit(); });
   }
 
   // ---- Restore ----
@@ -161,29 +171,41 @@ export default class ColdStorageCommandSet extends BaseListViewCommandSet<IColdS
       return;
     }
 
-    dialog.setStatusMessage(
-      folders.length > 0
-        ? `Submitting bulk restore (${placeholders.length} file${placeholders.length === 1 ? '' : 's'} + ${folders.length} folder${folders.length === 1 ? '' : 's'})…`
-        : `Submitting restore for ${placeholders.length} item${placeholders.length === 1 ? '' : 's'}…`,
-    );
-
-    try {
-      const response = await client.startBatchRestore({
-        siteUrl,
-        webUrl,
-        placeholders,
-        folderServerRelativeUrls: folders,
-        conflictBehavior: 'Fail',
-      });
-      dialog.addAcceptedJob(response.jobId, response, `Restore (${response.accepted} item${response.accepted === 1 ? '' : 's'})`);
-      if (response.warnings && response.warnings.length > 0) {
-        dialog.setStatusMessage(`Queued ${response.accepted}; skipped ${response.warnings.length}: ${response.warnings.join('; ')}`);
-      } else if (response.accepted === 0) {
-        dialog.showError('No restorable items were found in the selection.');
+    const submit = async (): Promise<void> => {
+      dialog.setStatusMessage(
+        folders.length > 0
+          ? `Submitting bulk restore (${placeholders.length} file${placeholders.length === 1 ? '' : 's'} + ${folders.length} folder${folders.length === 1 ? '' : 's'})…`
+          : `Submitting restore for ${placeholders.length} item${placeholders.length === 1 ? '' : 's'}…`,
+      );
+      try {
+        const response = await client.startBatchRestore({
+          siteUrl,
+          webUrl,
+          placeholders,
+          folderServerRelativeUrls: folders,
+          conflictBehavior: 'Fail',
+        });
+        dialog.addAcceptedJob(response.jobId, response, `Restore (${response.accepted} item${response.accepted === 1 ? '' : 's'})`);
+        if (response.warnings && response.warnings.length > 0) {
+          dialog.setStatusMessage(`Queued ${response.accepted}; skipped ${response.warnings.length}: ${response.warnings.join('; ')}`);
+        } else if (response.accepted === 0) {
+          dialog.showError('No restorable items were found in the selection.');
+        }
+      } catch (err) {
+        dialog.showError(this.describeError(err, 'Failed to submit bulk restore'), () => { void submit(); });
       }
-    } catch (err) {
-      dialog.showError(this.describeError(err, 'Failed to submit bulk restore'), () => this.runRestore(event));
-    }
+    };
+
+    // Confirm before submitting — restore brings the file(s) back and removes the placeholder.
+    const confirmItems = [
+      ...placeholders.map(p => ({ name: ColdStorageCommandSet.basename(p).replace(/\.url$/i, ''), kind: 'File' as const })),
+      ...folders.map(f => ({ name: ColdStorageCommandSet.basename(f), kind: 'Folder' as const })),
+    ];
+    dialog.confirm({
+      message: 'These items will be restored from cold storage back into this library. Each archived file is downloaded and its .url placeholder is replaced with the original. Folders restore everything archived beneath them.',
+      confirmLabel: `Restore ${confirmItems.length} item${confirmItems.length === 1 ? '' : 's'}`,
+      items: confirmItems,
+    }, () => { void submit(); });
   }
 
   // ---- Status (browse jobs) ----
@@ -247,5 +269,12 @@ export default class ColdStorageCommandSet extends BaseListViewCommandSet<IColdS
     const s = typeof value === 'string' ? value : String(value);
     const d = new Date(s);
     return isNaN(d.getTime()) ? undefined : d.toISOString();
+  }
+
+  private static basename(serverRelativeUrl: string): string {
+    if (!serverRelativeUrl) return '';
+    const trimmed = serverRelativeUrl.replace(/\/+$/, '');
+    const idx = trimmed.lastIndexOf('/');
+    return idx >= 0 ? trimmed.substring(idx + 1) : trimmed;
   }
 }

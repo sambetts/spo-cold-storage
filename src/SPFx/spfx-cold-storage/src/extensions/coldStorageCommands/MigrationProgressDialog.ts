@@ -31,6 +31,7 @@ import {
 import { isTerminal } from '../../common/statusFormat';
 import {
   DialogPhase,
+  IConfirmRequest,
   IDialogViewHandlers,
   IDialogViewState,
   ITrackedJob,
@@ -56,6 +57,9 @@ export class MigrationProgressDialog {
   private statusMessage = '';
   private errorMessage?: string;
   private retryHandler?: () => void;
+  private confirmRequest?: IConfirmRequest;
+  private confirmHandler?: () => void;
+  private refreshLibraryOnClose = false;
   private jobs: ITrackedJob[] = [];
   private workerHealth?: IWorkerHealth;
   private startedAt = Date.now();
@@ -87,6 +91,22 @@ export class MigrationProgressDialog {
     if (this.closed) return;
     this.statusMessage = message;
     this.render();
+  }
+
+  /**
+   * Show a pre-submit confirmation screen listing exactly what will be
+   * migrated/restored. The job is only submitted when the user clicks the
+   * confirm button, which invokes {@link onConfirm}. Cancelling closes the
+   * dialog without touching the server.
+   */
+  public confirm(request: IConfirmRequest, onConfirm: () => void): void {
+    if (this.closed) return;
+    this.confirmRequest = request;
+    this.confirmHandler = onConfirm;
+    this.errorMessage = undefined;
+    this.phase = 'confirm';
+    this.render();
+    window.setTimeout(() => { if (!this.closed) this.focusFirst(); }, 0);
   }
 
   public addAcceptedJob(jobId: string, acceptResponse: IAcceptedJobResponse, label?: string): void {
@@ -149,17 +169,21 @@ export class MigrationProgressDialog {
       phase: this.phase,
       statusMessage: this.statusMessage,
       errorMessage: this.errorMessage,
+      confirm: this.confirmRequest,
       jobs: this.jobs,
       workerHealth: this.workerHealth,
       maximised: this.maximised,
       expandedFolders: this.expandedFolders,
       hasRetry: !!this.retryHandler,
+      refreshOnClose: this.refreshLibraryOnClose,
     };
     const handlers: IDialogViewHandlers = {
       onRefresh: () => this.handleRefreshClick(),
       onToggleMaximise: () => { this.maximised = !this.maximised; this.render(); },
-      onClose: () => this.close(),
+      onClose: () => this.userClose(),
       onRetry: () => this.handleRetry(),
+      onConfirm: () => this.handleConfirm(),
+      onCancel: () => this.close(),
       onToggleFolder: (nsKey) => this.toggleFolder(nsKey),
       onToggleAllFolders: (nsKeys, expand) => this.toggleAllFolders(nsKeys, expand),
     };
@@ -188,11 +212,35 @@ export class MigrationProgressDialog {
     retry?.();
   }
 
+  private handleConfirm(): void {
+    const submit = this.confirmHandler;
+    this.confirmHandler = undefined;
+    this.confirmRequest = undefined;
+    this.phase = 'submitting';
+    this.statusMessage = this.operation === 'Restore' ? 'Submitting restore…' : 'Submitting migration…';
+    this.render();
+    submit?.();
+  }
+
+  /**
+   * User-initiated close (✕ / Esc). When a migrate/restore job has finished,
+   * reload the page so the document library reflects the new placeholders /
+   * restored files. Programmatic {@link close} never reloads.
+   */
+  private userClose(): void {
+    if (this.refreshLibraryOnClose && !this.closed) {
+      this.close();
+      try { window.location.reload(); } catch { /* ignore */ }
+      return;
+    }
+    this.close();
+  }
+
   // ----- Keyboard / focus -----
 
   private attachKeyListeners(): void {
     this.escListener = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') { e.stopPropagation(); this.close(); }
+      if (e.key === 'Escape') { e.stopPropagation(); this.userClose(); }
     };
     window.addEventListener('keydown', this.escListener, true);
 
@@ -343,6 +391,12 @@ export class MigrationProgressDialog {
 
     if (allTerminal) {
       this.phase = 'terminal';
+      // A finished migrate/restore has changed this library (new .url placeholders
+      // or restored files). Reload the page when the user closes the dialog so the
+      // list view reflects the change. Status/browse mode never sets this.
+      if (this.operation === 'Migrate' || this.operation === 'Restore') {
+        this.refreshLibraryOnClose = true;
+      }
       this.render();
       return; // stop polling
     }

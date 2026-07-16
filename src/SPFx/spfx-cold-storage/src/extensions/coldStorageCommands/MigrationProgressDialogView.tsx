@@ -11,7 +11,20 @@ import {
 } from '../../common/ColdStorageApiClient';
 import { colorFor, describeStatus, formatLabel, isTerminal } from '../../common/statusFormat';
 
-export type DialogPhase = 'submitting' | 'polling' | 'terminal' | 'expired' | 'error' | 'browse';
+export type DialogPhase = 'submitting' | 'confirm' | 'polling' | 'terminal' | 'expired' | 'error' | 'browse';
+
+/** A single item shown on the pre-submit confirmation screen. */
+export interface IConfirmItem {
+  name: string;
+  kind: 'File' | 'Folder';
+}
+
+/** The pre-submit confirmation prompt (issue: confirm before submitting a job). */
+export interface IConfirmRequest {
+  message: string;
+  confirmLabel: string;
+  items: IConfirmItem[];
+}
 
 /** A job the dialog is tracking (accepted for polling, or listed in browse mode). */
 export interface ITrackedJob {
@@ -30,11 +43,14 @@ export interface IDialogViewState {
   phase: DialogPhase;
   statusMessage: string;
   errorMessage?: string;
+  confirm?: IConfirmRequest;
   jobs: ITrackedJob[];
   workerHealth?: IWorkerHealth;
   maximised: boolean;
   expandedFolders: ReadonlySet<string>;
   hasRetry: boolean;
+  /** When true, closing the dialog reloads the page so the library shows the changes. */
+  refreshOnClose: boolean;
 }
 
 export interface IDialogViewHandlers {
@@ -42,6 +58,8 @@ export interface IDialogViewHandlers {
   onToggleMaximise(): void;
   onClose(): void;
   onRetry(): void;
+  onConfirm(): void;
+  onCancel(): void;
   onToggleFolder(nsKey: string): void;
   onToggleAllFolders(nsKeys: string[], expand: boolean): void;
 }
@@ -418,9 +436,63 @@ const WorkerBannerView: React.FC<{ health: IWorkerHealth; jobs: ITrackedJob[] }>
   return <Banner kind="info">The background worker is online and processing — queued items will start shortly.</Banner>;
 };
 
+const ConfirmView: React.FC<{
+  operation: DialogMode; confirm: IConfirmRequest; onConfirm: () => void; onCancel: () => void;
+}> = ({ operation, confirm, onConfirm, onCancel }) => {
+  const MAX_SHOWN = 100;
+  const shown = confirm.items.slice(0, MAX_SHOWN);
+  const overflow = confirm.items.length - shown.length;
+  const primary: React.CSSProperties = {
+    background: operation === 'Migrate' ? '#0078d4' : '#107c10', color: '#fff', border: 'none',
+    padding: '8px 18px', borderRadius: '2px', cursor: 'pointer', fontSize: '14px', fontWeight: 600,
+  };
+  const secondary: React.CSSProperties = {
+    background: '#fff', color: '#323130', border: '1px solid #8a8886',
+    padding: '8px 18px', borderRadius: '2px', cursor: 'pointer', fontSize: '14px',
+  };
+  return (
+    <div>
+      <Banner kind={operation === 'Migrate' ? 'warn' : 'info'}>{confirm.message}</Banner>
+      <div style={{ fontSize: '12px', fontWeight: 600, color: '#605e5c', margin: '4px 0 6px' }}>
+        {confirm.items.length} item{confirm.items.length === 1 ? '' : 's'} selected
+      </div>
+      <div style={{ maxHeight: '38vh', overflow: 'auto', border: '1px solid #edebe9', borderRadius: '2px' }}>
+        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px' }}>
+          <tbody>
+            {shown.map((it, i) => (
+              <tr key={i} style={{ borderBottom: '1px solid #f3f2f1' }}>
+                <td style={{ padding: '5px 10px', width: '18px' }}>{it.kind === 'Folder' ? '📁' : '📄'}</td>
+                <td style={{ padding: '5px 10px', wordBreak: 'break-all' }}>{it.name}</td>
+                <td style={{ padding: '5px 10px', color: '#605e5c', fontSize: '12px', whiteSpace: 'nowrap' }}>{it.kind}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {overflow > 0 && (
+        <div style={{ fontSize: '12px', color: '#605e5c', marginTop: '6px' }}>…and {overflow} more</div>
+      )}
+      <div style={{ display: 'flex', gap: '8px', marginTop: '16px' }}>
+        <button type="button" onClick={onConfirm} style={primary}>{confirm.confirmLabel}</button>
+        <button type="button" onClick={onCancel} style={secondary}>Cancel</button>
+      </div>
+    </div>
+  );
+};
+
 const DialogBody: React.FC<{ state: IDialogViewState; handlers: IDialogViewHandlers }> = ({ state, handlers }) => {
   if (state.phase === 'submitting' && state.jobs.length === 0) {
     return <Spinner message={state.statusMessage || 'Working…'} />;
+  }
+  if (state.phase === 'confirm' && state.confirm) {
+    return (
+      <ConfirmView
+        operation={state.operation}
+        confirm={state.confirm}
+        onConfirm={handlers.onConfirm}
+        onCancel={handlers.onCancel}
+      />
+    );
   }
   if (state.phase === 'error') {
     return (
@@ -450,9 +522,10 @@ const DialogBody: React.FC<{ state: IDialogViewState; handlers: IDialogViewHandl
       )}
       {state.phase === 'terminal' && (
         <Banner kind="ok" bold>
-          {allJobsSucceeded(state.jobs)
+          {(allJobsSucceeded(state.jobs)
             ? 'All items reached a final state.'
-            : 'All items have finished — some did not complete successfully (see details below).'}
+            : 'All items have finished — some did not complete successfully (see details below).')
+            + (state.refreshOnClose ? ' Close this dialog to refresh the library and see the changes.' : '')}
         </Banner>
       )}
 
@@ -528,7 +601,9 @@ export const MigrationProgressDialogView: React.FC<{ state: IDialogViewState; ha
 
         <div style={{ padding: '10px 20px 14px', borderTop: '1px solid #edebe9', background: '#faf9f8' }}>
           <p style={{ margin: 0, fontSize: '12px', color: '#605e5c', lineHeight: 1.4 }}>
-            Closing this dialog does not cancel the job — the server will keep working in the background and the cold-storage status column will update.
+            {state.refreshOnClose
+              ? 'Closing this dialog will refresh the document library so the changes appear. The job itself already finished on the server.'
+              : 'Closing this dialog does not cancel the job — the server will keep working in the background and the cold-storage status column will update.'}
           </p>
         </div>
       </div>
