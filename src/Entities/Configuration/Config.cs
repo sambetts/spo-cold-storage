@@ -50,6 +50,15 @@ public class Config(Microsoft.Extensions.Configuration.IConfiguration config) : 
     public int ColdStorageMinFileSizeBytes { get; set; }
 
     /// <summary>
+    /// Maximum number of files a single migrate request may enqueue (folders are
+    /// expanded to their files first). Guards one submit from queueing an unbounded
+    /// number of items; when the cap is hit the caller is warned. 0 or less falls
+    /// back to the built-in default (5000).
+    /// </summary>
+    [ConfigValue(true)]
+    public int ColdStorageMaxFilesPerRequest { get; set; } = 5000;
+
+    /// <summary>
     /// Comma/semicolon-separated list of file extensions that must NEVER be
     /// archived, e.g. <c>.tmp;.ds_store;.lnk</c>. Leading dots optional, case
     /// insensitive. Defaults to <c>.url</c> so cold-storage placeholder files are

@@ -106,7 +106,7 @@ public class MigrationsController(
         // be migrated). Files are de-duplicated so a file selected both directly and
         // via its parent folder is only queued once, and a request-wide file cap keeps
         // one submit from enqueueing an unbounded number of items.
-        const int requestFileCap = 5000;
+        var requestFileCap = _config.ColdStorageMaxFilesPerRequest > 0 ? _config.ColdStorageMaxFilesPerRequest : 5000;
         var expandedItems = new List<StartMigrationItem>();
         var seenUrls = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var dto in request.Items)
@@ -115,6 +115,11 @@ public class MigrationsController(
             {
                 emptyPaths++;
                 continue;
+            }
+
+            if (expandedItems.Count >= requestFileCap)
+            {
+                break;
             }
 
             if (dto.ItemKind == ColdStorageItemKind.Folder)
@@ -144,6 +149,11 @@ public class MigrationsController(
             {
                 expandedItems.Add(dto);
             }
+        }
+
+        if (expandedItems.Count >= requestFileCap)
+        {
+            warnings.Add($"This request hit the {requestFileCap:N0}-file limit; not all files in the selection were queued. Migrate the remaining subfolders separately, or raise ColdStorageMaxFilesPerRequest.");
         }
 
         foreach (var dto in expandedItems)

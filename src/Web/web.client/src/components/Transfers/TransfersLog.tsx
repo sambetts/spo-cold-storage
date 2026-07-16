@@ -575,31 +575,59 @@ function TransferDetail({ jobId }: { jobId: string }) {
   const api = useApi();
   const [job, setJob] = useState<JobStatus | null>(null);
   const [logs, setLogs] = useState<JobLogEntry[] | null>(null);
+  const [logsOpen, setLogsOpen] = useState(false);
+  const [logsLoading, setLogsLoading] = useState(false);
+  const [logTake, setLogTake] = useState(500);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [requeueing, setRequeueing] = useState(false);
   const [requeueMsg, setRequeueMsg] = useState<string | null>(null);
 
-  const load = useCallback(async () => {
-    setLoading(true);
+  const loadJob = useCallback(async () => {
     setError(null);
     try {
-      const [j, l] = await Promise.all([
-        api.get<JobStatus>(`/api/jobs/${jobId}`),
-        api.get<JobLogEntry[]>(`/api/jobs/${jobId}/logs?take=1000`),
-      ]);
-      setJob(j);
-      setLogs(l);
-      setLoading(false);
+      setJob(await api.get<JobStatus>(`/api/jobs/${jobId}`));
     } catch (err) {
       setError(err instanceof ApiError ? err.message : String(err));
+    } finally {
       setLoading(false);
     }
   }, [api, jobId]);
 
+  const loadLogs = useCallback(
+    async (take: number) => {
+      setLogsLoading(true);
+      try {
+        setLogs(await api.get<JobLogEntry[]>(`/api/jobs/${jobId}/logs?take=${take}`));
+      } catch {
+        /* keep the previous logs on a transient error */
+      } finally {
+        setLogsLoading(false);
+      }
+    },
+    [api, jobId],
+  );
+
+  const refresh = useCallback(async () => {
+    await loadJob();
+    if (logsOpen) await loadLogs(logTake);
+  }, [loadJob, loadLogs, logsOpen, logTake]);
+
+  const loadMoreLogs = useCallback(() => {
+    const next = Math.min(logTake + 1000, 5000);
+    setLogTake(next);
+    void loadLogs(next);
+  }, [logTake, loadLogs]);
+
   useEffect(() => {
-    void load();
-  }, [load]);
+    void loadJob();
+  }, [loadJob]);
+
+  // Fetch logs lazily the first time the timeline is expanded, so the 8s
+  // auto-refresh below doesn't pull up to 1,000 log rows on every tick.
+  useEffect(() => {
+    if (logsOpen && logs === null && !logsLoading) void loadLogs(logTake);
+  }, [logsOpen, logs, logsLoading, loadLogs, logTake]);
 
   const failedCount = useMemo(() => (job?.items ?? []).filter((i) => isFailedStatus(i.status)).length, [job]);
 
@@ -634,9 +662,9 @@ function TransferDetail({ jobId }: { jobId: string }) {
   // Auto-refresh while the transfer is still in progress; stops once terminal.
   useEffect(() => {
     if (!inProgress) return;
-    const t = setInterval(() => void load(), 8000);
+    const t = setInterval(() => void refresh(), 8000);
     return () => clearInterval(t);
-  }, [inProgress, load]);
+  }, [inProgress, refresh]);
 
   const requeue = useCallback(async () => {
     if (!job) return;
@@ -661,7 +689,7 @@ function TransferDetail({ jobId }: { jobId: string }) {
           (res.publishFailed ? `, ${res.publishFailed} failed to publish` : "") +
           ".",
       );
-      await load();
+      await refresh();
     } catch (err) {
       setRequeueMsg(
         err instanceof ApiError
@@ -673,7 +701,7 @@ function TransferDetail({ jobId }: { jobId: string }) {
     } finally {
       setRequeueing(false);
     }
-  }, [api, job, failedCount, load]);
+  }, [api, job, failedCount, refresh]);
 
   return (
     <div style={{ maxWidth: 1200, margin: "0 auto" }}>
@@ -681,7 +709,7 @@ function TransferDetail({ jobId }: { jobId: string }) {
         <Link to="/transfers" style={{ display: "inline-flex", alignItems: "center", gap: 4, color: "#0f6cbd", textDecoration: "none" }}>
           <ArrowLeft20Regular /> All transfers
         </Link>
-        <Button icon={<ArrowClockwise20Regular />} appearance="subtle" size="small" onClick={() => void load()}>
+        <Button icon={<ArrowClockwise20Regular />} appearance="subtle" size="small" onClick={() => void refresh()}>
           Refresh
         </Button>
         {failedCount > 0 && (
@@ -802,46 +830,63 @@ function TransferDetail({ jobId }: { jobId: string }) {
             )}
           </div>
 
-          <h3 style={{ margin: "0 0 8px 0", fontSize: 15 }}>Log timeline</h3>
-          <div style={{ border: "1px solid #edebe9", borderRadius: 8, overflow: "hidden" }}>
-            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5 }}>
-              <tbody>
-                {(logs ?? []).map((log, i) => (
-                  <tr key={i} style={{ borderTop: i === 0 ? "none" : "1px solid #f3f2f1" }}>
-                    <td style={{ ...td, whiteSpace: "nowrap", color: "#605e5c" }} title={formatDateTime(log.timestamp)}>
-                      {formatDateTime(log.timestamp)}
-                    </td>
-                    <td style={{ ...td, whiteSpace: "nowrap" }}>
-                      <span
-                        style={{
-                          fontWeight: 600,
-                          color: isErrorLevel(log.level) ? "#a4262c" : isWarnLevel(log.level) ? "#835c00" : "#605e5c",
-                        }}
-                      >
-                        {describeLogLevel(log.level)}
-                      </span>
-                    </td>
-                    <td style={td}>
-                      {log.message}
-                      {log.exception && (
-                        <details style={{ marginTop: 4 }}>
-                          <summary style={{ cursor: "pointer", color: "#605e5c" }}>Exception</summary>
-                          <pre style={{ whiteSpace: "pre-wrap", wordBreak: "break-word", fontSize: 11, color: "#a4262c" }}>
-                            {log.exception}
-                          </pre>
-                        </details>
-                      )}
-                    </td>
-                  </tr>
-                ))}
-                {logs && logs.length === 0 && (
-                  <tr>
-                    <td style={{ ...td, color: "#605e5c" }}>No log entries yet.</td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
+          <button
+            type="button"
+            onClick={() => setLogsOpen((v) => !v)}
+            aria-expanded={logsOpen}
+            style={{ ...disclosureHeaderStyle, padding: "6px 0", fontSize: 15, fontWeight: 600 }}
+          >
+            <span style={{ color: "#605e5c" }}>{logsOpen ? "▾" : "▸"}</span> Log timeline
+            {logsLoading && <Spinner size="tiny" />}
+          </button>
+          {logsOpen && (
+            <div style={{ border: "1px solid #edebe9", borderRadius: 8, overflow: "hidden" }}>
+              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5 }}>
+                <tbody>
+                  {(logs ?? []).map((log, i) => (
+                    <tr key={i} style={{ borderTop: i === 0 ? "none" : "1px solid #f3f2f1" }}>
+                      <td style={{ ...td, whiteSpace: "nowrap", color: "#605e5c" }} title={formatDateTime(log.timestamp)}>
+                        {formatDateTime(log.timestamp)}
+                      </td>
+                      <td style={{ ...td, whiteSpace: "nowrap" }}>
+                        <span
+                          style={{
+                            fontWeight: 600,
+                            color: isErrorLevel(log.level) ? "#a4262c" : isWarnLevel(log.level) ? "#835c00" : "#605e5c",
+                          }}
+                        >
+                          {describeLogLevel(log.level)}
+                        </span>
+                      </td>
+                      <td style={td}>
+                        {log.message}
+                        {log.exception && (
+                          <details style={{ marginTop: 4 }}>
+                            <summary style={{ cursor: "pointer", color: "#605e5c" }}>Exception</summary>
+                            <pre style={{ whiteSpace: "pre-wrap", wordBreak: "break-word", fontSize: 11, color: "#a4262c" }}>
+                              {log.exception}
+                            </pre>
+                          </details>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                  {logs && logs.length === 0 && (
+                    <tr>
+                      <td style={{ ...td, color: "#605e5c" }}>No log entries yet.</td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+              {logs && logs.length >= logTake && logTake < 5000 && (
+                <div style={{ padding: 8, textAlign: "center", borderTop: "1px solid #f3f2f1" }}>
+                  <Button size="small" appearance="subtle" disabled={logsLoading} onClick={loadMoreLogs}>
+                    {logsLoading ? "Loading…" : "Load older entries"}
+                  </Button>
+                </div>
+              )}
+            </div>
+          )}
         </>
       )}
     </div>

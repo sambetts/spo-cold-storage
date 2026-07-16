@@ -47,6 +47,20 @@ export default defineConfig({
             '@': fileURLToPath(new URL('./src', import.meta.url))
         }
     },
+    build: {
+        rollupOptions: {
+            output: {
+                // Split the large third-party libraries into separate, long-cacheable
+                // chunks so the initial app payload is smaller and vendor code isn't
+                // re-downloaded on every app deploy.
+                manualChunks: {
+                    react: ['react', 'react-dom', 'react-router-dom'],
+                    fluentui: ['@fluentui/react-components', '@fluentui/react-icons'],
+                    msal: ['@azure/msal-browser', '@azure/msal-react'],
+                },
+            },
+        },
+    },
     server: {
         proxy: {
             "/api": {
