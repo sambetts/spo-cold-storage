@@ -132,6 +132,27 @@ public class Program
         }
 
         // https://learn.microsoft.com/en-us/visualstudio/javascript/tutorial-asp-net-core-with-react?view=vs-2022#publish-the-project
+
+        // In non-development, translate unhandled exceptions into a JSON 500 that
+        // still carries the CORS headers. Without this, a server-side error returns
+        // a bare 500 whose missing Access-Control-Allow-Origin makes the browser
+        // report a misleading "blocked by CORS policy" instead of the real error.
+        if (!app.Environment.IsDevelopment())
+        {
+            app.UseExceptionHandler(errorApp => errorApp.Run(async context =>
+            {
+                var origin = context.Request.Headers.Origin.ToString();
+                if (!string.IsNullOrEmpty(origin) && allowedOrigins.Contains(origin, StringComparer.OrdinalIgnoreCase))
+                {
+                    context.Response.Headers["Access-Control-Allow-Origin"] = origin;
+                    context.Response.Headers.Append("Vary", "Origin");
+                }
+                context.Response.StatusCode = 500;
+                context.Response.ContentType = "application/json";
+                await context.Response.WriteAsJsonAsync(new { error = "An unexpected server error occurred. Check the server logs / Application Insights." });
+            }));
+        }
+
         app.UseDefaultFiles();
         app.UseStaticFiles();
 

@@ -1,4 +1,4 @@
-import { CSSProperties, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { CSSProperties, MouseEvent as ReactMouseEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { Badge, Button, Checkbox, Input, Select, Spinner } from "@fluentui/react-components";
 import { ArrowClockwise20Regular, ArrowLeft20Regular, ArrowSync20Regular } from "@fluentui/react-icons";
@@ -8,6 +8,80 @@ import { describeLogLevel, describeOperation, describeStatus, isErrorLevel, isFa
 import { fileName, formatDateTime, formatRelative } from "../../utils/format";
 
 const REFRESH_MS = 10000;
+
+// Resizable columns for the transfers table. Widths persist in localStorage so a
+// user's layout survives reloads. The trailing "Files" column is auto-sized so it
+// absorbs any remaining width.
+const RESIZABLE_COLUMNS = [
+  { key: "when", label: "When" },
+  { key: "operation", label: "Operation" },
+  { key: "status", label: "Status" },
+  { key: "site", label: "Site" },
+  { key: "requestedBy", label: "Requested by" },
+] as const;
+type ColKey = (typeof RESIZABLE_COLUMNS)[number]["key"];
+const DEFAULT_COL_WIDTHS: Record<ColKey, number> = {
+  when: 90,
+  operation: 110,
+  status: 150,
+  site: 340,
+  requestedBy: 280,
+};
+const COL_WIDTHS_KEY = "spocs.transfers.colWidths";
+const MIN_COL_WIDTH = 60;
+
+function useColumnWidths() {
+  const [widths, setWidths] = useState<Record<ColKey, number>>(() => {
+    try {
+      const raw = localStorage.getItem(COL_WIDTHS_KEY);
+      if (raw) return { ...DEFAULT_COL_WIDTHS, ...(JSON.parse(raw) as Partial<Record<ColKey, number>>) };
+    } catch {
+      /* ignore malformed storage */
+    }
+    return DEFAULT_COL_WIDTHS;
+  });
+
+  const startResize = useCallback(
+    (key: ColKey, e: ReactMouseEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const startX = e.clientX;
+      const startWidth = widths[key];
+      const onMove = (ev: MouseEvent) =>
+        setWidths((prev) => ({ ...prev, [key]: Math.max(MIN_COL_WIDTH, startWidth + (ev.clientX - startX)) }));
+      const onUp = () => {
+        window.removeEventListener("mousemove", onMove);
+        window.removeEventListener("mouseup", onUp);
+        setWidths((prev) => {
+          try {
+            localStorage.setItem(COL_WIDTHS_KEY, JSON.stringify(prev));
+          } catch {
+            /* ignore storage write errors */
+          }
+          return prev;
+        });
+      };
+      window.addEventListener("mousemove", onMove);
+      window.addEventListener("mouseup", onUp);
+    },
+    [widths],
+  );
+
+  return { widths, startResize };
+}
+
+function ResizeHandle({ onMouseDown }: { onMouseDown: (e: ReactMouseEvent) => void }) {
+  return (
+    <span
+      role="separator"
+      aria-orientation="vertical"
+      aria-label="Resize column"
+      onMouseDown={onMouseDown}
+      onClick={(e) => e.stopPropagation()}
+      style={{ position: "absolute", top: 0, right: 0, height: "100%", width: 10, cursor: "col-resize", userSelect: "none" }}
+    />
+  );
+}
 
 function StatusBadge({ status }: { status: JobSummary["status"] }) {
   const d = describeStatus(status);
@@ -80,6 +154,7 @@ type ResultFilter = "all" | "failures" | "inprogress" | "completed";
 function TransfersList() {
   const api = useApi();
   const navigate = useNavigate();
+  const { widths, startResize } = useColumnWidths();
   const [jobs, setJobs] = useState<JobSummary[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -268,15 +343,22 @@ function TransfersList() {
       )}
 
       {jobs && !error && (
-        <div style={{ border: "1px solid #edebe9", borderRadius: 8, overflow: "hidden" }}>
-          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+        <div style={{ border: "1px solid #edebe9", borderRadius: 8, overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13, tableLayout: "fixed" }}>
+            <colgroup>
+              {RESIZABLE_COLUMNS.map((c) => (
+                <col key={c.key} style={{ width: widths[c.key] }} />
+              ))}
+              <col />
+            </colgroup>
             <thead>
               <tr style={{ background: "#faf9f8", textAlign: "left", color: "#605e5c" }}>
-                <th style={th}>When</th>
-                <th style={th}>Operation</th>
-                <th style={th}>Status</th>
-                <th style={th}>Site</th>
-                <th style={th}>Requested by</th>
+                {RESIZABLE_COLUMNS.map((c) => (
+                  <th key={c.key} style={{ ...th, position: "relative" }}>
+                    {c.label}
+                    <ResizeHandle onMouseDown={(e) => startResize(c.key, e)} />
+                  </th>
+                ))}
                 <th style={th}>Files</th>
               </tr>
             </thead>
@@ -294,7 +376,7 @@ function TransfersList() {
                   <td style={td}>
                     <StatusBadge status={job.status} />
                   </td>
-                  <td style={{ ...td, maxWidth: 320, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={job.siteUrl}>
+                  <td style={td} title={job.siteUrl}>
                     {job.siteUrl}
                   </td>
                   <td style={td}>{job.requestedByUpn}</td>
@@ -535,7 +617,7 @@ function TransferDetail({ jobId }: { jobId: string }) {
 }
 
 const th: CSSProperties = { padding: "10px 12px", fontWeight: 600 };
-const td: CSSProperties = { padding: "10px 12px", verticalAlign: "top" };
+const td: CSSProperties = { padding: "10px 12px", verticalAlign: "top", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" };
 
 export function TransfersLog() {
   const { jobId } = useParams<{ jobId?: string }>();
