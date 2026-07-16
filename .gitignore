@@ -383,3 +383,8 @@ src/SPO.ColdStorage.Web/ClientApp/src/authConfig - dev.js
 
 # Azure Functions local settings
 local.settings.json
+
+# Local diagnostic / deploy scratch (never commit)
+/.check-*.ps1
+/.deploy-fn*
+
