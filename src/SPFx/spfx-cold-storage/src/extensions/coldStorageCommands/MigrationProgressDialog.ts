@@ -48,6 +48,13 @@ export class MigrationProgressDialog {
   private bodyEl?: HTMLDivElement;
   private closeButton?: HTMLButtonElement;
   private previouslyFocused?: HTMLElement;
+  private maximised = false;
+  private maxButton?: HTMLButtonElement;
+  // Folder keys (namespaced by jobId) the user has expanded. Persisted across
+  // the 3s re-renders so a poll never collapses what the user opened. Folders
+  // are collapsed by default so a job with thousands of files renders only a
+  // handful of folder headers (fast) instead of one giant row-per-file table.
+  private readonly expandedFolders = new Set<string>();
 
   private phase: DialogPhase = 'submitting';
   private statusMessage = '';
@@ -204,7 +211,6 @@ export class MigrationProgressDialog {
     Object.assign(card.style, {
       background: '#fff', color: '#201f1e', borderRadius: '4px',
       boxShadow: '0 8px 32px rgba(0,0,0,0.32)',
-      width: 'min(720px, 92vw)', maxHeight: '86vh',
       display: 'flex', flexDirection: 'column', overflow: 'hidden',
       outline: 'none',
     } as CSSStyleDeclaration);
@@ -222,17 +228,24 @@ export class MigrationProgressDialog {
                        : this.operation === 'Restore' ? 'Restore from cold storage'
                        : 'Cold storage status';
     Object.assign(title.style, { margin: '0', fontSize: '18px', fontWeight: '600' } as CSSStyleDeclaration);
-    const close = document.createElement('button');
-    close.type = 'button';
-    close.setAttribute('aria-label', 'Close');
-    close.textContent = '\u2715';
-    Object.assign(close.style, {
-      background: 'transparent', border: 'none', cursor: 'pointer',
-      fontSize: '16px', padding: '4px 8px', color: '#605e5c',
-    } as CSSStyleDeclaration);
-    close.onclick = () => this.close();
+
+    // Right-side header actions: Refresh · Maximise · Close.
+    const actions = document.createElement('div');
+    Object.assign(actions.style, { display: 'flex', alignItems: 'center', gap: '4px' } as CSSStyleDeclaration);
+
+    const refresh = this.makeIconButton('\u21BB', 'Refresh now', () => this.handleRefreshClick());
+
+    const maximise = this.makeIconButton('\u2922', 'Maximise', () => this.toggleMaximise());
+    this.maxButton = maximise;
+
+    const close = this.makeIconButton('\u2715', 'Close', () => this.close());
+    close.style.fontSize = '16px';
+
+    actions.appendChild(refresh);
+    actions.appendChild(maximise);
+    actions.appendChild(close);
     header.appendChild(title);
-    header.appendChild(close);
+    header.appendChild(actions);
 
     // Body (re-rendered per state)
     const body = document.createElement('div');
@@ -293,6 +306,70 @@ export class MigrationProgressDialog {
     this.card = card;
     this.bodyEl = body;
     this.closeButton = close;
+    this.applyCardSize();
+  }
+
+  private makeIconButton(glyph: string, label: string, onClick: () => void): HTMLButtonElement {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.setAttribute('aria-label', label);
+    btn.title = label;
+    btn.textContent = glyph;
+    Object.assign(btn.style, {
+      background: 'transparent', border: 'none', cursor: 'pointer',
+      fontSize: '15px', lineHeight: '1', padding: '6px 8px', color: '#605e5c', borderRadius: '2px',
+    } as CSSStyleDeclaration);
+    btn.onmouseenter = () => { btn.style.background = '#f3f2f1'; };
+    btn.onmouseleave = () => { btn.style.background = 'transparent'; };
+    btn.onclick = onClick;
+    return btn;
+  }
+
+  /** Apply the normal or maximised card dimensions and update the toggle glyph. */
+  private applyCardSize(): void {
+    if (!this.card) return;
+    if (this.maximised) {
+      Object.assign(this.card.style, { width: '98vw', height: '96vh', maxHeight: '96vh' } as CSSStyleDeclaration);
+    } else {
+      Object.assign(this.card.style, { width: 'min(720px, 92vw)', height: 'auto', maxHeight: '86vh' } as CSSStyleDeclaration);
+    }
+    if (this.maxButton) {
+      this.maxButton.textContent = this.maximised ? '\u2921' : '\u2922';
+      const lbl = this.maximised ? 'Restore size' : 'Maximise';
+      this.maxButton.title = lbl;
+      this.maxButton.setAttribute('aria-label', lbl);
+    }
+  }
+
+  private toggleMaximise(): void {
+    this.maximised = !this.maximised;
+    this.applyCardSize();
+  }
+
+  /**
+   * Manual refresh. In the read-only "browse" list it re-fetches each listed
+   * job; while tracking a job it resets the 15-minute cap and polls immediately.
+   */
+  private handleRefreshClick(): void {
+    if (this.closed || this.jobs.length === 0) return;
+    if (this.phase === 'browse') {
+      void this.refreshBrowseJobs();
+      return;
+    }
+    this.startedAt = Date.now();
+    this.phase = 'polling';
+    this.cancelPollTimer();
+    void this.pollOnce();
+  }
+
+  private async refreshBrowseJobs(): Promise<void> {
+    await Promise.all(this.jobs.map(async job => {
+      try {
+        job.lastResponse = await this.client.getJob(job.jobId);
+        try { job.logs = await this.client.getJobLogs(job.jobId); } catch { /* keep previous */ }
+      } catch { /* keep previous snapshot */ }
+    }));
+    await this.refreshWorkerHealthAndRender();
   }
 
   // ----- Body re-render per state -----
@@ -475,7 +552,7 @@ export class MigrationProgressDialog {
       }
       wrap.appendChild(empty);
     } else {
-      wrap.appendChild(this.renderItemsTable(items));
+      wrap.appendChild(this.renderItemsByFolder(job, items));
     }
 
     const warnings = this.mergedWarnings(job);
@@ -530,6 +607,144 @@ export class MigrationProgressDialog {
     Object.assign(el.style, { padding: '8px 12px 4px', fontSize: '12px', color: '#605e5c' } as CSSStyleDeclaration);
     el.textContent = text;
     return el;
+  }
+
+  /**
+   * Groups a job's items by parent folder and renders each folder as a
+   * collapsible section (collapsed by default). Collapsed folders render only a
+   * header with a status rollup, so a job with thousands of files across many
+   * folders draws a handful of rows per refresh instead of thousands — fixing
+   * the slow refresh. Expand state is namespaced by jobId and persists across
+   * the 3s re-renders.
+   */
+  private renderItemsByFolder(job: ITrackedJob, items: IJobItemStatus[]): HTMLElement {
+    const wrap = document.createElement('div');
+
+    const groups = new Map<string, IJobItemStatus[]>();
+    for (const item of items) {
+      const key = this.folderOf(item.spServerRelativeUrl);
+      const arr = groups.get(key);
+      if (arr) { arr.push(item); } else { groups.set(key, [item]); }
+    }
+    const folderKeys = Array.from(groups.keys()).sort((a, b) => a.localeCompare(b));
+    const nsKeys = folderKeys.map(k => `${job.jobId}::${k}`);
+    const allExpanded = nsKeys.every(k => this.expandedFolders.has(k));
+
+    // Summary + Expand/Collapse-all control.
+    const controlBar = document.createElement('div');
+    Object.assign(controlBar.style, {
+      display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+      padding: '6px 12px', fontSize: '12px', color: '#605e5c', borderBottom: '1px solid #f3f2f1',
+    } as CSSStyleDeclaration);
+    const countSpan = document.createElement('span');
+    countSpan.textContent = `${items.length} file${items.length === 1 ? '' : 's'} in ${folderKeys.length} folder${folderKeys.length === 1 ? '' : 's'}`;
+    const toggleAll = document.createElement('button');
+    toggleAll.type = 'button';
+    Object.assign(toggleAll.style, {
+      background: 'transparent', border: 'none', color: '#0078d4', cursor: 'pointer', fontSize: '12px', padding: '2px 4px',
+    } as CSSStyleDeclaration);
+    toggleAll.textContent = allExpanded ? 'Collapse all' : 'Expand all';
+    toggleAll.onclick = () => {
+      if (allExpanded) { for (const k of nsKeys) this.expandedFolders.delete(k); }
+      else { for (const k of nsKeys) this.expandedFolders.add(k); }
+      this.render();
+    };
+    controlBar.appendChild(countSpan);
+    controlBar.appendChild(toggleAll);
+    wrap.appendChild(controlBar);
+
+    for (const key of folderKeys) {
+      const nsKey = `${job.jobId}::${key}`;
+      wrap.appendChild(this.renderFolderSection(nsKey, key, groups.get(key)!, this.expandedFolders.has(nsKey)));
+    }
+    return wrap;
+  }
+
+  private renderFolderSection(nsKey: string, folderPath: string, items: IJobItemStatus[], expanded: boolean): HTMLElement {
+    const section = document.createElement('div');
+    Object.assign(section.style, { borderBottom: '1px solid #f3f2f1' } as CSSStyleDeclaration);
+
+    const header = document.createElement('div');
+    header.setAttribute('role', 'button');
+    header.tabIndex = 0;
+    header.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+    Object.assign(header.style, {
+      display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer',
+      padding: '8px 12px', background: '#faf9f8',
+    } as CSSStyleDeclaration);
+
+    const caret = document.createElement('span');
+    caret.textContent = expanded ? '\u25BE' : '\u25B8';
+    Object.assign(caret.style, { color: '#605e5c', flex: '0 0 auto' } as CSSStyleDeclaration);
+
+    const name = document.createElement('span');
+    name.textContent = this.folderDisplayName(folderPath);
+    name.title = folderPath;
+    Object.assign(name.style, { fontWeight: '600', fontSize: '13px', flex: '1 1 auto', wordBreak: 'break-all' } as CSSStyleDeclaration);
+
+    const count = document.createElement('span');
+    count.textContent = String(items.length);
+    Object.assign(count.style, { fontSize: '12px', color: '#605e5c', background: '#f3f2f1', borderRadius: '10px', padding: '1px 8px', flex: '0 0 auto' } as CSSStyleDeclaration);
+
+    const rollup = this.folderRollup(items);
+    const rollupBadge = document.createElement('span');
+    rollupBadge.textContent = rollup.label;
+    Object.assign(rollupBadge.style, {
+      fontSize: '11px', color: '#fff', background: rollup.color, borderRadius: '10px',
+      padding: '2px 8px', whiteSpace: 'nowrap', flex: '0 0 auto',
+    } as CSSStyleDeclaration);
+
+    header.appendChild(caret);
+    header.appendChild(name);
+    header.appendChild(count);
+    header.appendChild(rollupBadge);
+
+    const toggle = (): void => {
+      if (this.expandedFolders.has(nsKey)) { this.expandedFolders.delete(nsKey); }
+      else { this.expandedFolders.add(nsKey); }
+      this.render();
+    };
+    header.onclick = toggle;
+    header.onkeydown = (e: KeyboardEvent) => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); }
+    };
+
+    section.appendChild(header);
+    if (expanded) {
+      section.appendChild(this.renderItemsTable(items));
+    }
+    return section;
+  }
+
+  /** Parent folder server-relative URL of a file (the grouping key). */
+  private folderOf(serverRelativeUrl: string): string {
+    if (!serverRelativeUrl) return '/';
+    const idx = serverRelativeUrl.lastIndexOf('/');
+    return idx > 0 ? serverRelativeUrl.substring(0, idx) : '/';
+  }
+
+  /** Compact, readable folder label (last two segments); full path on hover. */
+  private folderDisplayName(folderPath: string): string {
+    const segs = folderPath.split('/').filter(Boolean);
+    if (segs.length === 0) return '/ (site root)';
+    if (segs.length <= 2) return '/' + segs.join('/');
+    return '…/' + segs.slice(-2).join('/');
+  }
+
+  /** Per-folder status rollup shown on the (collapsed) folder header. */
+  private folderRollup(items: IJobItemStatus[]): { label: string; color: string } {
+    let done = 0, failed = 0, inProgress = 0;
+    for (const it of items) {
+      const completed = it.status === MigrationLifecycleStatus.ColdStorageMigrationCompleted
+        || it.status === MigrationLifecycleStatus.RestoreCompleted;
+      if (completed) { done++; }
+      else if (isTerminal(it.status)) { failed++; }
+      else { inProgress++; }
+    }
+    const total = items.length;
+    if (inProgress > 0) return { label: `${done}/${total} done`, color: '#0078d4' };
+    if (failed > 0) return { label: `${done}/${total} done · ${failed} issue${failed === 1 ? '' : 's'}`, color: '#a4262c' };
+    return { label: `All ${total} done`, color: '#107c10' };
   }
 
   private renderItemsTable(items: IJobItemStatus[]): HTMLElement {
