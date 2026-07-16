@@ -3,7 +3,7 @@
 SharePoint Online files are migrated into Azure Blob ("cold storage") and replaced
 with a `.url` placeholder; restore is the inverse. Site-collection owners trigger
 this from an SPFx command set → the ASP.NET Core web API enqueues work to Service
-Bus → the `Migration.Migrator` worker does the heavy lifting.
+Bus → a queue-triggered Azure Function (`Migration.Functions`) does the heavy lifting.
 
 Deeper references (keep in sync when you change behaviour):
 - `AGENTS.md` — full agent orientation, solution tree, gotcha catalogue.
@@ -64,7 +64,7 @@ SPFx command set (site-owner only)  ──AadHttpClient──►  Web/Web.Server
     │                                       ▼  IColdStorageBusPublisher
     │                       Service Bus queue 'filediscovery'  (ColdStorageBusEnvelope JSON)
     │                                       ▼
-    │                       ColdStorageBusListener  (hosted in Migration.Migrator)
+    │                       ColdStorageMessageProcessor  (in Migration.Functions)
     │                          ┌────────────┴────────────┐
     │                          ▼                         ▼
     │           ColdStorageMigratorPipeline      SharePointRestorePipeline
@@ -76,8 +76,8 @@ SPFx command set (site-owner only)  ──AadHttpClient──►  Web/Web.Server
 ```
 
 - **`IJobStatusWriter` (`Migration.Engine/Lifecycle/`) is the single point of truth** for status and audit writes. Route every status/log write through it — that's what keeps SharePoint, the API, and the DB in sync.
-- **`ColdStorageBusListener` accepts two message formats:** the new `ColdStorageBusEnvelope` (discriminated by `Operation = Migrate | Restore`), and the legacy `BaseSharePointFileInfo` JSON that `Migration.Indexer` still emits. It tries the envelope first, falls back to legacy, dead-letters if neither parses. **Do not remove the legacy fallback** unless `Migration.Indexer` is updated to emit envelopes.
-- **`Migration.Indexer` is legacy but live** — the scheduled site-discovery path still works via that fallback. `Migration.Migrator` is the console worker that hosts the listener.
+- **`ColdStorageMessageProcessor` parses one message format** — `ColdStorageBusEnvelope` (discriminated by `Operation = Migrate | Restore`) — and dead-letters anything unrecognised. The legacy indexer/snapshot stack + `BaseSharePointFileInfo` fallback were removed in the greenfield cleanup; there's no legacy path to preserve.
+- **The worker is the queue-triggered Azure Function `Migration.Functions`** (Flex Consumption, always-ready). The API only enqueues; don't reintroduce a continuous WebJob / Always-On worker.
 - The `.url` placeholder is INI-style; build/parse it only via `Models/ColdStorage/PlaceholderFileMetadata.cs`.
 
 ## Conventions that will bite you

@@ -7,7 +7,6 @@
 //   - Key Vault (RBAC mode) + private endpoint
 //   - Service Bus namespace + queue (5 min lock, max delivery 1000) + private endpoint
 //   - Azure SQL Server + Database (Entra-only auth) + private endpoint
-//   - Azure AI Search + private endpoint
 //   - Private DNS zones (privatelink.*) linked to the VNet, A records auto-registered
 //   - Role assignments and Key Vault secrets
 //
@@ -130,11 +129,6 @@ resource pdnsSb 'Microsoft.Network/privateDnsZones@2024-06-01' = {
   location: 'global'
   tags: tags
 }
-resource pdnsSearch 'Microsoft.Network/privateDnsZones@2024-06-01' = {
-  name: 'privatelink.search.windows.net'
-  location: 'global'
-  tags: tags
-}
 
 resource pdnsLinkBlob 'Microsoft.Network/privateDnsZones/virtualNetworkLinks@2024-06-01' = {
   parent: pdnsBlob
@@ -156,12 +150,6 @@ resource pdnsLinkSql 'Microsoft.Network/privateDnsZones/virtualNetworkLinks@2024
 }
 resource pdnsLinkSb 'Microsoft.Network/privateDnsZones/virtualNetworkLinks@2024-06-01' = {
   parent: pdnsSb
-  name: 'link-${vnet.name}'
-  location: 'global'
-  properties: { virtualNetwork: { id: vnet.id }, registrationEnabled: false }
-}
-resource pdnsLinkSearch 'Microsoft.Network/privateDnsZones/virtualNetworkLinks@2024-06-01' = {
-  parent: pdnsSearch
   name: 'link-${vnet.name}'
   location: 'global'
   properties: { virtualNetwork: { id: vnet.id }, registrationEnabled: false }
@@ -339,21 +327,6 @@ resource sqlFwDeploy 'Microsoft.Sql/servers/firewallRules@2023-08-01-preview' = 
   }
 }
 
-// ---------- Search ----------
-resource search 'Microsoft.Search/searchServices@2023-11-01' = {
-  name: naming.search
-  location: location
-  tags: tags
-  sku: { name: sku.search }
-  properties: {
-    replicaCount: 1
-    partitionCount: 1
-    hostingMode: 'default'
-    publicNetworkAccess: 'enabled'
-    authOptions: { apiKeyOnly: {} }
-  }
-}
-
 // ---------- App Service Plan (Windows) ----------
 resource asp 'Microsoft.Web/serverfarms@2023-12-01' = {
   name: naming.appServicePlan
@@ -436,24 +409,6 @@ resource secretSbConn 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = {
   }
 }
 
-resource secretSearchQueryKey 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = {
-  parent: kv
-  name: 'search-query-key'
-  properties: {
-    value: search.listQueryKeys().value[0].key
-    contentType: 'text/plain'
-  }
-}
-
-resource secretSearchAdminKey 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = {
-  parent: kv
-  name: 'search-admin-key'
-  properties: {
-    value: search.listAdminKeys().primaryKey
-    contentType: 'text/plain'
-  }
-}
-
 // ---------- Role assignments ----------
 // Built-in role definition IDs
 var roleIds = {
@@ -463,8 +418,6 @@ var roleIds = {
   StorageBlobDelegator:         'db58b8e5-c6ad-4a2a-8342-4190687cbf4a'
   ServiceBusDataSender:         '69a216fc-b8fb-44d8-bc22-1f3c2cd27a39'
   ServiceBusDataReceiver:       '4f6d3b9b-027b-4f4c-9142-0e5a2a2247e0'
-  SearchIndexDataContributor:   '8ebe5a00-799e-43f5-93ac-243d3dce84a7'
-  SearchServiceContributor:     '7ca78c08-252a-4471-8644-bb5ff32d4ba0'
 }
 
 // Web App MSI → Key Vault Secrets User (resolves @Microsoft.KeyVault references)
@@ -557,27 +510,6 @@ resource raWebSbReceiver 'Microsoft.Authorization/roleAssignments@2022-04-01' = 
     principalId: web.identity.principalId
     principalType: 'ServicePrincipal'
     roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', roleIds.ServiceBusDataReceiver)
-  }
-}
-
-// Web App MSI → Search Index Data Contributor + Search Service Contributor
-resource raWebSearchIndex 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  scope: search
-  name: guid(search.id, web.id, roleIds.SearchIndexDataContributor)
-  properties: {
-    principalId: web.identity.principalId
-    principalType: 'ServicePrincipal'
-    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', roleIds.SearchIndexDataContributor)
-  }
-}
-
-resource raWebSearchService 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  scope: search
-  name: guid(search.id, web.id, roleIds.SearchServiceContributor)
-  properties: {
-    principalId: web.identity.principalId
-    principalType: 'ServicePrincipal'
-    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', roleIds.SearchServiceContributor)
   }
 }
 
@@ -676,27 +608,6 @@ resource peSbDns 'Microsoft.Network/privateEndpoints/privateDnsZoneGroups@2024-0
   } ] }
 }
 
-resource peSearch 'Microsoft.Network/privateEndpoints@2024-01-01' = {
-  name: 'pe-${search.name}-search'
-  location: location
-  tags: tags
-  properties: {
-    subnet: { id: snetPe.id }
-    privateLinkServiceConnections: [ {
-      name: 'searchService'
-      properties: { privateLinkServiceId: search.id, groupIds: [ 'searchService' ] }
-    } ]
-  }
-}
-resource peSearchDns 'Microsoft.Network/privateEndpoints/privateDnsZoneGroups@2024-01-01' = {
-  parent: peSearch
-  name: 'default'
-  properties: { privateDnsZoneConfigs: [ {
-    name: 'searchService'
-    properties: { privateDnsZoneId: pdnsSearch.id }
-  } ] }
-}
-
 // ---------- Outputs ----------
 output webAppName string                = web.name
 output webAppHostname string            = web.properties.defaultHostName
@@ -711,8 +622,6 @@ output serviceBusQueueName string       = sbQueue.name
 output sqlServerName string             = sqlServer.name
 output sqlServerFqdn string             = sqlServer.properties.fullyQualifiedDomainName
 output sqlDatabaseName string           = sqlDb.name
-output searchServiceName string         = search.name
-output searchServiceEndpoint string     = 'https://${search.name}.search.windows.net'
 output appInsightsConnectionString string = appi.properties.ConnectionString
 output vnetName string                  = vnet.name
 output vnetId string                    = vnet.id

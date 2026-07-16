@@ -134,7 +134,6 @@ function Invoke-Phase-Validate {
         @{ Type='webApp';     Name=$global:Params.naming.webApp },
         @{ Type='keyVault';   Name=$global:Params.naming.keyVault },
         @{ Type='serviceBus'; Name=$global:Params.naming.serviceBus },
-        @{ Type='search';     Name=$global:Params.naming.search },
         @{ Type='sqlServer';  Name=$global:Params.naming.sqlServer }
     )
     foreach ($c in $checks) {
@@ -684,10 +683,6 @@ function Set-AppSettings {
         'ConnectionStrings__SQLConnectionString' = $sqlConn
         'ConnectionStrings__Storage'            = (& $kvSecretUri 'storage-connection-string')
         'ConnectionStrings__ServiceBus'         = (& $kvSecretUri 'servicebus-connection-string')
-        'Search__ServiceName'                   = $o['searchServiceName']
-        'Search__IndexName'                     = $global:Params.naming.searchIndex
-        'Search__QueryKey'                      = (& $kvSecretUri 'search-query-key')
-        'Search__AdminKey'                      = (& $kvSecretUri 'search-admin-key')
         # AppBaseUrl is consumed by the migrator pipeline so the placeholder .url
         # files point at our SPA download route, which handles MSAL auth + ACL
         # check + redirect to a short-lived blob SAS — see Config.AppBaseUrl docs.

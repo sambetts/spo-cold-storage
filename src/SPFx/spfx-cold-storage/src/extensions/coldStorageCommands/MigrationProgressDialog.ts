@@ -248,6 +248,10 @@ export class MigrationProgressDialog {
         try { job.logs = await this.client.getJobLogs(job.jobId); } catch { /* keep previous */ }
       } catch { /* keep previous snapshot */ }
     }));
+    // Render the refreshed job data unconditionally; the worker-health banner
+    // updates independently and must not gate the job re-render (a failing
+    // /api/worker/health call would otherwise make Refresh look broken).
+    this.render();
     await this.refreshWorkerHealthAndRender();
   }
 

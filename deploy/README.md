@@ -185,8 +185,8 @@ deploy/
 | `Infra` | Creates the resource group if missing; runs `bicep what-if`; deploys `main.bicep`. |
 | `Secrets` | Writes the AAD client secret to Key Vault. Other secrets are seeded by Bicep `listKeys`. |
 | `Sql` | Connects to Azure SQL as the Entra admin; grants the Web App MSI `db_owner` via `CREATE USER … FROM EXTERNAL PROVIDER`. |
-| `App` | `dotnet publish` Web.Server + 3 workers; assembles a zip with `App_Data/jobs/continuous/Migration.Migrator` + `App_Data/jobs/triggered/{Migration.Indexer,Migration.SiteSnapshotBuilder}`; sets app settings (Key Vault refs); zip-deploys; restarts. |
-| `Smoke` | HTTP-probes the web app; lists WebJobs. |
+| `App` | `dotnet publish` Web.Server (self-contained); zip-deploys to the API Web App; sets app settings (Key Vault refs); restarts. The worker is a separate queue-triggered Azure Function (`Migration.Functions`), deployed independently. |
+| `Smoke` | HTTP-probes the web app. |
 
 Useful flags: `-Phase <name>` (single phase), `-WhatIfPreview` (Infra dry-run), `-SkipConfirm`, `-ParamsFile path/to/other.json`.
 
@@ -253,9 +253,9 @@ Use the GUID from `src/SPFx/spfx-cold-storage/src/extensions/coldStorageStatusFi
   - `snet-app` (/24) — delegated to `Microsoft.Web/serverFarms`; the Web App's outbound RFC1918 traffic is routed through it.
   - `snet-pe` (/24) — hosts the private endpoints; private-endpoint network policies disabled.
 - **Private DNS zones** linked to the VNet so the App Service resolves data-plane hostnames to private IPs:
-  - `privatelink.blob.core.windows.net`, `privatelink.vaultcore.azure.net`, `privatelink.database.windows.net`, `privatelink.servicebus.windows.net`, `privatelink.search.windows.net`
+  - `privatelink.blob.core.windows.net`, `privatelink.vaultcore.azure.net`, `privatelink.database.windows.net`, `privatelink.servicebus.windows.net`
 - **Private endpoints** (one per data-plane service) wired into `snet-pe` and registered into the matching DNS zone via `privateDnsZoneGroups`:
-  - Storage (`blob`), Key Vault (`vault`), Azure SQL (`sqlServer`), AI Search (`searchService`), Service Bus (`namespace` — **only when `sku.serviceBus` ≠ `Basic`**, because Basic doesn't support Private Link).
+  - Storage (`blob`), Key Vault (`vault`), Azure SQL (`sqlServer`), Service Bus (`namespace` — **only when `sku.serviceBus` ≠ `Basic`**, because Basic doesn't support Private Link).
 - Windows App Service Plan + Web App (system-assigned MSI, AlwaysOn, integrated with `snet-app`; `WEBSITE_DNS_SERVER=168.63.129.16` so DNS resolves the privatelink zones)
 - Storage Account (TLS 1.2, no anonymous blob access) + blob container, CORS for the Web App
 - Key Vault (RBAC mode, soft-delete on, purge protection on) seeded with: `aad-client-secret`, `storage-connection-string`, `servicebus-connection-string`, `search-query-key`, `search-admin-key`
@@ -278,11 +278,11 @@ DNS resolution for the privatelink. zones is handled by setting `WEBSITE_DNS_SER
 
 ### Worker layout
 
-| Worker | WebJob type | Why |
-|---|---|---|
-| `Migration.Migrator` | continuous | Listens on Service Bus indefinitely. Singleton via `settings.job`. |
-| `Migration.Indexer` | triggered | Exits after crawling. Continuous would re-launch in a loop. |
-| `Migration.SiteSnapshotBuilder` | triggered | Same — exits after a snapshot. |
+The worker is a single **queue-triggered Azure Function** (`Migration.Functions`,
+Flex Consumption, always-ready) that wakes on `filediscovery` messages and drains
+the queue. It replaced the old continuous/triggered WebJobs (which needed Always
+On — disabled by governance — so they idle-stopped). The API only enqueues; don't
+reintroduce a WebJob worker.
 
 ## Secrets
 

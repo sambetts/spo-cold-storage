@@ -16,7 +16,7 @@
     "owner": "platform-team"
   },
 
-  "_naming_comment": "All names must follow Azure resource naming rules. storageAccount/keyVault/sqlServer/search/serviceBus/webApp are GLOBALLY unique — pick something likely to be free. vnet is optional; defaults to 'vnet-<webApp>' if omitted.",
+  "_naming_comment": "All names must follow Azure resource naming rules. storageAccount/keyVault/sqlServer/serviceBus/webApp are GLOBALLY unique — pick something likely to be free. vnet is optional; defaults to 'vnet-<webApp>' if omitted.",
   "naming": {
     "appServicePlan": "asp-spocs-prod",
     "webApp": "app-spocs-prod-001",
@@ -27,8 +27,6 @@
     "serviceBusQueue": "filediscovery",
     "sqlServer": "sql-spocs-prod-001",
     "sqlDatabase": "spocoldstorage",
-    "search": "srch-spocs-prod-001",
-    "searchIndex": "spexports",
     "logAnalytics": "log-spocs-prod",
     "appInsights": "appi-spocs-prod",
     "vnet": "vnet-spocs-prod"
@@ -38,7 +36,6 @@
     "_comment": "appServicePlan must support AlwaysOn for WebJobs. B2 or above recommended for production.",
     "appServicePlan": "B2",
     "sqlDatabase": "S0",
-    "search": "basic",
     "serviceBus": "Standard"
   },
 

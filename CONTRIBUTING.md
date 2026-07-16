@@ -13,12 +13,9 @@ The solution sits under `src/` and is opened via `SPO.ColdStorage.slnx`.
 | Folder                          | Purpose                                                       |
 | ------------------------------- | ------------------------------------------------------------- |
 | `Entities`                      | EF Core entities and `SPOColdStorageDbContext`                |
-| `Models`                        | DTOs shared across the engine, indexer and web                |
-| `Migration.Engine`              | Core SharePoint→blob migration logic                          |
-| `Migration.Indexer`             | Worker that drives indexing/discovery                         |
-| `Migration.Migrator`            | Worker that drives file migration                             |
-| `Migration.SiteSnapshotBuilder` | Builds the per-site snapshot model                            |
-| `LoadGenerator`                 | Test data generator (CLI)                                     |
+| `Models`                        | DTOs shared across the engine and web                         |
+| `Migration.Engine`              | Core SharePoint→blob migration/restore logic + bus processor  |
+| `Migration.Functions`           | Queue-triggered Azure Function — the worker                    |
 | `Web/Web.Server`                | ASP.NET Core Web API host                                     |
 | `Web/web.client`                | React + Vite SPA                                              |
 | `Migration.Engine.Tests`        | **Unit tests** — in-memory, no external dependencies          |

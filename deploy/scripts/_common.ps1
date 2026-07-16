@@ -168,8 +168,8 @@ function Read-Params {
     # Required top-level
     Assert-RequiredKeys -Object $json -Keys 'subscription','location','resourceGroupName','naming','sku','azureAd','sql','sharePoint' -Path '$'
     Assert-RequiredKeys -Object $json.subscription -Keys 'id','tenantId' -Path '$.subscription'
-    Assert-RequiredKeys -Object $json.naming -Keys 'appServicePlan','webApp','storageAccount','blobContainer','keyVault','serviceBus','serviceBusQueue','sqlServer','sqlDatabase','search','searchIndex','logAnalytics','appInsights' -Path '$.naming'
-    Assert-RequiredKeys -Object $json.sku -Keys 'appServicePlan','sqlDatabase','search','serviceBus' -Path '$.sku'
+    Assert-RequiredKeys -Object $json.naming -Keys 'appServicePlan','webApp','storageAccount','blobContainer','keyVault','serviceBus','serviceBusQueue','sqlServer','sqlDatabase','logAnalytics','appInsights' -Path '$.naming'
+    Assert-RequiredKeys -Object $json.sku -Keys 'appServicePlan','sqlDatabase','serviceBus' -Path '$.sku'
     Assert-RequiredKeys -Object $json.azureAd -Keys 'clientId','tenantId','certificateName' -Path '$.azureAd'
     Assert-RequiredKeys -Object $json.sql -Keys 'entraAdminLogin','entraAdminObjectId','entraAdminIsGroup' -Path '$.sql'
     Assert-RequiredKeys -Object $json.sharePoint -Keys 'baseServerAddress' -Path '$.sharePoint'
@@ -222,9 +222,6 @@ function Read-Params {
     }
     if ($json.sku.serviceBus -notin @('Basic','Standard','Premium')) {
         throw "sku.serviceBus must be Basic|Standard|Premium. Got: '$($json.sku.serviceBus)'."
-    }
-    if ($json.sku.search -notin @('free','basic','standard','standard2','standard3','storage_optimized_l1','storage_optimized_l2')) {
-        throw "sku.search invalid: '$($json.sku.search)'."
     }
 
     return $json

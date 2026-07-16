@@ -4,7 +4,7 @@
 
 ## 1. The 30-second summary
 
-SharePoint Online files are migrated from SP into Azure Blob ("cold storage") and replaced with a `.url` placeholder. Site collection owners trigger this from an SPFx command set, the web API enqueues work to Service Bus, a worker (`Migration.Migrator`) does the heavy lifting. Restore is the inverse.
+SharePoint Online files are migrated from SP into Azure Blob ("cold storage") and replaced with a `.url` placeholder. Site collection owners trigger this from an SPFx command set, the web API enqueues work to Service Bus, and a queue-triggered Azure Function (`Migration.Functions`) does the heavy lifting. Restore is the inverse.
 
 The **single most important invariant** in this codebase:
 
@@ -55,15 +55,12 @@ src/
 │   └── DBEntities/ColdStorage/    ← 5 new entities for the lifecycle backend
 │
 ├── Migration.Engine/              ← the workhorse library
-│   ├── ColdStorageBusListener.cs  ← new envelope dispatcher (legacy fallback for indexer)
+│   ├── ColdStorageMessageProcessor.cs ← transport-agnostic bus dispatcher (Migrate | Restore)
 │   ├── Lifecycle/                 ← IJobStatusWriter (single point of writes for status + audit)
 │   ├── Migration/                 ← ColdStorageMigratorPipeline + SharePointPlaceholderWriter
 │   └── Restore/                   ← SharePointRestorePipeline
 │
-├── Migration.Migrator/            ← console worker = listens on the bus
-├── Migration.Indexer/             ← legacy site-discovery worker (still works via fallback)
-├── Migration.SiteSnapshotBuilder/ ← per-site snapshot builder
-├── LoadGenerator/                 ← CLI to push synthetic load
+├── Migration.Functions/           ← queue-triggered Azure Function = the worker (hosts the processor)
 │
 ├── Web/Web.Server/                ← ASP.NET Core API host
 │   ├── Controllers/               ← Migrations, Restores, Jobs, Containers, Placeholders
@@ -127,7 +124,7 @@ ASP.NET Core Web.Server  ──► SiteOwnerAuthorizationService (CSOM Associate
                           Service Bus queue 'filediscovery'
                               │
                               ▼
-                  ColdStorageBusListener  (in Migration.Migrator)
+                  ColdStorageMessageProcessor  (in Migration.Functions)
                               │
                   ┌───────────┴───────────┐
                   ▼                       ▼
@@ -155,21 +152,20 @@ Queued
 
 Any failure before `DeletePending` puts the item in `CopyToColdStorageFailed` / `ValidationFailed` — both terminal, both keep the source intact. See `MigrationLifecycleStatusTests.SourceDelete_NeverAllowed_FromAnyFailureState`.
 
-## 6. Backward compatibility
+## 6. Message format (greenfield — no legacy)
 
-`ColdStorageBusListener` accepts **two** message formats:
-
-1. `ColdStorageBusEnvelope` (new — discriminated by `Operation = Migrate | Restore`)
-2. Legacy `BaseSharePointFileInfo` JSON (what `Migration.Indexer` still produces)
-
-The new listener tries (1) first, falls back to (2), dead-letters if neither parses. This is what lets the existing indexer-driven flow keep working after `Migration.Migrator` switched to `ColdStorageBusListener`. **Do not remove the fallback unless the indexer has also been updated to emit envelopes.**
+The bus carries a single format: `ColdStorageBusEnvelope` (discriminated by
+`Operation = Migrate | Restore`). `ColdStorageMessageProcessor` parses it and
+dead-letters anything unrecognised. The legacy indexer/snapshot stack and the
+old `BaseSharePointFileInfo` fallback were removed in the greenfield cleanup —
+there is no legacy message path to preserve.
 
 ## 7. Deployment
 
 `deploy/deploy.ps1` is a single PowerShell 7+ script reading `deploy.parameters.json`. It builds, provisions Azure, deploys app code, and uploads the SPFx package. Idempotent — re-run any time. See `deploy/README.md` for the parameter reference and the `-SkipXxx` switches.
 
 Key resources it creates / configures:
-- Resource group, App Insights, Storage account (with cold-storage blob containers), Service Bus namespace + `filediscovery` queue, SQL server + DB, App Service Plan (Linux), two Web Apps (`{prefix}-web` for the API, `{prefix}-worker` for `Migration.Migrator`).
+- Resource group, App Insights, Storage account (with cold-storage blob containers), Service Bus namespace + `filediscovery` queue, SQL server + DB, App Service Plan, a Web App (`{prefix}-web`) for the API, and a queue-triggered Azure Function (`func-*`, Flex Consumption, always-ready) for the worker.
 - App settings on both apps: `ConnectionStrings__SQLConnectionString`, `ConnectionStrings__Storage`, `ConnectionStrings__ServiceBus`, `AzureAd__*`, `APPLICATIONINSIGHTS_CONNECTION_STRING`, `BlobContainerName`, `BaseServerAddress`.
 - The Entra app registration for the API is **not** auto-created — you put its IDs in the JSON.
 
@@ -184,9 +180,9 @@ Key resources it creates / configures:
 - **Don't reorder the try/catches in `ColdStorageMigratorPipeline.ProcessAsync`** — the order is the safety guarantee.
 - **Don't add EF migrations**. Idempotent SQL in `DbInitializer` is the convention.
 - **Don't put package versions in csproj files.** Use `Directory.Packages.props`.
-- **Don't remove the legacy `BaseSharePointFileInfo` fallback** in `ColdStorageBusListener` unless `Migration.Indexer` is updated.
+- **The worker is the queue-triggered Azure Function** (`Migration.Functions`) — don't reintroduce a continuous WebJob / Always-On worker (governance disables Always On, so the item would idle-stop). The API only enqueues.
 - **Don't disable `TreatWarningsAsErrors`** — fix the warning.
-- **Don't ignore the 7 SnapshotBuilder test failures** unless you've also verified they're still the pre-existing reflection issue (run them at HEAD before claiming "tests broken by my change").
+- **Migration.Engine.Tests should be fully green** (125/0). The legacy SnapshotBuilder tests that used to fail were removed with the legacy code; a new failure is genuinely yours.
 - **Don't add `using Models.ColdStorage;` directly inside `Web.Server` controllers** without checking for the `Web.Models` collision. Either alias or use `global::`.
 - **The `BaseConfig` reflection in `Entities/Configuration/BaseConfig.cs`** is fragile — any new config property that isn't a string will need a corresponding default/converter or it will throw on missing values.
 

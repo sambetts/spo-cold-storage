@@ -315,13 +315,16 @@ public class QueueController(
         {
             var failedIds = publishFailures.Select(f => f.ItemId).ToHashSet();
             var failedItems = await _db.MigrationJobItems
+                .Include(i => i.Job)
                 .Where(i => failedIds.Contains(i.ItemId))
                 .ToListAsync(cancellationToken)
                 .ConfigureAwait(false);
             foreach (var item in failedItems)
             {
                 var err = publishFailures.First(f => f.ItemId == item.ItemId).Error;
-                item.Status = MigrationLifecycleStatus.CopyToColdStorageFailed;
+                item.Status = item.Job.Operation == MigrationOperationKind.Restore
+                    ? MigrationLifecycleStatus.RestoreFailed
+                    : MigrationLifecycleStatus.CopyToColdStorageFailed;
                 item.LastError = $"Requeue publish failed: {err}";
                 item.UpdatedAt = DateTime.UtcNow;
                 item.CompletedAt = DateTime.UtcNow;
@@ -329,7 +332,7 @@ public class QueueController(
                 {
                     JobId = item.JobId,
                     ItemId = item.ItemId,
-                    Status = MigrationLifecycleStatus.CopyToColdStorageFailed,
+                    Status = item.Status,
                     Level = (int)LogLevel.Error,
                     Message = item.LastError!,
                     ActorUpn = upn,
