@@ -585,6 +585,24 @@ Write-Output 'SQL grant applied.'
 "@
     $enc  = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($inner))
     $body = @{ command = "powershell -NoProfile -EncodedCommand $enc"; dir = 'site\wwwroot' } | ConvertTo-Json
+
+    # The Kudu (scm) site returns 503 for a minute or two right after a zip deploy +
+    # restart while the container warms up. Wait for it to come ready before POSTing
+    # the command, otherwise the grant fails transiently.
+    Write-Info 'Waiting for the Web App Kudu (scm) site to be ready…'
+    $kuduReady = $false
+    for ($k = 1; $k -le 36; $k++) {
+        try {
+            Invoke-RestMethod -Method Get -Uri "https://$WebApp.scm.azurewebsites.net/api/settings" `
+                -Headers @{ Authorization = "Bearer $armToken" } -TimeoutSec 30 | Out-Null
+            $kuduReady = $true; break
+        } catch {
+            Start-Sleep -Seconds 10
+        }
+    }
+    if ($kuduReady) { Write-Ok 'Kudu site is ready.' }
+    else { Write-Info 'Kudu readiness not confirmed after ~6 min; attempting the command anyway.' }
+
     $resp = Invoke-RestMethod -Method Post -Uri "https://$WebApp.scm.azurewebsites.net/api/command" `
         -Headers @{ Authorization = "Bearer $armToken" } -ContentType 'application/json' -Body $body
     if ($resp.ExitCode -ne 0) {
