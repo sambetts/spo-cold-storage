@@ -4,6 +4,8 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
+using Migration.Engine.Migration;
+using Models;
 using Models.ColdStorage;
 using Web.Authorization;
 using Web.Models.Api;
@@ -17,6 +19,7 @@ namespace Web.Controllers;
 /// <c>POST /api/admin/queue/{itemId}/priority</c> – set an item's priority.
 /// <c>POST /api/admin/queue/{itemId}/cancel</c> – cancel a not-yet-finished item;
 /// the worker honours this before doing any work.
+/// <c>POST /api/admin/queue/requeue</c> – re-enqueue failed transfers for recovery.
 ///
 /// Prioritisation note: the backing Service Bus queue is FIFO, so a stored
 /// priority can't physically re-order messages already enqueued. It is surfaced
@@ -31,10 +34,12 @@ namespace Web.Controllers;
 public class QueueController(
     SPOColdStorageDbContext db,
     IColdStorageAdminAuthorizationService admin,
+    IColdStorageBusPublisher publisher,
     ILogger<QueueController> logger) : ControllerBase
 {
     private readonly SPOColdStorageDbContext _db = db ?? throw new ArgumentNullException(nameof(db));
     private readonly IColdStorageAdminAuthorizationService _admin = admin ?? throw new ArgumentNullException(nameof(admin));
+    private readonly IColdStorageBusPublisher _publisher = publisher ?? throw new ArgumentNullException(nameof(publisher));
     private readonly ILogger<QueueController> _logger = logger ?? throw new ArgumentNullException(nameof(logger));
 
     // Non-terminal statuses = "in flight".
@@ -161,5 +166,214 @@ public class QueueController(
 
         _logger.LogInformation("Item {ItemId} cancelled from admin queue by {Upn}.", itemId, User.GetUpn());
         return NoContent();
+    }
+
+    /// <summary>
+    /// <c>POST /api/admin/queue/requeue</c> — re-enqueue failed transfers so they
+    /// can be recovered (e.g. after a transient error was fixed). Only items in a
+    /// *Failed lifecycle state are ever touched; in-flight, completed, cancelled
+    /// and skipped items are left alone.
+    ///
+    /// SAFETY: requeuing is safe against the never-delete-source invariant. The
+    /// migrate pipeline re-validates and re-copies from scratch and only deletes
+    /// the source after a confirmed copy; an item whose source was already deleted
+    /// (PlaceholderFailed) resumes by re-writing the placeholder from the existing
+    /// blob rather than re-downloading. Each requeue is logged with an audit action.
+    /// </summary>
+    [HttpPost("requeue")]
+    public async Task<ActionResult<RequeueResultResponse>> RequeueAsync([FromBody] RequeueRequest request, CancellationToken cancellationToken)
+    {
+        if (!await _admin.IsAdminAsync(User, cancellationToken).ConfigureAwait(false))
+        {
+            return Forbid();
+        }
+        var upn = User.GetUpn();
+
+        IQueryable<MigrationJobItem> query = _db.MigrationJobItems.Include(i => i.Job);
+        if (request?.ItemIds is { Count: > 0 } itemIds)
+        {
+            var ids = itemIds.ToHashSet();
+            query = query.Where(i => ids.Contains(i.ItemId));
+        }
+        else if (request?.JobId is Guid jobId && jobId != Guid.Empty)
+        {
+            query = query.Where(i => i.JobId == jobId);
+        }
+        else if (!string.IsNullOrWhiteSpace(request?.Status)
+                 && Enum.TryParse<MigrationLifecycleStatus>(request.Status, true, out var st))
+        {
+            query = query.Where(i => i.Status == st);
+            if (!string.IsNullOrWhiteSpace(request.SiteUrl))
+            {
+                var site = request.SiteUrl.TrimEnd('/');
+                query = query.Where(i => i.SpSiteUrl == request.SiteUrl || i.SpSiteUrl == site);
+            }
+        }
+        else
+        {
+            return BadRequest("Provide itemIds, jobId, or a failed status to requeue.");
+        }
+
+        var capped = request?.Max is int m ? Math.Clamp(m, 1, 5000) : 500;
+        var candidates = await query
+            .OrderBy(i => i.CreatedAt)
+            .Take(capped)
+            .ToListAsync(cancellationToken)
+            .ConfigureAwait(false);
+
+        var result = new RequeueResultResponse();
+        var toPublish = new List<ColdStorageBusEnvelope>();
+
+        foreach (var item in candidates)
+        {
+            if (!IsRequeueable(item.Status))
+            {
+                result.Skipped++;
+                continue;
+            }
+
+            var envelope = BuildEnvelope(item, upn);
+            if (envelope is null)
+            {
+                result.Skipped++;
+                result.Messages.Add(
+                    $"{item.SpServerRelativeUrl}: cannot requeue — missing " +
+                    (item.Job.Operation == MigrationOperationKind.Restore ? "placeholder location." : "blob container."));
+                continue;
+            }
+
+            var previous = item.Status;
+            item.Status = MigrationLifecycleStatus.Queued;
+            item.LastError = null;
+            item.LastErrorDetail = null;
+            item.CompletedAt = null;
+            item.UpdatedAt = DateTime.UtcNow;
+            _db.MigrationJobLogs.Add(new MigrationJobLog
+            {
+                JobId = item.JobId,
+                ItemId = item.ItemId,
+                Status = MigrationLifecycleStatus.Queued,
+                Level = (int)LogLevel.Information,
+                Message = $"Requeued by {upn} (was {previous}).",
+                ActorUpn = upn,
+                Action = "Requeue",
+            });
+            toPublish.Add(envelope);
+            result.Requeued++;
+        }
+
+        // Commit the DB reset to Queued BEFORE publishing so the worker never sees
+        // a message for an item whose row still reads as failed/terminal.
+        await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+
+        var publishFailures = new List<(Guid ItemId, string Error)>();
+        foreach (var envelope in toPublish)
+        {
+            try
+            {
+                await _publisher.PublishAsync(envelope, cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                publishFailures.Add((envelope.ItemId, ex.Message));
+                _logger.LogError(ex, "Requeue publish failed for item {ItemId}.", envelope.ItemId);
+            }
+        }
+
+        if (publishFailures.Count > 0)
+        {
+            var failedIds = publishFailures.Select(f => f.ItemId).ToHashSet();
+            var failedItems = await _db.MigrationJobItems
+                .Where(i => failedIds.Contains(i.ItemId))
+                .ToListAsync(cancellationToken)
+                .ConfigureAwait(false);
+            foreach (var item in failedItems)
+            {
+                var err = publishFailures.First(f => f.ItemId == item.ItemId).Error;
+                item.Status = MigrationLifecycleStatus.CopyToColdStorageFailed;
+                item.LastError = $"Requeue publish failed: {err}";
+                item.UpdatedAt = DateTime.UtcNow;
+                item.CompletedAt = DateTime.UtcNow;
+                _db.MigrationJobLogs.Add(new MigrationJobLog
+                {
+                    JobId = item.JobId,
+                    ItemId = item.ItemId,
+                    Status = MigrationLifecycleStatus.CopyToColdStorageFailed,
+                    Level = (int)LogLevel.Error,
+                    Message = item.LastError!,
+                    ActorUpn = upn,
+                    Action = "Requeue",
+                });
+            }
+            await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+            result.Requeued -= publishFailures.Count;
+            result.PublishFailed = publishFailures.Count;
+        }
+
+        _logger.LogInformation("Requeue by {Upn}: {Requeued} requeued, {Skipped} skipped, {Failed} publish-failed.",
+            upn, result.Requeued, result.Skipped, result.PublishFailed);
+        return result;
+    }
+
+    // Only failed lifecycle states may be requeued.
+    private static bool IsRequeueable(MigrationLifecycleStatus status) => status switch
+    {
+        MigrationLifecycleStatus.ValidationFailed => true,
+        MigrationLifecycleStatus.CopyToColdStorageFailed => true,
+        MigrationLifecycleStatus.DeleteFailed => true,
+        MigrationLifecycleStatus.PlaceholderFailed => true,
+        MigrationLifecycleStatus.RestoreFailed => true,
+        MigrationLifecycleStatus.PlaceholderRemoveFailed => true,
+        _ => false,
+    };
+
+    // Reconstruct the bus envelope from the persisted item so the worker can
+    // reprocess it. Returns null when required coordinates are missing.
+    private static ColdStorageBusEnvelope? BuildEnvelope(MigrationJobItem item, string? upn)
+    {
+        if (item.Job.Operation == MigrationOperationKind.Migrate)
+        {
+            if (string.IsNullOrEmpty(item.BlobContainerName))
+            {
+                return null;
+            }
+            return new ColdStorageBusEnvelope
+            {
+                JobId = item.JobId,
+                ItemId = item.ItemId,
+                Operation = MigrationOperationKind.Migrate,
+                ContainerName = item.BlobContainerName,
+                RequestedByUpn = upn ?? item.Job.RequestedByUpn,
+                Recursive = item.Recursive,
+                File = new BaseSharePointFileInfo
+                {
+                    SiteUrl = item.SpSiteUrl,
+                    WebUrl = string.IsNullOrEmpty(item.SpWebUrl) ? item.SpSiteUrl : item.SpWebUrl,
+                    ServerRelativeFilePath = item.SpServerRelativeUrl,
+                    LastModified = item.SourceLastModified ?? DateTime.UtcNow,
+                    FileSize = item.FileSize,
+                },
+            };
+        }
+
+        if (string.IsNullOrEmpty(item.BlobContainerName) || string.IsNullOrEmpty(item.PlaceholderServerRelativeUrl))
+        {
+            return null;
+        }
+        return new ColdStorageBusEnvelope
+        {
+            JobId = item.JobId,
+            ItemId = item.ItemId,
+            Operation = MigrationOperationKind.Restore,
+            ContainerName = item.BlobContainerName,
+            RequestedByUpn = upn ?? item.Job.RequestedByUpn,
+            RestoreTarget = new PlaceholderRestoreTarget
+            {
+                SiteUrl = item.SpSiteUrl,
+                WebUrl = string.IsNullOrEmpty(item.SpWebUrl) ? item.SpSiteUrl : item.SpWebUrl,
+                PlaceholderServerRelativeUrl = item.PlaceholderServerRelativeUrl,
+                OriginalServerRelativeUrl = item.SpServerRelativeUrl,
+            },
+        };
     }
 }

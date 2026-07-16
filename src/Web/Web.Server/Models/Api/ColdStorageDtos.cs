@@ -342,6 +342,29 @@ public class SetPriorityRequest
 }
 
 /// <summary>
+/// Body for <c>POST /api/admin/queue/requeue</c>. Provide exactly one selector:
+/// explicit <see cref="ItemIds"/>, a whole <see cref="JobId"/>, or a failed
+/// <see cref="Status"/> (optionally narrowed by <see cref="SiteUrl"/>) for bulk
+/// recovery. Only items in a *Failed lifecycle state are ever requeued.
+/// </summary>
+public class RequeueRequest
+{
+    public List<Guid>? ItemIds { get; set; }
+    public Guid? JobId { get; set; }
+    public string? Status { get; set; }
+    public string? SiteUrl { get; set; }
+    public int? Max { get; set; }
+}
+
+public class RequeueResultResponse
+{
+    public int Requeued { get; set; }
+    public int Skipped { get; set; }
+    public int PublishFailed { get; set; }
+    public List<string> Messages { get; set; } = [];
+}
+
+/// <summary>
 /// Pre-archive notice workflow DTOs (issue #17).
 /// </summary>
 public class EvaluatePreArchiveRequest

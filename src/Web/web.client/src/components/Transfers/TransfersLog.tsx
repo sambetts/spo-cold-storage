@@ -1,10 +1,10 @@
 import { CSSProperties, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { Badge, Button, Checkbox, Input, Select, Spinner } from "@fluentui/react-components";
-import { ArrowClockwise20Regular, ArrowLeft20Regular } from "@fluentui/react-icons";
+import { ArrowClockwise20Regular, ArrowLeft20Regular, ArrowSync20Regular } from "@fluentui/react-icons";
 import { ApiError, useApi } from "../../api/client";
 import { JobLogEntry, JobStatus, JobSummary, MigrationOperationKind, WorkerHealth } from "../../api/types";
-import { describeLogLevel, describeOperation, describeStatus, isErrorLevel, isWarnLevel } from "../../api/status";
+import { describeLogLevel, describeOperation, describeStatus, isErrorLevel, isFailedStatus, isWarnLevel } from "../../api/status";
 import { fileName, formatDateTime, formatRelative } from "../../utils/format";
 
 const REFRESH_MS = 10000;
@@ -240,6 +240,8 @@ function TransferDetail({ jobId }: { jobId: string }) {
   const [logs, setLogs] = useState<JobLogEntry[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [requeueing, setRequeueing] = useState(false);
+  const [requeueMsg, setRequeueMsg] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -262,15 +264,66 @@ function TransferDetail({ jobId }: { jobId: string }) {
     void load();
   }, [load]);
 
+  const failedCount = useMemo(() => (job?.items ?? []).filter((i) => isFailedStatus(i.status)).length, [job]);
+
+  const requeue = useCallback(async () => {
+    if (!job) return;
+    if (
+      !window.confirm(
+        `Requeue ${failedCount} failed file(s) for re-processing? They are re-copied and re-validated from scratch; ` +
+          `a source file is never deleted without a confirmed good copy.`,
+      )
+    ) {
+      return;
+    }
+    setRequeueing(true);
+    setRequeueMsg(null);
+    try {
+      const res = await api.post<{ requeued: number; skipped: number; publishFailed: number }>(
+        "/api/admin/queue/requeue",
+        { jobId: job.jobId },
+      );
+      setRequeueMsg(
+        `Requeued ${res.requeued}` +
+          (res.skipped ? `, skipped ${res.skipped}` : "") +
+          (res.publishFailed ? `, ${res.publishFailed} failed to publish` : "") +
+          ".",
+      );
+      await load();
+    } catch (err) {
+      setRequeueMsg(
+        err instanceof ApiError
+          ? err.status === 403
+            ? "Administrator access is required to requeue."
+            : err.message
+          : String(err),
+      );
+    } finally {
+      setRequeueing(false);
+    }
+  }, [api, job, failedCount, load]);
+
   return (
     <div style={{ maxWidth: 1200, margin: "0 auto" }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 8 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 8, flexWrap: "wrap" }}>
         <Link to="/transfers" style={{ display: "inline-flex", alignItems: "center", gap: 4, color: "#0f6cbd", textDecoration: "none" }}>
           <ArrowLeft20Regular /> All transfers
         </Link>
         <Button icon={<ArrowClockwise20Regular />} appearance="subtle" size="small" onClick={() => void load()}>
           Refresh
         </Button>
+        {failedCount > 0 && (
+          <Button
+            icon={<ArrowSync20Regular />}
+            appearance="primary"
+            size="small"
+            disabled={requeueing}
+            onClick={() => void requeue()}
+          >
+            {requeueing ? "Requeuing…" : `Requeue ${failedCount} failed`}
+          </Button>
+        )}
+        {requeueMsg && <span style={{ fontSize: 13, color: "#605e5c" }}>{requeueMsg}</span>}
       </div>
 
       {loading && !job && <Spinner label="Loading transfer…" size="small" />}

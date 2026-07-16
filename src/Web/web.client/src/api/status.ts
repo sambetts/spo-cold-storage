@@ -42,6 +42,19 @@ export function describeOperation(operation: MigrationOperationKind): string {
   return operation === "Migrate" ? "Archive" : "Restore";
 }
 
+const FAILED_STATUSES: MigrationLifecycleStatus[] = [
+  "ValidationFailed",
+  "CopyToColdStorageFailed",
+  "DeleteFailed",
+  "PlaceholderFailed",
+  "RestoreFailed",
+  "PlaceholderRemoveFailed",
+];
+
+export function isFailedStatus(status: MigrationLifecycleStatus): boolean {
+  return FAILED_STATUSES.includes(status);
+}
+
 const LOG_LEVEL_NAMES: Record<number, string> = {
   0: "Trace",
   1: "Debug",
