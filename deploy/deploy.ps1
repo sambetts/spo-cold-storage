@@ -882,6 +882,16 @@ function Invoke-Phase-Function {
     $kvSecretUri = { param($name) "@Microsoft.KeyVault(SecretUri=https://$kvName.vault.azure.net/secrets/$name/)" }
     $sqlConn = "Server=tcp:$($o['sqlServerFqdn']),1433;Initial Catalog=$($o['sqlDatabaseName']);Encrypt=True;TrustServerCertificate=False;Connection Timeout=30;Authentication=Active Directory Managed Identity;"
 
+    # Worker concurrency is tunable without a code redeploy: the app setting below
+    # overrides host.json's extensions.serviceBus.maxConcurrentCalls. Lower it to ease
+    # pressure on a small SQL tier; raise it for throughput on a bigger DB. Source it
+    # from params.worker.maxConcurrentCalls, defaulting to 5. (Property lookups are
+    # StrictMode-safe: 'worker' is optional in params.json.)
+    $workerMaxConcurrentCalls = 5
+    if ($p.PSObject.Properties['worker'] -and $p.worker.PSObject.Properties['maxConcurrentCalls'] -and $p.worker.maxConcurrentCalls) {
+        $workerMaxConcurrentCalls = [int]$p.worker.maxConcurrentCalls
+    }
+
     # App settings: identity-based AzureWebJobsStorage (accountName, no key) + the
     # Service Bus trigger (fullyQualifiedNamespace, no connection string), plus the
     # same Config values the API uses. KV references resolve via the Function MSI's
@@ -904,6 +914,7 @@ function Invoke-Phase-Function {
         'ServiceBusQueueName'                   = $o['serviceBusQueueName']
         'ServiceBusConnection__fullyQualifiedNamespace' = $o['serviceBusFqdn']
         'AzureWebJobsStorage__accountName'      = $o['storageAccountName']
+        'AzureFunctionsJobHost__extensions__serviceBus__maxConcurrentCalls' = [string]$workerMaxConcurrentCalls
     }
     $tmp = New-TemporaryFile
     try {

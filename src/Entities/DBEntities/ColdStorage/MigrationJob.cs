@@ -67,5 +67,22 @@ public class MigrationJob
     [Column("summary")]
     public string? Summary { get; set; }
 
+    /// <summary>
+    /// Serialized submission (selected items + recursive + priority) for an async
+    /// submit. The MigrationExpander background service reads this to expand folders
+    /// and create the per-file items off the request thread, so a large-folder submit
+    /// returns immediately instead of blocking for minutes. Null once expansion has
+    /// run (or for a job that was expanded inline).
+    /// </summary>
+    [Column("submission_request")]
+    public string? SubmissionRequestJson { get; set; }
+
+    /// <summary>
+    /// When the async expansion finished creating + enqueuing this job's items. Null
+    /// while a submission is still pending expansion (used to re-drive after a restart).
+    /// </summary>
+    [Column("expansion_completed_at")]
+    public DateTime? ExpansionCompletedAt { get; set; }
+
     public ICollection<MigrationJobItem> Items { get; set; } = [];
 }

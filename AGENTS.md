@@ -119,7 +119,11 @@ SPFx command set
       ▼
 ASP.NET Core Web.Server  ──► SiteOwnerAuthorizationService (CSOM AssociatedOwnerGroup)
                           ──► ContainerAccessService (per-container ACLs)
-                          ──► IColdStorageBusPublisher
+                          ──► persist job.SubmissionRequestJson → 202 (fast)
+                              │
+                              ▼  in-proc channel (+ startup re-drive)
+                   MigrationExpansionBackgroundService → MigrationExpander
+                          (folder expand + per-file items + batched publish, off-request)
                               │
                               ▼  ColdStorageBusEnvelope (JSON)
                           Service Bus queue 'filediscovery'
@@ -138,7 +142,7 @@ ASP.NET Core Web.Server  ──► SiteOwnerAuthorizationService (CSOM Associate
        SPOColdStorageDbContext   (migration_jobs / migration_job_items / migration_job_logs)
 ```
 
-**Durability (so a migration can never silently freeze):** the API **persists items as `Queued` and publishes them decoupled from the request** — batched, with `CancellationToken.None` — so a client disconnect (HTTP 499 on a large submit) can't abort publishing and orphan un-sent items. A **`MigrationDispatchReconciler`** (a timer `BackgroundService` in `Migration.Functions`, every `ColdStorageDispatchIntervalSeconds`) is the safety net: it re-drives `Queued` items whose message was never sent, fails items stuck past the max-queued / stall windows (phase-aware, so items past the delete point aren't mislabeled), and closes empty jobs. The worker also **bounds per-item attempts** (`ColdStorageMaxProcessAttempts`) and dead-letters poison messages — firing the DLQ alert — instead of abandon-looping.
+**Durability (so a migration can never silently freeze):** `POST /api/migrations/start` only validates + authorizes + persists the selection to `job.SubmissionRequestJson`, then returns **202** immediately. A **`MigrationExpansionBackgroundService`** (hosted service in `Web.Server`) does the potentially-minutes-long folder expansion + per-file item creation + **batched publish decoupled from the request** (`CancellationToken.None`), so a large-folder submit is responsive and a client disconnect (HTTP 499) can't abort it; it re-drives any not-yet-expanded submission on startup. A **`MigrationDispatchReconciler`** (a timer `BackgroundService` in `Migration.Functions`, every `ColdStorageDispatchIntervalSeconds`) is the safety net: it re-drives `Queued` items whose message was never sent, fails items stuck past the max-queued / stall windows (phase-aware, so items past the delete point aren't mislabeled), **finalizes jobs whose items are all terminal but whose rollup was never written**, and closes empty jobs. The worker also **bounds per-item attempts** (`ColdStorageMaxProcessAttempts`) and dead-letters poison messages — firing the DLQ alert — instead of abandon-looping.
 
 ### Lifecycle status order (you cannot delete the source before reaching `DeletePending`)
 
@@ -209,7 +213,9 @@ the queue in <10 s with always-ready=2; API returns 401 = SQL grant + DbInitiali
 - **Don't add EF migrations**. Idempotent SQL in `DbInitializer` is the convention.
 - **Don't put package versions in csproj files.** Use `Directory.Packages.props`.
 - **The worker is the queue-triggered Azure Function** (`Migration.Functions`) — don't reintroduce a continuous WebJob / Always-On worker (governance disables Always On, so the item would idle-stop). The API only enqueues.
-- **Keep enqueue decoupled from the HTTP request.** `MigrationsController` persists items then publishes with `CancellationToken.None` (batched) — do **not** revert to publishing per-item on the request token: a client disconnect (HTTP 499) then aborts publishing and orphans `Queued` items with no message, which silently freezes the job (this is exactly what happened to a 4,000-file job). The `MigrationDispatchReconciler` re-drives such orphans and fails stalled items — **don't remove it**.
+- **Submit is async — keep it that way.** `MigrationsController.StartAsync` only persists the selection to `job.SubmissionRequestJson` and returns **202**; a `MigrationExpansionBackgroundService` (in `Web.Server`) expands folders, creates the per-file items and publishes them (batched, `CancellationToken.None`) off the request thread, re-driving un-expanded jobs on startup. Do **not** revert to expanding + publishing inline on the request token: a large folder then blocks the request for minutes (HTTP 500 timeouts) and a client disconnect (HTTP 499) orphans `Queued` items with no message, silently freezing the job (exactly what happened to a 4,000-file job). The `MigrationDispatchReconciler` re-drives orphans, fails stalled items and finalizes stuck job rollups — **don't remove it**.
+- **Keep the SQL DB at ≥ S1.** The worker does concurrent EF writes; on **Basic** (5 DTU, ~30 concurrent-request cap) a busy submit hits `The request limit for the database is 30 and has been reached` → EF `RetryLimitExceededException` mid-pipeline, leaving items in odd states. Worker concurrency is tunable **without a code redeploy** via `params.worker.maxConcurrentCalls` → the `AzureFunctionsJobHost__extensions__serviceBus__maxConcurrentCalls` app setting (overrides `host.json`); default 5.
+- **The SPA MSAL config is baked at build time.** `configReader.ts` reads `import.meta.env.VITE_*`; `deploy-spo.ps1 -Phase SpaConfig` writes `src/Web/web.client/.env.production`. If you rebuild/redeploy the SPA (e.g. the App phase) **without** a current `.env.production`, `VITE_MSAL_SCOPES` becomes the literal `"undefined"` and the SPA dies with MSAL `ClientConfigurationError: url_parse_error` on any token request. Run `SpaConfig` before an App deploy.
 - **Keep `always-ready ≥ 1` on the Function** — on Flex Consumption, scale-from-zero does **not** reliably wake the identity-based Service Bus trigger listener; always-ready keeps it warm (verified: probe drained in <10 s at always-ready=2).
 - **Don't disable `TreatWarningsAsErrors`** — fix the warning.
 - **Migration.Engine.Tests should be fully green** (144/0). The legacy SnapshotBuilder tests that used to fail were removed with the legacy code; a new failure is genuinely yours.

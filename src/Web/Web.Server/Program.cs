@@ -106,6 +106,14 @@ public class Program
         builder.Services.AddSingleton<Migration.Engine.Migration.IArchiveEligibilityEvaluator, Migration.Engine.Migration.ArchiveEligibilityEvaluator>();
         builder.Services.AddSingleton<IColdStorageBusPublisher, ColdStorageBusPublisher>();
 
+        // Async migrate submission: a large-folder submit records the job + returns
+        // immediately; this background service expands folders, creates the per-file
+        // items and enqueues them off the request thread. Durable via the persisted
+        // MigrationJob.SubmissionRequestJson (re-driven on startup).
+        builder.Services.AddSingleton<IMigrationSubmissionQueue, MigrationSubmissionQueue>();
+        builder.Services.AddScoped<IMigrationExpander, MigrationExpander>();
+        builder.Services.AddHostedService<MigrationExpansionBackgroundService>();
+
         var app = builder.Build();
 
         // Ensure DB

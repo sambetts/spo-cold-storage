@@ -236,6 +236,14 @@ IF COL_LENGTH('dbo.migration_job_logs', 'action') IS NULL
     ALTER TABLE dbo.migration_job_logs ADD action NVARCHAR(32) NULL;
 ";
 
+        const string addColdStorageJobColumnsSql = @"
+IF COL_LENGTH('dbo.migration_jobs', 'submission_request') IS NULL
+    ALTER TABLE dbo.migration_jobs ADD submission_request NVARCHAR(MAX) NULL;
+
+IF COL_LENGTH('dbo.migration_jobs', 'expansion_completed_at') IS NULL
+    ALTER TABLE dbo.migration_jobs ADD expansion_completed_at DATETIME2 NULL;
+";
+
         const string createExclusionsSql = @"
 IF OBJECT_ID('dbo.cold_storage_exclusions', 'U') IS NULL
 BEGIN
@@ -317,6 +325,7 @@ IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_migration_job_logs_act
 
         await context.Database.ExecuteSqlRawAsync(createContainersSql);
         await context.Database.ExecuteSqlRawAsync(createJobsSql);
+        await context.Database.ExecuteSqlRawAsync(addColdStorageJobColumnsSql);
         await context.Database.ExecuteSqlRawAsync(createExclusionsSql);
         await context.Database.ExecuteSqlRawAsync(createExtensionRulesSql);
         await context.Database.ExecuteSqlRawAsync(createPreArchiveNoticesSql);

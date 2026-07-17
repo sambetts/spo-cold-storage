@@ -25,9 +25,9 @@ public enum DispatchAction
 public readonly record struct DispatchThresholds(int EnqueueGraceSeconds, int MaxQueuedMinutes, int StallMinutes);
 
 /// <summary>Result of one reconciler pass, for logging.</summary>
-public readonly record struct DispatchReconcileSummary(int ReDriven, int FailedGaveUp, int FailedStalled, int EmptyJobsClosed)
+public readonly record struct DispatchReconcileSummary(int ReDriven, int FailedGaveUp, int FailedStalled, int EmptyJobsClosed, int JobsFinalized)
 {
-    public bool HasWork => ReDriven > 0 || FailedGaveUp > 0 || FailedStalled > 0 || EmptyJobsClosed > 0;
+    public bool HasWork => ReDriven > 0 || FailedGaveUp > 0 || FailedStalled > 0 || EmptyJobsClosed > 0 || JobsFinalized > 0;
 }
 
 /// <summary>
@@ -40,7 +40,10 @@ public readonly record struct DispatchReconcileSummary(int ReDriven, int FailedG
 ///   3. fails active items with no status change for <see cref="Config.ColdStorageStallMinutes"/>
 ///      (a crashed/stalled worker), so the job reaches a terminal state instead of
 ///      hanging forever;
-///   4. closes non-terminal jobs that never produced any items.
+///   4. closes non-terminal jobs that never produced any items;
+///   5. finalizes non-terminal jobs whose items are all terminal but whose rollup
+///      status was never written (e.g. a transient DB error lost the final rollup),
+///      so a completed job can never display an in-progress status forever.
 /// The per-item decision is the pure, unit-tested <see cref="Decide"/>.
 /// </summary>
 public sealed class MigrationDispatchReconciler : BaseComponent
@@ -129,6 +132,7 @@ public sealed class MigrationDispatchReconciler : BaseComponent
         var gaveUp = 0;
         var stalled = 0;
         var emptyJobs = 0;
+        var jobsFinalized = 0;
 
         // 1) Queued items whose message was never sent or is stale.
         var enqueueCutoff = now.AddSeconds(-thresholds.EnqueueGraceSeconds);
@@ -232,7 +236,30 @@ public sealed class MigrationDispatchReconciler : BaseComponent
             await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
         }
 
-        return new DispatchReconcileSummary(reDriven, gaveUp, stalled, emptyJobs);
+        // 5) Non-terminal jobs whose items are ALL terminal but whose rollup status
+        //    was never finalized (the final rollup write was lost to a transient DB
+        //    error). Recompute so the job reaches its terminal state instead of showing
+        //    an in-progress status forever. Guarded by the enqueue grace so we don't
+        //    race a worker that is about to write the same rollup. RecomputeJobRollupAsync
+        //    saves per job.
+        var rollupCutoff = now.AddSeconds(-thresholds.EnqueueGraceSeconds);
+        var stuckJobIds = await db.MigrationJobs
+            .Where(j => !TerminalStatuses.Contains(j.Status)
+                        && j.UpdatedAt < rollupCutoff
+                        && j.Items.Any()
+                        && !j.Items.Any(i => !TerminalStatuses.Contains(i.Status)))
+            .OrderBy(j => j.UpdatedAt)
+            .Select(j => j.JobId)
+            .Take(MaxItemsPerPass)
+            .ToListAsync(cancellationToken)
+            .ConfigureAwait(false);
+        foreach (var jobId in stuckJobIds)
+        {
+            await writer.RecomputeJobRollupAsync(jobId, cancellationToken).ConfigureAwait(false);
+            jobsFinalized++;
+        }
+
+        return new DispatchReconcileSummary(reDriven, gaveUp, stalled, emptyJobs, jobsFinalized);
     }
 
     private static MigrationLifecycleStatus StalledFailureStatus(MigrationLifecycleStatus status) => status switch

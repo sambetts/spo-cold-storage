@@ -60,7 +60,8 @@ legacy indexer/snapshot code, so a failing test now is genuinely yours.
 SPFx command set (site-owner only)  ──AadHttpClient──►  Web/Web.Server (API)
     │                                       │  SiteOwnerAuthorizationService (CSOM AssociatedOwnerGroup)
     │                                       │  ContainerAccessService (per-container ACLs)
-    │                                       ▼  IColdStorageBusPublisher
+    │                                       ▼  persist job.SubmissionRequestJson → 202 (fast)
+    │                       MigrationExpansionBackgroundService → batched IColdStorageBusPublisher
     │                       Service Bus queue 'filediscovery'  (ColdStorageBusEnvelope JSON)
     │                                       ▼
     │                       ColdStorageMessageProcessor  (in Migration.Functions)
@@ -77,7 +78,7 @@ SPFx command set (site-owner only)  ──AadHttpClient──►  Web/Web.Server
 - **`IJobStatusWriter` (`Migration.Engine/Lifecycle/`) is the single point of truth** for status and audit writes. Route every status/log write through it — that's what keeps SharePoint, the API, and the DB in sync.
 - **`ColdStorageMessageProcessor` parses one message format** — `ColdStorageBusEnvelope` (discriminated by `Operation = Migrate | Restore`) — and dead-letters anything unrecognised. The legacy indexer/snapshot stack + `BaseSharePointFileInfo` fallback were removed in the greenfield cleanup; there's no legacy path to preserve.
 - **The worker is the queue-triggered Azure Function `Migration.Functions`** (Flex Consumption, always-ready). The API only enqueues; don't reintroduce a continuous WebJob / Always-On worker.
-- **Enqueue is decoupled from the HTTP request and durable.** The API persists items as `Queued` then publishes batched with `CancellationToken.None`, so a client disconnect (HTTP 499) can't abort publishing and orphan un-sent items. A `MigrationDispatchReconciler` timer service in `Migration.Functions` re-drives `Queued` items whose message was never sent, fails stalled/stuck items, and the processor dead-letters poison messages after `ColdStorageMaxProcessAttempts`. Don't revert to per-item publishing on the request token and don't remove the reconciler — that's what stops a migration silently freezing.
+- **Submit is async, decoupled from the request, and durable.** `MigrationsController.StartAsync` persists the selection to `job.SubmissionRequestJson` and returns **202**; a `MigrationExpansionBackgroundService` (in `Web.Server`) expands folders, creates the per-file items and publishes them batched with `CancellationToken.None` off the request thread (re-driving un-expanded jobs on startup). This keeps a large-folder submit responsive and stops a client disconnect (HTTP 499) orphaning `Queued` items with no message. A `MigrationDispatchReconciler` timer service in `Migration.Functions` re-drives orphaned `Queued` items, fails stalled/stuck items, **finalizes jobs whose items are all terminal but whose rollup was never written**, and the processor dead-letters poison messages after `ColdStorageMaxProcessAttempts`. Don't revert to inline expansion/publishing on the request token and don't remove the reconciler — that's what stops a migration silently freezing.
 - The `.url` placeholder is INI-style; build/parse it only via `Models/ColdStorage/PlaceholderFileMetadata.cs`.
 
 ## Conventions that will bite you
@@ -92,6 +93,8 @@ SPFx command set (site-owner only)  ──AadHttpClient──►  Web/Web.Server
 - `Migration.Engine.Tests.csproj` suppresses `xUnit1051`, so `CancellationToken.None` is fine in tests. Test stack: xUnit v3, NSubstitute, AwesomeAssertions (still uses the `FluentAssertions` namespace).
 - Log through `ILogger<T>` — no `Tracer`/`DebugTracer` fields.
 - `Entities/Configuration/BaseConfig.cs` reflection is fragile: any new config property that isn't a `string` needs a default/converter or it throws on a missing value.
+- **Keep the SQL DB at ≥ S1.** The worker does concurrent EF writes; on **Basic** (~30 concurrent-request cap) a busy submit hits `The request limit for the database is 30 and has been reached` → EF `RetryLimitExceededException` mid-pipeline. Worker concurrency is tunable without a redeploy via `params.worker.maxConcurrentCalls` → the `AzureFunctionsJobHost__extensions__serviceBus__maxConcurrentCalls` app setting (overrides `host.json`); default 5.
+- **SPA MSAL config is baked at build time.** `configReader.ts` reads `import.meta.env.VITE_*` from `.env.production`, written by `deploy-spo.ps1 -Phase SpaConfig`. Rebuild/redeploy the SPA **without** a current `.env.production` and `VITE_MSAL_SCOPES` becomes `"undefined"` → MSAL `ClientConfigurationError: url_parse_error`. Run `SpaConfig` before an App deploy.
 
 ## Deployment
 

@@ -60,8 +60,8 @@ public sealed class DispatchReconcilerService(Config config, ILoggerFactory logg
                     if (summary.HasWork)
                     {
                         _logger.LogInformation(
-                            "Dispatch reconciler: re-drove {ReDriven}, failed-gave-up {GaveUp}, failed-stalled {Stalled}, closed {EmptyJobs} empty job(s).",
-                            summary.ReDriven, summary.FailedGaveUp, summary.FailedStalled, summary.EmptyJobsClosed);
+                            "Dispatch reconciler: re-drove {ReDriven}, failed-gave-up {GaveUp}, failed-stalled {Stalled}, closed {EmptyJobs} empty job(s), finalized {Finalized} completed job(s).",
+                            summary.ReDriven, summary.FailedGaveUp, summary.FailedStalled, summary.EmptyJobsClosed, summary.JobsFinalized);
                     }
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)

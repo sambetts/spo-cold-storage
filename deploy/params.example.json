@@ -39,6 +39,11 @@
     "serviceBus": "Standard"
   },
 
+  "worker": {
+    "_comment": "Optional. Tunes the Migration.Functions worker. maxConcurrentCalls caps how many Service Bus messages the worker processes in parallel — each does SharePoint + Blob I/O and multiple DB writes, so too high a value can exhaust the SQL tier's concurrent-request limit (Basic ~30). It is deployed as the AzureFunctionsJobHost__extensions__serviceBus__maxConcurrentCalls app setting, which overrides host.json without a code redeploy. Defaults to 5 if omitted.",
+    "maxConcurrentCalls": 5
+  },
+
   "azureAd": {
     "_comment": "Used by both scripts. If you run deploy-spo.ps1 AadApp phase first, it will create the AAD app and write clientId + servicePrincipalObjectId back here.",
     "clientId": "00000000-0000-0000-0000-000000000000",
