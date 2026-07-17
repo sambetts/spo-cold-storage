@@ -147,6 +147,14 @@ public sealed class ColdStorageMessageProcessor(Config config, ILogger logger) :
                 // it or redeliver — the result is already persisted.
                 return MessageOutcome.Complete;
             }
+            if (latest is not null && latest.Status == MigrationLifecycleStatus.RetryScheduled)
+            {
+                // The pipeline scheduled a transient/throttle backoff retry. Complete the
+                // message so it leaves the queue; the dispatch reconciler re-drives the item
+                // once the backoff window elapses. Abandoning here would redeliver it
+                // immediately (defeating the backoff); dead-lettering would strand it.
+                return MessageOutcome.Complete;
+            }
             var attempts = await writer.IncrementAttemptsAsync(envelope.ItemId, cancellationToken).ConfigureAwait(false);
             if (attempts >= maxAttempts)
             {

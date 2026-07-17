@@ -162,9 +162,8 @@ public sealed class ColdStorageMigratorPipeline : BaseComponent
             // CRITICAL: source absolutely must not be deleted on upload failure.
             // We never even reach the delete step on this code path.
             _logger.LogError(ex, "Copy to cold storage failed for '{Url}'.", file.FullSharePointUrl);
-            await _statusWriter.TransitionAsync(envelope.ItemId, MigrationLifecycleStatus.CopyToColdStorageFailed,
-                $"Copy failed: {ex.Message}", exception: ex, level: LogLevel.Error,
-                cancellationToken: cancellationToken);
+            await HandleStepFailureAsync(envelope.ItemId, ex,
+                MigrationLifecycleStatus.CopyToColdStorageFailed, $"Copy failed: {ex.Message}", cancellationToken);
             CleanupTempFile(tempFile);
             return false;
         }
@@ -185,9 +184,8 @@ public sealed class ColdStorageMigratorPipeline : BaseComponent
         {
             // Post-copy validation failed - again, do not delete the source.
             _logger.LogError(ex, "Post-copy validation failed for '{Url}'.", file.FullSharePointUrl);
-            await _statusWriter.TransitionAsync(envelope.ItemId, MigrationLifecycleStatus.CopyToColdStorageFailed,
-                $"Post-copy validation failed: {ex.Message}", exception: ex, level: LogLevel.Error,
-                cancellationToken: cancellationToken);
+            await HandleStepFailureAsync(envelope.ItemId, ex,
+                MigrationLifecycleStatus.CopyToColdStorageFailed, $"Post-copy validation failed: {ex.Message}", cancellationToken);
             return false;
         }
 
@@ -273,9 +271,8 @@ public sealed class ColdStorageMigratorPipeline : BaseComponent
         catch (Exception ex)
         {
             _logger.LogError(ex, "Failed to delete source file '{Url}'.", file.FullSharePointUrl);
-            await _statusWriter.TransitionAsync(envelope.ItemId, MigrationLifecycleStatus.DeleteFailed,
-                $"Failed to delete source: {ex.Message}", exception: ex, level: LogLevel.Error,
-                cancellationToken: cancellationToken);
+            await HandleStepFailureAsync(envelope.ItemId, ex,
+                MigrationLifecycleStatus.DeleteFailed, $"Failed to delete source: {ex.Message}", cancellationToken);
             return false;
         }
 
@@ -321,15 +318,53 @@ public sealed class ColdStorageMigratorPipeline : BaseComponent
         catch (Exception ex)
         {
             _logger.LogError(ex, "Failed to create placeholder for '{Url}'.", file.FullSharePointUrl);
-            await _statusWriter.TransitionAsync(envelope.ItemId, MigrationLifecycleStatus.PlaceholderFailed,
-                $"Failed to create placeholder: {ex.Message}", exception: ex, level: LogLevel.Error,
-                cancellationToken: cancellationToken);
+            await HandleStepFailureAsync(envelope.ItemId, ex,
+                MigrationLifecycleStatus.PlaceholderFailed, $"Failed to create placeholder: {ex.Message}", cancellationToken);
             return false;
         }
         finally
         {
             spCtx?.Dispose();
         }
+    }
+
+    /// <summary>
+    /// Records a step failure. A <b>transient</b> error (throttle/timeout/transient 5xx)
+    /// that is still under the attempt ceiling parks the item in the non-terminal
+    /// <see cref="MigrationLifecycleStatus.RetryScheduled"/> status with an exponential
+    /// backoff, so the dispatch reconciler re-drives it and a passing blip doesn't
+    /// permanently fail the migration. A permanent error — or a transient one that has
+    /// exhausted its attempts — transitions to <paramref name="terminalStatus"/>. This is
+    /// only ever reached before the source delete, or after the source is already safely
+    /// archived, so it never risks the source file.
+    /// </summary>
+    private async Task HandleStepFailureAsync(
+        Guid itemId,
+        Exception ex,
+        MigrationLifecycleStatus terminalStatus,
+        string terminalMessage,
+        CancellationToken cancellationToken)
+    {
+        if (TransientErrorClassifier.IsTransient(ex))
+        {
+            var attempts = await _statusWriter.IncrementAttemptsAsync(itemId, cancellationToken).ConfigureAwait(false);
+            var maxAttempts = _config.ColdStorageMaxProcessAttempts > 0 ? _config.ColdStorageMaxProcessAttempts : 5;
+            if (attempts < maxAttempts)
+            {
+                var backoffSeconds = ThrottleBackoff.SecondsFor(attempts, _config);
+                await _statusWriter.TransitionAsync(itemId, MigrationLifecycleStatus.RetryScheduled,
+                    $"Throttled or hit a transient error; waiting ~{backoffSeconds}s before automatic retry {attempts + 1} of {maxAttempts}.",
+                    exception: ex, level: LogLevel.Warning, cancellationToken: cancellationToken).ConfigureAwait(false);
+                return;
+            }
+            await _statusWriter.TransitionAsync(itemId, terminalStatus,
+                $"Gave up after {attempts} throttled/transient attempts. {terminalMessage}",
+                exception: ex, level: LogLevel.Error, cancellationToken: cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        await _statusWriter.TransitionAsync(itemId, terminalStatus, terminalMessage,
+            exception: ex, level: LogLevel.Error, cancellationToken: cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -352,19 +387,6 @@ public sealed class ColdStorageMigratorPipeline : BaseComponent
             return false;
         }
 
-        // The archived copy MUST still exist before we finalise — otherwise both
-        // the source and the copy are gone and we must surface that loudly.
-        var blob = GetContainerClient(item.BlobContainerName).GetBlobClient(item.BlobPath);
-        if (!await blob.ExistsAsync(cancellationToken).ConfigureAwait(false))
-        {
-            _logger.LogError("Resume for item {ItemId}: source is deleted AND the archived blob '{Container}/{Path}' is missing.",
-                envelope.ItemId, item.BlobContainerName, item.BlobPath);
-            await _statusWriter.TransitionAsync(envelope.ItemId, MigrationLifecycleStatus.PlaceholderFailed,
-                "Resume failed: the archived blob is missing. Manual recovery required.",
-                level: LogLevel.Error, cancellationToken: cancellationToken).ConfigureAwait(false);
-            return false;
-        }
-
         // Placeholder already written by the prior run — nothing left to do.
         if (item.PlaceholderCreatedAt is not null && !string.IsNullOrEmpty(item.PlaceholderServerRelativeUrl))
         {
@@ -375,6 +397,21 @@ public sealed class ColdStorageMigratorPipeline : BaseComponent
         ClientContext? spCtx = null;
         try
         {
+            // The archived copy MUST still exist before we finalise — otherwise both the
+            // source and the copy are gone and we surface that loudly. A genuine miss is a
+            // permanent PlaceholderFailed; a transient error reaching the blob is caught
+            // below and routed to a backoff retry instead of being mislabeled.
+            var blob = GetContainerClient(item.BlobContainerName).GetBlobClient(item.BlobPath);
+            if (!await blob.ExistsAsync(cancellationToken).ConfigureAwait(false))
+            {
+                _logger.LogError("Resume for item {ItemId}: source is deleted AND the archived blob '{Container}/{Path}' is missing.",
+                    envelope.ItemId, item.BlobContainerName, item.BlobPath);
+                await _statusWriter.TransitionAsync(envelope.ItemId, MigrationLifecycleStatus.PlaceholderFailed,
+                    "Resume failed: the archived blob is missing. Manual recovery required.",
+                    level: LogLevel.Error, cancellationToken: cancellationToken).ConfigureAwait(false);
+                return false;
+            }
+
             var metadata = new PlaceholderFileMetadata
             {
                 OriginalSiteUrl = file.SiteUrl,
@@ -405,9 +442,8 @@ public sealed class ColdStorageMigratorPipeline : BaseComponent
         catch (Exception ex)
         {
             _logger.LogError(ex, "Resume: failed to recreate placeholder for '{Url}'.", file.FullSharePointUrl);
-            await _statusWriter.TransitionAsync(envelope.ItemId, MigrationLifecycleStatus.PlaceholderFailed,
-                $"Resume: failed to recreate placeholder: {ex.Message}", exception: ex, level: LogLevel.Error,
-                cancellationToken: cancellationToken).ConfigureAwait(false);
+            await HandleStepFailureAsync(envelope.ItemId, ex,
+                MigrationLifecycleStatus.PlaceholderFailed, $"Resume: failed to recreate placeholder: {ex.Message}", cancellationToken);
             return false;
         }
         finally

@@ -27,6 +27,21 @@ public class FriendlyErrorMapperTests
     }
 
     [Fact]
+    public void Throttling_NonTerminal_PromisesAutomaticRetry()
+    {
+        var friendly = FriendlyErrorMapper.ToFriendly("429 Too Many Requests", MigrationLifecycleStatus.RetryScheduled);
+        Assert.Contains("automatically", friendly, System.StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Throttling_Terminal_DoesNotPromiseAutomaticRetry_AndSuggestsRequeue()
+    {
+        var friendly = FriendlyErrorMapper.ToFriendly("429 Too Many Requests", MigrationLifecycleStatus.CopyToColdStorageFailed);
+        Assert.DoesNotContain("will be retried automatically", friendly, System.StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("re-queue", friendly, System.StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public void AccessDenied_MapsToPermissionMessage()
     {
         var friendly = FriendlyErrorMapper.ToFriendly("403 Forbidden: Access denied", MigrationLifecycleStatus.CopyToColdStorageFailed);

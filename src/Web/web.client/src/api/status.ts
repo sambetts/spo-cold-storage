@@ -29,7 +29,7 @@ const STATUS_MAP: Record<MigrationLifecycleStatus, StatusDescriptor> = {
   PlaceholderRemoveFailed: { label: "Placeholder cleanup failed", tone: "warning" },
   RestoreCompleted: { label: "Restored", tone: "success" },
   CompletedWithWarning: { label: "Completed with warning", tone: "warning" },
-  RetryScheduled: { label: "Retry scheduled", tone: "warning" },
+  RetryScheduled: { label: "Waiting to retry", tone: "warning" },
   Cancelled: { label: "Cancelled", tone: "subtle" },
   Skipped: { label: "Skipped (not eligible)", tone: "subtle" },
 };

@@ -25,18 +25,20 @@ public enum DispatchAction
 public readonly record struct DispatchThresholds(int EnqueueGraceSeconds, int MaxQueuedMinutes, int StallMinutes);
 
 /// <summary>Result of one reconciler pass, for logging.</summary>
-public readonly record struct DispatchReconcileSummary(int ReDriven, int FailedGaveUp, int FailedStalled, int EmptyJobsClosed, int JobsFinalized)
+public readonly record struct DispatchReconcileSummary(int ReDriven, int FailedGaveUp, int FailedStalled, int EmptyJobsClosed, int JobsFinalized, int ThrottleRetried)
 {
-    public bool HasWork => ReDriven > 0 || FailedGaveUp > 0 || FailedStalled > 0 || EmptyJobsClosed > 0 || JobsFinalized > 0;
+    public bool HasWork => ReDriven > 0 || FailedGaveUp > 0 || FailedStalled > 0 || EmptyJobsClosed > 0 || JobsFinalized > 0 || ThrottleRetried > 0;
 }
 
 /// <summary>
 /// The safety net that guarantees a migration can never silently freeze. Each pass:
 ///   1. re-publishes <c>Queued</c> items whose Service Bus message was never sent or
-///      is stale (e.g. the start request was cancelled mid-publish, so the item was
-///      persisted but no message reached the queue);
-///   2. fails items that sat <c>Queued</c> past <see cref="Config.ColdStorageMaxQueuedMinutes"/>
-///      (they can never be enqueued/processed) — source left intact;
+///      is stale (e.g. the start request was cancelled mid-publish), and fails those
+///      that sat <c>Queued</c> past <see cref="Config.ColdStorageMaxQueuedMinutes"/>
+///      (source left intact);
+///   2. re-drives <c>RetryScheduled</c> items whose transient/throttle backoff window
+///      (<see cref="ThrottleBackoff"/>) has elapsed, so a throttled item resumes
+///      automatically after waiting;
 ///   3. fails active items with no status change for <see cref="Config.ColdStorageStallMinutes"/>
 ///      (a crashed/stalled worker), so the job reaches a terminal state instead of
 ///      hanging forever;
@@ -133,6 +135,7 @@ public sealed class MigrationDispatchReconciler : BaseComponent
         var stalled = 0;
         var emptyJobs = 0;
         var jobsFinalized = 0;
+        var throttleRetried = 0;
 
         // 1) Queued items whose message was never sent or is stale.
         var enqueueCutoff = now.AddSeconds(-thresholds.EnqueueGraceSeconds);
@@ -194,11 +197,68 @@ public sealed class MigrationDispatchReconciler : BaseComponent
             }
         }
 
-        // 2) Active items with no progress for too long => stalled/crashed worker.
+        // 2) RetryScheduled items whose transient/throttle backoff window has elapsed:
+        //    re-publish them so a throttled operation resumes automatically after waiting.
+        //    The backoff is UpdatedAt (when it entered RetryScheduled) + ThrottleBackoff of
+        //    the attempt count; computed in memory because 2^n isn't SQL-translatable.
+        var retryCandidates = await db.MigrationJobItems
+            .Include(i => i.Job)
+            .Where(i => i.Status == MigrationLifecycleStatus.RetryScheduled)
+            .OrderBy(i => i.UpdatedAt)
+            .Take(MaxItemsPerPass)
+            .ToListAsync(cancellationToken)
+            .ConfigureAwait(false);
+        var retryToPublish = new List<ColdStorageBusEnvelope>();
+        var retryItems = new List<MigrationJobItem>();
+        foreach (var item in retryCandidates)
+        {
+            var dueAt = item.UpdatedAt.AddSeconds(ThrottleBackoff.SecondsFor(item.Attempts, _config));
+            if (now < dueAt)
+            {
+                continue;
+            }
+            var envelope = ColdStorageBusMessageFactory.BuildEnvelopeFromItem(item, item.Job);
+            if (envelope is null)
+            {
+                _logger.LogWarning("Dispatch reconciler: RetryScheduled item {ItemId} can't be rebuilt into a valid envelope; skipping.", item.ItemId);
+                continue;
+            }
+            retryToPublish.Add(envelope);
+            retryItems.Add(item);
+        }
+        if (retryToPublish.Count > 0)
+        {
+            // Claim first: flip RetryScheduled -> Queued (+ stamp LastEnqueuedAt) and SAVE
+            // before publishing. That way a worker that picks the message up can't have its
+            // progress clobbered by a late status write, and a second reconciler pass won't
+            // re-select these rows (they're no longer RetryScheduled). If the publish then
+            // fails, the items are Queued with LastEnqueuedAt=now and the Queued re-drive
+            // pass resends them after the grace window — they're never lost.
+            foreach (var item in retryItems)
+            {
+                item.Status = MigrationLifecycleStatus.Queued;
+                item.LastEnqueuedAt = now;
+                item.UpdatedAt = now;
+            }
+            await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+            try
+            {
+                await _publisher.PublishManyAsync(retryToPublish, cancellationToken).ConfigureAwait(false);
+                throttleRetried = retryItems.Count;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Dispatch reconciler failed to re-drive {Count} RetryScheduled item(s); the Queued re-drive will resend them.", retryToPublish.Count);
+            }
+        }
+
+        // 3) Active items with no progress for too long => stalled/crashed worker.
+        //    RetryScheduled is excluded — it is intentionally waiting out its backoff.
         var stallCutoff = now.AddMinutes(-thresholds.StallMinutes);
         var stalledItems = await db.MigrationJobItems
             .Where(i => !TerminalStatuses.Contains(i.Status)
                         && i.Status != MigrationLifecycleStatus.Queued
+                        && i.Status != MigrationLifecycleStatus.RetryScheduled
                         && i.UpdatedAt < stallCutoff)
             .OrderBy(i => i.UpdatedAt)
             .Take(MaxItemsPerPass)
@@ -215,7 +275,7 @@ public sealed class MigrationDispatchReconciler : BaseComponent
             stalled++;
         }
 
-        // 3) Non-terminal jobs that never produced any items (enumeration failed
+        // 4) Non-terminal jobs that never produced any items (enumeration failed
         //    before any row was saved) — otherwise they show 'Queued' forever.
         var emptyJobList = await db.MigrationJobs
             .Where(j => !TerminalStatuses.Contains(j.Status)
@@ -259,7 +319,7 @@ public sealed class MigrationDispatchReconciler : BaseComponent
             jobsFinalized++;
         }
 
-        return new DispatchReconcileSummary(reDriven, gaveUp, stalled, emptyJobs, jobsFinalized);
+        return new DispatchReconcileSummary(reDriven, gaveUp, stalled, emptyJobs, jobsFinalized, throttleRetried);
     }
 
     private static MigrationLifecycleStatus StalledFailureStatus(MigrationLifecycleStatus status) => status switch

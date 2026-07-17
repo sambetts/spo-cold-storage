@@ -84,8 +84,10 @@ export function colorFor(value: StatusLike): string {
   if (FAILED_SUFFIX_REGEX.test(status) || status === MigrationLifecycleStatus.Cancelled) {
     return '#a4262c';
   }
+  if (status === MigrationLifecycleStatus.RetryScheduled) {
+    return '#ca5010'; // amber — actively waiting out a backoff before an automatic retry (e.g. throttled)
+  }
   if (status === MigrationLifecycleStatus.CompletedWithWarning ||
-      status === MigrationLifecycleStatus.RetryScheduled ||
       status === MigrationLifecycleStatus.Skipped ||
       status === MigrationLifecycleStatus.PlaceholderRemoveFailed) {
     return '#797775';
@@ -142,7 +144,7 @@ const DESCRIPTIONS: Partial<Record<MigrationLifecycleStatus, string>> = {
   [MigrationLifecycleStatus.PlaceholderRemoveFailed]: 'Restored, but the placeholder couldn\u2019t be removed.',
   [MigrationLifecycleStatus.RestoreCompleted]: 'Restore complete \u2014 file is back in SharePoint.',
   [MigrationLifecycleStatus.CompletedWithWarning]: 'Finished, but one or more items need attention.',
-  [MigrationLifecycleStatus.RetryScheduled]: 'A retry has been scheduled after a transient failure.',
+  [MigrationLifecycleStatus.RetryScheduled]: 'Throttled or hit a transient error \u2014 waiting, then retrying automatically.',
   [MigrationLifecycleStatus.Cancelled]: 'The operation was cancelled.',
   [MigrationLifecycleStatus.Skipped]: 'Deliberately not archived (ineligible or excluded); the original is untouched.',
 };

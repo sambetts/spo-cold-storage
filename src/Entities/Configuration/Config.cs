@@ -166,6 +166,22 @@ public class Config(Microsoft.Extensions.Configuration.IConfiguration config) : 
     public int ColdStorageMaxProcessAttempts { get; set; } = 5;
 
     /// <summary>
+    /// Base delay (seconds) for the exponential backoff applied to a transient/throttle
+    /// retry. The first retry waits this long; each subsequent attempt doubles it, capped
+    /// by <see cref="ColdStorageThrottleBackoffMaxSeconds"/>. While waiting, the item sits
+    /// in the non-terminal RetryScheduled status (visible in the SPFx + SPA UIs) and is
+    /// re-driven by the dispatch reconciler once the delay elapses.
+    /// </summary>
+    [ConfigValue(true)]
+    public int ColdStorageThrottleBackoffBaseSeconds { get; set; } = 30;
+
+    /// <summary>
+    /// Ceiling (seconds) for the transient/throttle retry backoff. Default 10 minutes.
+    /// </summary>
+    [ConfigValue(true)]
+    public int ColdStorageThrottleBackoffMaxSeconds { get; set; } = 600;
+
+    /// <summary>
     /// Estimated Azure storage price per GB/month for the cold-storage tier, used
     /// by the cost-savings KPI dashboard (issue #8). String so it can hold a
     /// decimal; parsed invariant. Default ~Azure Cold tier.

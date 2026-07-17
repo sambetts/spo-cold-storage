@@ -28,6 +28,13 @@ public interface IJobStatusWriter
         LogLevel level = LogLevel.Information,
         CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// Atomically increments and returns the item's processing-attempt counter. Used to
+    /// bound retries (throttle backoff in the pipeline; poison-message bounding in the
+    /// message processor) so an item can't be retried forever.
+    /// </summary>
+    Task<int> IncrementAttemptsAsync(Guid itemId, CancellationToken cancellationToken = default);
+
     Task LogAsync(
         Guid jobId,
         Guid? itemId,

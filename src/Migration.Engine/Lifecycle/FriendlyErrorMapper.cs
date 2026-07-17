@@ -41,11 +41,15 @@ public static partial class FriendlyErrorMapper
         }
         if (ContainsAny(msg, "429", "throttl", "Too Many Requests"))
         {
-            return "SharePoint or Azure is busy and throttled the request. This is temporary — it will be retried automatically.";
+            return status.IsTerminal()
+                ? "SharePoint or Azure throttled the request too many times, so it was stopped after several automatic retries. Re-queue to try again."
+                : "SharePoint or Azure is busy and throttled the request. It is waiting and will be retried automatically.";
         }
         if (ContainsAny(msg, "timeout", "timed out", "TaskCanceled", "operation was canceled", "operation was cancelled"))
         {
-            return "The operation timed out. This is usually temporary and will be retried.";
+            return status.IsTerminal()
+                ? "The operation kept timing out and was stopped after several automatic retries. Re-queue to try again."
+                : "The operation timed out. It is waiting and will be retried automatically.";
         }
         if (ContainsAny(msg, "401", "403", "access denied", "accessdenied", "unauthorized", "forbidden", "AADSTS"))
         {
