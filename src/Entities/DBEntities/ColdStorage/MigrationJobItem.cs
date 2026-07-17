@@ -139,6 +139,16 @@ public class MigrationJobItem
     public int Attempts { get; set; }
 
     /// <summary>
+    /// When the API / dispatch reconciler last published a Service Bus message for
+    /// this item. Null means "never enqueued". The reconciler re-publishes Queued
+    /// items whose message was never sent or is older than the enqueue grace, so a
+    /// partial/aborted publish (e.g. the start request was cancelled mid-loop) can't
+    /// leave an item Queued forever with no message on the bus.
+    /// </summary>
+    [Column("last_enqueued_at")]
+    public DateTime? LastEnqueuedAt { get; set; }
+
+    /// <summary>
     /// Admin-set processing priority (issue #16): higher is more urgent.
     /// Surfaced in the admin queue view and used to order app-side processing /
     /// display. (The Service Bus queue itself is FIFO; see QueueController.)

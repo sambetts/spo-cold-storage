@@ -223,6 +223,9 @@ IF COL_LENGTH('dbo.migration_job_items', 'orphan_detected_at') IS NULL
 
 IF COL_LENGTH('dbo.migration_job_items', 'priority') IS NULL
     ALTER TABLE dbo.migration_job_items ADD priority INT NOT NULL CONSTRAINT DF_items_priority DEFAULT(0);
+
+IF COL_LENGTH('dbo.migration_job_items', 'last_enqueued_at') IS NULL
+    ALTER TABLE dbo.migration_job_items ADD last_enqueued_at DATETIME2 NULL;
 ";
 
         const string addColdStorageLogColumnsSql = @"
@@ -301,6 +304,9 @@ IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_migration_job_items_sp
 
 IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_migration_job_items_job_status' AND object_id = OBJECT_ID('dbo.migration_job_items'))
     CREATE INDEX IX_migration_job_items_job_status ON dbo.migration_job_items(job_id, status);
+
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_migration_job_items_status_enqueue' AND object_id = OBJECT_ID('dbo.migration_job_items'))
+    CREATE INDEX IX_migration_job_items_status_enqueue ON dbo.migration_job_items(status, last_enqueued_at);
 
 IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_migration_job_logs_job_ts' AND object_id = OBJECT_ID('dbo.migration_job_logs'))
     CREATE INDEX IX_migration_job_logs_job_ts ON dbo.migration_job_logs(job_id, timestamp);

@@ -126,6 +126,46 @@ public class Config(Microsoft.Extensions.Configuration.IConfiguration config) : 
     public int ColdStorageReconcileIntervalHours { get; set; }
 
     /// <summary>
+    /// How often (seconds) the dispatch reconciler runs in the worker. It re-drives
+    /// Queued items whose Service Bus message was never sent (e.g. the start request
+    /// was cancelled mid-publish) and fails items stuck by a crashed worker, so a
+    /// migration can never silently freeze. 0 disables the loop.
+    /// </summary>
+    [ConfigValue(true)]
+    public int ColdStorageDispatchIntervalSeconds { get; set; } = 30;
+
+    /// <summary>
+    /// Grace period (seconds) before the dispatch reconciler re-publishes a Queued
+    /// item, giving the normal enqueue path time to be picked up before we resend.
+    /// </summary>
+    [ConfigValue(true)]
+    public int ColdStorageEnqueueGraceSeconds { get; set; } = 120;
+
+    /// <summary>
+    /// How long (minutes) an item may sit in an active, non-terminal processing
+    /// state with no status change before the reconciler treats it as a stalled
+    /// worker and marks it failed (so a crashed worker can't freeze a job forever).
+    /// </summary>
+    [ConfigValue(true)]
+    public int ColdStorageStallMinutes { get; set; } = 30;
+
+    /// <summary>
+    /// Maximum time (minutes) an item may remain Queued before the reconciler gives
+    /// up re-driving it and marks it failed. Bounds re-drive of items that can never
+    /// be enqueued/processed. Default 24h.
+    /// </summary>
+    [ConfigValue(true)]
+    public int ColdStorageMaxQueuedMinutes { get; set; } = 1440;
+
+    /// <summary>
+    /// Maximum number of processing attempts for a single item before the worker
+    /// stops retrying, marks it failed and dead-letters the message (so the DLQ
+    /// alert fires) instead of looping on a poison item.
+    /// </summary>
+    [ConfigValue(true)]
+    public int ColdStorageMaxProcessAttempts { get; set; } = 5;
+
+    /// <summary>
     /// Estimated Azure storage price per GB/month for the cold-storage tier, used
     /// by the cost-savings KPI dashboard (issue #8). String so it can hold a
     /// decimal; parsed invariant. Default ~Azure Cold tier.
