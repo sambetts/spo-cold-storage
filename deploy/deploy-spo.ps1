@@ -587,6 +587,13 @@ $($_.Exception.Message)
         } else {
             Write-Info 'node_modules present; skipping npm install.'
         }
+        # Clean stale build output first. Without this, dist/ accumulates bundles from
+        # previous builds and gulp package-solution ships ALL of them — leaving multiple
+        # hashed copies of each component in the .sppkg. That corrupts the tenant's
+        # component-manifest registration ("Cannot destructure property 'id' of undefined"
+        # at load) so the extension silently fails to render.
+        Write-Info 'gulp clean (remove stale build artifacts)…'
+        Invoke-Native npx 'gulp' 'clean' | Out-Null
         Write-Info 'gulp bundle --ship…'
         try {
             Invoke-Native npx 'gulp' 'bundle' '--ship' | Out-Null

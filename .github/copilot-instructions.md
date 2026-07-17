@@ -109,4 +109,20 @@ Two idempotent, phase-based PowerShell 7+ orchestrators in `deploy/`, both readi
 
 Any SPFx code or `elements.xml` change requires bumping **both** `solution.version`
 and `features[].version` in `config/package-solution.json`, or the upgrade skips
-re-applying the element manifests and leaves stale CustomActions on existing sites.
+re-applying the element manifests and leaves stale CustomActions on existing sites —
+`Update-PnPApp` is a no-op on an installed site when the version is unchanged.
+
+Other SPFx build/deploy gotchas (each caused a real incident):
+- After a `git reset`/branch switch, `npm ci` in **both** `src/Web/web.client` and
+  `src/SPFx/spfx-cold-storage` before building — the deploy skips `npm install` when
+  `node_modules` exists, so a stale tree silently breaks the build (SPA: react-router
+  5 vs required 6; SPFx: react 17.0.2 vs the pinned 17.0.1).
+- A stale SPFx react (17.0.2 vs SPO's SPFx 1.22 runtime, 17.0.1) makes the extension
+  fail to load with `Could not load … Cannot destructure property 'id' of 'a' as it is
+  undefined`, and the command-set buttons silently vanish. Fix: `npm ci` → react 17.0.1
+  → rebuild (the built `Extension_<id>.xml` must declare react `17.0.1`).
+- `deploy-spo.ps1 -Phase Spfx` runs `gulp clean` before bundling; without it `dist/`
+  ships duplicate hashed bundles that corrupt the tenant component-manifest registration.
+- No local app-only cert + private KV → upload with
+  `deploy-spo.ps1 -Phase SpfxDeploy -SpfxAuthMode DeviceLogin` (two device codes:
+  App Catalog, then the site).

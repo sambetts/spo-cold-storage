@@ -216,6 +216,12 @@ the queue in <10 s with always-ready=2; API returns 401 = SQL grant + DbInitiali
 - **Don't add `using Models.ColdStorage;` directly inside `Web.Server` controllers** without checking for the `Web.Models` collision. Either alias or use `global::`.
 - **The `BaseConfig` reflection in `Entities/Configuration/BaseConfig.cs`** is fragile — any new config property that isn't a string will need a corresponding default/converter or it will throw on missing values.
 - **On a private-only sub, don't try to write KV secrets or reach SQL from the deploy machine** — both are Forbidden. Use the control-plane (KV) / Kudu-over-VNet (SQL) paths the deploy already implements.
+- **SPFx build/deploy gotchas** (these cost a full incident — the ListView command-set buttons silently vanished):
+  - After any `git reset` / branch switch, run `npm ci` in **both** `src/Web/web.client` **and** `src/SPFx/spfx-cold-storage` before building. The deploy scripts skip `npm install` when `node_modules` exists, so a stale tree silently produces broken builds (the SPA got react-router **5** vs required **6**; SPFx got react **17.0.2** vs the pinned **17.0.1**).
+  - A stale SPFx react (17.0.2 vs SPO's SPFx 1.22 runtime, which provides **17.0.1**) makes the extension fail to load with `Could not load … Cannot destructure property 'id' of 'a' as it is undefined` in the browser console, and the buttons silently disappear. Fix: `npm ci` → react 17.0.1 → rebuild, and verify the built `Extension_<id>.xml` manifest declares react `17.0.1`.
+  - **Bump `solution.version` AND `features[].version`** in `config/package-solution.json` on **every** SPFx deploy. Re-deploying the same version is a no-op on an installed site (`Update-PnPApp` won't swap the bundle; SharePoint says "same version number … delete from the site + recycle bin").
+  - `deploy-spo.ps1 -Phase Spfx` now runs `gulp clean` first; without it `dist/` accumulates duplicate hashed bundles that ship in the `.sppkg` and corrupt the tenant's component-manifest registration.
+  - No app-only cert on the machine + private Key Vault → upload with `deploy-spo.ps1 -Phase SpfxDeploy -SpfxAuthMode DeviceLogin` (two device codes: App Catalog, then the site). To go headless, drop a passwordless PFX in `deploy/.local/` and register it on the AAD app.
 
 ## 10. Session-state on disk
 
