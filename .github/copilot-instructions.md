@@ -50,10 +50,9 @@ Web SPA — from `src/Web/web.client/`: `npm install`, `npm run dev`, `npm run b
 
 SPFx — from `src/SPFx/spfx-cold-storage/`: `npm install`, then `npm run build` (`gulp bundle`) or `npm run package` (`gulp bundle --ship && gulp package-solution --ship`); `npm run serve` for the workbench.
 
-**Known baseline noise:** ~7 tests in `Migration.Engine.Tests.SnapshotBuilder.SiteModelBuilderTests`
-fail with `ArgumentException` from `Entities/Configuration/BaseConfig.cs` (reflection
-coercing a string into a `bool` slot). These predate the cold-storage work — verify
-they still fail at HEAD before blaming your change; don't chase them otherwise.
+**Test suite is fully green** (144/0, no external deps). The legacy
+`SnapshotBuilder.SiteModelBuilderTests` that used to fail were removed with the
+legacy indexer/snapshot code, so a failing test now is genuinely yours.
 
 ## Architecture (the parts that span files)
 
@@ -78,6 +77,7 @@ SPFx command set (site-owner only)  ──AadHttpClient──►  Web/Web.Server
 - **`IJobStatusWriter` (`Migration.Engine/Lifecycle/`) is the single point of truth** for status and audit writes. Route every status/log write through it — that's what keeps SharePoint, the API, and the DB in sync.
 - **`ColdStorageMessageProcessor` parses one message format** — `ColdStorageBusEnvelope` (discriminated by `Operation = Migrate | Restore`) — and dead-letters anything unrecognised. The legacy indexer/snapshot stack + `BaseSharePointFileInfo` fallback were removed in the greenfield cleanup; there's no legacy path to preserve.
 - **The worker is the queue-triggered Azure Function `Migration.Functions`** (Flex Consumption, always-ready). The API only enqueues; don't reintroduce a continuous WebJob / Always-On worker.
+- **Enqueue is decoupled from the HTTP request and durable.** The API persists items as `Queued` then publishes batched with `CancellationToken.None`, so a client disconnect (HTTP 499) can't abort publishing and orphan un-sent items. A `MigrationDispatchReconciler` timer service in `Migration.Functions` re-drives `Queued` items whose message was never sent, fails stalled/stuck items, and the processor dead-letters poison messages after `ColdStorageMaxProcessAttempts`. Don't revert to per-item publishing on the request token and don't remove the reconciler — that's what stops a migration silently freezing.
 - The `.url` placeholder is INI-style; build/parse it only via `Models/ColdStorage/PlaceholderFileMetadata.cs`.
 
 ## Conventions that will bite you

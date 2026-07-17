@@ -58,9 +58,10 @@ src/
 │   ├── ColdStorageMessageProcessor.cs ← transport-agnostic bus dispatcher (Migrate | Restore)
 │   ├── Lifecycle/                 ← IJobStatusWriter (single point of writes for status + audit)
 │   ├── Migration/                 ← ColdStorageMigratorPipeline + SharePointPlaceholderWriter
-│   └── Restore/                   ← SharePointRestorePipeline
+│   ├── Restore/                   ← SharePointRestorePipeline
+│   └── Reconciliation/            ← orphan-blob + dispatch (re-drive/stall) reconcilers
 │
-├── Migration.Functions/           ← queue-triggered Azure Function = the worker (hosts the processor)
+├── Migration.Functions/           ← queue-triggered Azure Function = the worker (hosts the processor + dispatch reconciler)
 │
 ├── Web/Web.Server/                ← ASP.NET Core API host
 │   ├── Controllers/               ← Migrations, Restores, Jobs, Containers, Placeholders
@@ -137,6 +138,8 @@ ASP.NET Core Web.Server  ──► SiteOwnerAuthorizationService (CSOM Associate
        SPOColdStorageDbContext   (migration_jobs / migration_job_items / migration_job_logs)
 ```
 
+**Durability (so a migration can never silently freeze):** the API **persists items as `Queued` and publishes them decoupled from the request** — batched, with `CancellationToken.None` — so a client disconnect (HTTP 499 on a large submit) can't abort publishing and orphan un-sent items. A **`MigrationDispatchReconciler`** (a timer `BackgroundService` in `Migration.Functions`, every `ColdStorageDispatchIntervalSeconds`) is the safety net: it re-drives `Queued` items whose message was never sent, fails items stuck past the max-queued / stall windows (phase-aware, so items past the delete point aren't mislabeled), and closes empty jobs. The worker also **bounds per-item attempts** (`ColdStorageMaxProcessAttempts`) and dead-letters poison messages — firing the DLQ alert — instead of abandon-looping.
+
 ### Lifecycle status order (you cannot delete the source before reaching `DeletePending`)
 
 ```
@@ -206,9 +209,10 @@ the queue in <10 s with always-ready=2; API returns 401 = SQL grant + DbInitiali
 - **Don't add EF migrations**. Idempotent SQL in `DbInitializer` is the convention.
 - **Don't put package versions in csproj files.** Use `Directory.Packages.props`.
 - **The worker is the queue-triggered Azure Function** (`Migration.Functions`) — don't reintroduce a continuous WebJob / Always-On worker (governance disables Always On, so the item would idle-stop). The API only enqueues.
+- **Keep enqueue decoupled from the HTTP request.** `MigrationsController` persists items then publishes with `CancellationToken.None` (batched) — do **not** revert to publishing per-item on the request token: a client disconnect (HTTP 499) then aborts publishing and orphans `Queued` items with no message, which silently freezes the job (this is exactly what happened to a 4,000-file job). The `MigrationDispatchReconciler` re-drives such orphans and fails stalled items — **don't remove it**.
 - **Keep `always-ready ≥ 1` on the Function** — on Flex Consumption, scale-from-zero does **not** reliably wake the identity-based Service Bus trigger listener; always-ready keeps it warm (verified: probe drained in <10 s at always-ready=2).
 - **Don't disable `TreatWarningsAsErrors`** — fix the warning.
-- **Migration.Engine.Tests should be fully green** (125/0). The legacy SnapshotBuilder tests that used to fail were removed with the legacy code; a new failure is genuinely yours.
+- **Migration.Engine.Tests should be fully green** (144/0). The legacy SnapshotBuilder tests that used to fail were removed with the legacy code; a new failure is genuinely yours.
 - **Don't add `using Models.ColdStorage;` directly inside `Web.Server` controllers** without checking for the `Web.Models` collision. Either alias or use `global::`.
 - **The `BaseConfig` reflection in `Entities/Configuration/BaseConfig.cs`** is fragile — any new config property that isn't a string will need a corresponding default/converter or it will throw on missing values.
 - **On a private-only sub, don't try to write KV secrets or reach SQL from the deploy machine** — both are Forbidden. Use the control-plane (KV) / Kudu-over-VNet (SQL) paths the deploy already implements.
