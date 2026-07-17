@@ -112,17 +112,69 @@ function basename(serverRelativeUrl: string): string {
   return idx >= 0 ? serverRelativeUrl.substring(idx + 1) : serverRelativeUrl;
 }
 
-function folderOf(serverRelativeUrl: string): string {
-  if (!serverRelativeUrl) return '/';
-  const idx = serverRelativeUrl.lastIndexOf('/');
-  return idx > 0 ? serverRelativeUrl.substring(0, idx) : '/';
+interface FileTreeNode {
+  name: string;
+  path: string;
+  item?: IJobItemStatus;
+  folders: FileTreeNode[];
+  files: FileTreeNode[];
+  descendants: IJobItemStatus[];
 }
 
-function folderDisplayName(folderPath: string): string {
-  const segs = folderPath.split('/').filter(Boolean);
-  if (segs.length === 0) return '/ (site root)';
-  if (segs.length <= 2) return '/' + segs.join('/');
-  return '…/' + segs.slice(-2).join('/');
+/** Build a nested folder/subfolder/file tree from the flat item list. */
+function buildFileTree(items: IJobItemStatus[]): FileTreeNode {
+  const root: FileTreeNode = { name: '', path: '', folders: [], files: [], descendants: [] };
+  const index = new Map<string, FileTreeNode>([['', root]]);
+  for (const it of items) {
+    const full = (it.spServerRelativeUrl || '').replace(/\/+$/, '');
+    const segs = full.split('/').filter(Boolean);
+    const leaf = segs.pop() ?? full;
+    let parent = root;
+    let acc = '';
+    for (const seg of segs) {
+      acc += '/' + seg;
+      let node = index.get(acc);
+      if (!node) {
+        node = { name: seg, path: acc, folders: [], files: [], descendants: [] };
+        index.set(acc, node);
+        parent.folders.push(node);
+      }
+      parent = node;
+    }
+    parent.files.push({ name: leaf, path: full || leaf, item: it, folders: [], files: [], descendants: [it] });
+  }
+  fillDescendants(root);
+  root.folders = root.folders.map(compactFolder).sort((a, b) => a.name.localeCompare(b.name));
+  root.files.sort((a, b) => a.name.localeCompare(b.name));
+  return root;
+}
+
+function fillDescendants(node: FileTreeNode): IJobItemStatus[] {
+  const acc: IJobItemStatus[] = [];
+  for (const f of node.files) { if (f.item) { acc.push(f.item); } }
+  for (const f of node.folders) { acc.push(...fillDescendants(f)); }
+  node.descendants = acc;
+  return acc;
+}
+
+/** Collapse chains of single-child folders (a/b/c) into one node, VS Code style. */
+function compactFolder(node: FileTreeNode): FileTreeNode {
+  node.folders = node.folders.map(compactFolder);
+  while (node.folders.length === 1 && node.files.length === 0) {
+    const only = node.folders[0];
+    node.name = node.name ? `${node.name}/${only.name}` : only.name;
+    node.path = only.path;
+    node.files = only.files;
+    node.folders = only.folders;
+  }
+  node.folders.sort((a, b) => a.name.localeCompare(b.name));
+  node.files.sort((a, b) => a.name.localeCompare(b.name));
+  return node;
+}
+
+function allTreeFolderPaths(node: FileTreeNode, out: string[] = []): string[] {
+  for (const f of node.folders) { out.push(f.path); allTreeFolderPaths(f, out); }
+  return out;
 }
 
 function folderRollup(items: IJobItemStatus[]): { label: string; color: string } {
@@ -221,14 +273,31 @@ const Spinner: React.FC<{ message: string }> = ({ message }) => (
   </div>
 );
 
-const MessageList: React.FC<{ title: string; messages: string[]; color: string }> = ({ title, messages, color }) => (
-  <div style={{ margin: '8px 12px' }}>
-    <div style={{ fontSize: '12px', fontWeight: 600, color, marginBottom: '4px' }}>{title}</div>
-    <ul style={{ margin: 0, paddingLeft: '18px', fontSize: '12px', color: '#323130' }}>
-      {messages.map((m, i) => <li key={i}>{m}</li>)}
-    </ul>
-  </div>
-);
+const CollapsibleMessageList: React.FC<{ title: string; messages: string[]; color: string; defaultOpen?: boolean }> = ({ title, messages, color, defaultOpen }) => {
+  const [open, setOpen] = React.useState<boolean>(!!defaultOpen);
+  if (messages.length === 0) { return null; }
+  const toggle = (): void => setOpen(o => !o);
+  return (
+    <div style={{ margin: '8px 12px' }}>
+      <div
+        role="button"
+        tabIndex={0}
+        aria-expanded={open}
+        onClick={toggle}
+        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); } }}
+        style={{ display: 'flex', alignItems: 'center', gap: '6px', cursor: 'pointer', fontSize: '12px', fontWeight: 600, color }}
+      >
+        <span style={{ color: '#605e5c' }}>{open ? '▾' : '▸'}</span>
+        <span>{`${title} (${messages.length})`}</span>
+      </div>
+      {open && (
+        <ul style={{ margin: '4px 0 0', paddingLeft: '18px', fontSize: '12px', color: '#323130', maxHeight: '220px', overflow: 'auto' }}>
+          {messages.map((m, i) => <li key={i} style={{ wordBreak: 'break-word', marginBottom: '2px' }}>{m}</li>)}
+        </ul>
+      )}
+    </div>
+  );
+};
 
 const Timeline: React.FC<{ logs: IJobLogEntry[] }> = ({ logs }) => {
   const recent = logs.slice(-12); // oldest→newest; show the last dozen
@@ -262,55 +331,46 @@ const ItemStep: React.FC<{ item: IJobItemStatus }> = ({ item }) => {
   return <div style={{ marginTop: '4px', fontSize: '11px', color: '#605e5c', maxWidth: '280px' }}>{`${desc}${duration}`}</div>;
 };
 
-const cellStyle: React.CSSProperties = { padding: '6px 10px', verticalAlign: 'top' };
-
-const ItemsTable: React.FC<{ items: IJobItemStatus[] }> = ({ items }) => (
-  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px' }}>
-    <thead>
-      <tr>
-        {['File', 'Kind', 'Status', 'Attempts', 'Last error'].map(h => (
-          <th key={h} style={{ textAlign: 'left', padding: '6px 10px', borderBottom: '1px solid #edebe9', fontWeight: 600, color: '#605e5c', fontSize: '12px' }}>{h}</th>
-        ))}
-      </tr>
-    </thead>
-    <tbody>
-      {items.map(item => (
-        <tr key={item.itemId} style={{ borderBottom: '1px solid #f3f2f1' }}>
-          <td style={{ ...cellStyle, wordBreak: 'break-all' }}>{basename(item.spServerRelativeUrl)}</td>
-          <td style={cellStyle}>{item.itemKind}</td>
-          <td style={cellStyle}>
-            <Badge value={item.status} />
-            <ItemStep item={item} />
-          </td>
-          <td style={cellStyle}>{String(item.attempts)}</td>
-          <td style={{ ...cellStyle, color: '#a4262c', fontSize: '12px' }} title={item.lastErrorDetail ?? undefined}>{item.lastError ?? ''}</td>
-        </tr>
-      ))}
-    </tbody>
-  </table>
+const FileLeaf: React.FC<{ item: IJobItemStatus; depth: number }> = ({ item, depth }) => (
+  <div style={{ display: 'flex', alignItems: 'flex-start', gap: '8px', borderTop: '1px solid #f8f7f6', fontSize: '13px', paddingTop: '5px', paddingBottom: '5px', paddingRight: '12px', paddingLeft: 12 + (depth + 1) * 16 }}>
+    <span style={{ flex: '1 1 auto', wordBreak: 'break-all' }} title={item.spServerRelativeUrl}>{basename(item.spServerRelativeUrl)}</span>
+    {item.lastError && <span style={{ color: '#a4262c', fontSize: '12px', maxWidth: '200px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={item.lastErrorDetail ?? item.lastError}>{item.lastError}</span>}
+    <div style={{ flex: '0 0 auto', textAlign: 'right' }}>
+      <Badge value={item.status} />
+      <ItemStep item={item} />
+    </div>
+  </div>
 );
 
-const FolderSection: React.FC<{
-  nsKey: string; folderPath: string; items: IJobItemStatus[]; expanded: boolean; onToggle: (nsKey: string) => void;
-}> = ({ nsKey, folderPath, items, expanded, onToggle }) => {
-  const rollup = folderRollup(items);
-  const toggle = (): void => onToggle(nsKey);
+const TreeFolderNode: React.FC<{
+  node: FileTreeNode; depth: number; jobId: string;
+  expandedFolders: ReadonlySet<string>; onToggleFolder: (nsKey: string) => void;
+}> = ({ node, depth, jobId, expandedFolders, onToggleFolder }) => {
+  const nsKey = `${jobId}::${node.path}`;
+  const expanded = expandedFolders.has(nsKey);
+  const rollup = folderRollup(node.descendants);
+  const toggle = (): void => onToggleFolder(nsKey);
   return (
-    <div style={{ borderBottom: '1px solid #f3f2f1' }}>
+    <div style={{ borderTop: depth === 0 ? undefined : '1px solid #f8f7f6' }}>
       <div
         role="button"
         tabIndex={0}
         aria-expanded={expanded}
         onClick={toggle}
         onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); } }}
-        style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', padding: '8px 12px', background: '#faf9f8' }}
+        style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', paddingTop: '8px', paddingBottom: '8px', paddingRight: '12px', paddingLeft: 12 + depth * 16, background: '#faf9f8' }}
       >
         <span style={{ color: '#605e5c', flex: '0 0 auto' }}>{expanded ? '▾' : '▸'}</span>
-        <span style={{ fontWeight: 600, fontSize: '13px', flex: '1 1 auto', wordBreak: 'break-all' }} title={folderPath}>{folderDisplayName(folderPath)}</span>
-        <span style={{ fontSize: '12px', color: '#605e5c', background: '#f3f2f1', borderRadius: '10px', padding: '1px 8px', flex: '0 0 auto' }}>{items.length}</span>
+        <span style={{ fontWeight: 600, fontSize: '13px', flex: '1 1 auto', wordBreak: 'break-all' }} title={node.path}>{node.name}</span>
+        <span style={{ fontSize: '12px', color: '#605e5c', background: '#f3f2f1', borderRadius: '10px', padding: '1px 8px', flex: '0 0 auto' }}>{node.descendants.length}</span>
         <span style={{ fontSize: '11px', color: '#fff', background: rollup.color, borderRadius: '10px', padding: '2px 8px', whiteSpace: 'nowrap', flex: '0 0 auto' }}>{rollup.label}</span>
       </div>
-      {expanded && <ItemsTable items={items} />}
+      {expanded && (
+        <div>
+          {node.folders.map(f => <TreeFolderNode key={f.path} node={f} depth={depth + 1} jobId={jobId} expandedFolders={expandedFolders} onToggleFolder={onToggleFolder} />)}
+          {node.files.map(f => <FileLeaf key={f.item!.itemId} item={f.item!} depth={depth + 1} />)}
+        </div>
+      )}
     </div>
   );
 };
@@ -319,39 +379,25 @@ const ItemsByFolder: React.FC<{
   job: ITrackedJob; items: IJobItemStatus[]; expandedFolders: ReadonlySet<string>;
   onToggleFolder: (nsKey: string) => void; onToggleAllFolders: (nsKeys: string[], expand: boolean) => void;
 }> = ({ job, items, expandedFolders, onToggleFolder, onToggleAllFolders }) => {
-  const groups = new Map<string, IJobItemStatus[]>();
-  for (const item of items) {
-    const key = folderOf(item.spServerRelativeUrl);
-    const arr = groups.get(key);
-    if (arr) { arr.push(item); } else { groups.set(key, [item]); }
-  }
-  const folderKeys = Array.from(groups.keys()).sort((a, b) => a.localeCompare(b));
-  const nsKeys = folderKeys.map(k => `${job.jobId}::${k}`);
-  const allExpanded = nsKeys.every(k => expandedFolders.has(k));
+  const tree = React.useMemo(() => buildFileTree(items), [items]);
+  const folderPaths = React.useMemo(() => allTreeFolderPaths(tree), [tree]);
+  const nsKeys = folderPaths.map(p => `${job.jobId}::${p}`);
+  const allExpanded = nsKeys.length > 0 && nsKeys.every(k => expandedFolders.has(k));
 
   return (
     <div>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '6px 12px', fontSize: '12px', color: '#605e5c', borderBottom: '1px solid #f3f2f1' }}>
-        <span>{`${items.length} file${items.length === 1 ? '' : 's'} in ${folderKeys.length} folder${folderKeys.length === 1 ? '' : 's'}`}</span>
+        <span>{`${items.length} file${items.length === 1 ? '' : 's'} in ${folderPaths.length} folder${folderPaths.length === 1 ? '' : 's'}`}</span>
         <button
           type="button"
           onClick={() => onToggleAllFolders(nsKeys, !allExpanded)}
           style={{ background: 'transparent', border: 'none', color: '#0078d4', cursor: 'pointer', fontSize: '12px', padding: '2px 4px' }}
         >{allExpanded ? 'Collapse all' : 'Expand all'}</button>
       </div>
-      {folderKeys.map(key => {
-        const nsKey = `${job.jobId}::${key}`;
-        return (
-          <FolderSection
-            key={nsKey}
-            nsKey={nsKey}
-            folderPath={key}
-            items={groups.get(key)!}
-            expanded={expandedFolders.has(nsKey)}
-            onToggle={onToggleFolder}
-          />
-        );
-      })}
+      {tree.folders.map(f => (
+        <TreeFolderNode key={f.path} node={f} depth={0} jobId={job.jobId} expandedFolders={expandedFolders} onToggleFolder={onToggleFolder} />
+      ))}
+      {tree.files.map(f => <FileLeaf key={f.item!.itemId} item={f.item!} depth={0} />)}
     </div>
   );
 };
@@ -415,8 +461,8 @@ const JobBlock: React.FC<{
         ? <p style={{ margin: '12px', color: '#605e5c', fontSize: '13px' }}>{emptyText}</p>
         : <ItemsByFolder job={job} items={items} expandedFolders={expandedFolders} onToggleFolder={onToggleFolder} onToggleAllFolders={onToggleAllFolders} />}
 
-      {warnings.length > 0 && <MessageList title="Warnings" messages={warnings} color="#797775" />}
-      {job.lastResponse && job.lastResponse.errors.length > 0 && <MessageList title="Errors" messages={job.lastResponse.errors} color="#a4262c" />}
+      {warnings.length > 0 && <CollapsibleMessageList title="Warnings" messages={warnings} color="#797775" />}
+      {job.lastResponse && job.lastResponse.errors.length > 0 && <CollapsibleMessageList title="Errors" messages={job.lastResponse.errors} color="#a4262c" defaultOpen />}
       {job.lastResponse?.summary && <p style={{ margin: '8px 12px', fontSize: '12px', color: '#605e5c' }}>{job.lastResponse.summary}</p>}
       {job.logs && job.logs.length > 0 && <Timeline logs={job.logs} />}
     </section>

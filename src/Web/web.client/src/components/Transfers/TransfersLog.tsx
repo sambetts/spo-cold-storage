@@ -499,39 +499,161 @@ function FolderDisclosure({
   );
 }
 
-function ItemsTable({ items }: { items: JobItemStatus[] }) {
+// --- Nested file tree (folders → subfolders → files) ----------------------
+interface FileTreeNode {
+  name: string;
+  path: string;
+  item?: JobItemStatus;
+  folders: FileTreeNode[];
+  files: FileTreeNode[];
+  descendants: JobItemStatus[];
+}
+
+/** Build a nested folder/subfolder/file tree from the flat item list. */
+function buildFileTree(items: readonly JobItemStatus[]): FileTreeNode {
+  const root: FileTreeNode = { name: "", path: "", folders: [], files: [], descendants: [] };
+  const index = new Map<string, FileTreeNode>([["", root]]);
+  for (const it of items) {
+    const full = (it.spServerRelativeUrl || "").replace(/\/+$/, "");
+    const segs = full.split("/").filter(Boolean);
+    const leaf = segs.pop() ?? full;
+    let parent = root;
+    let acc = "";
+    for (const seg of segs) {
+      acc += "/" + seg;
+      let node = index.get(acc);
+      if (!node) {
+        node = { name: seg, path: acc, folders: [], files: [], descendants: [] };
+        index.set(acc, node);
+        parent.folders.push(node);
+      }
+      parent = node;
+    }
+    parent.files.push({ name: leaf, path: full || leaf, item: it, folders: [], files: [], descendants: [it] });
+  }
+  fillDescendants(root);
+  root.folders = root.folders.map(compactFolder).sort((a, b) => a.name.localeCompare(b.name));
+  root.files.sort((a, b) => a.name.localeCompare(b.name));
+  return root;
+}
+
+function fillDescendants(node: FileTreeNode): JobItemStatus[] {
+  const acc: JobItemStatus[] = [];
+  for (const f of node.files) if (f.item) acc.push(f.item);
+  for (const f of node.folders) acc.push(...fillDescendants(f));
+  node.descendants = acc;
+  return acc;
+}
+
+/** Collapse chains of single-child folders (e.g. a/b/c) into one node, VS Code style. */
+function compactFolder(node: FileTreeNode): FileTreeNode {
+  node.folders = node.folders.map(compactFolder);
+  while (node.folders.length === 1 && node.files.length === 0) {
+    const only = node.folders[0];
+    node.name = node.name ? `${node.name}/${only.name}` : only.name;
+    node.path = only.path;
+    node.files = only.files;
+    node.folders = only.folders;
+  }
+  node.folders.sort((a, b) => a.name.localeCompare(b.name));
+  node.files.sort((a, b) => a.name.localeCompare(b.name));
+  return node;
+}
+
+function allFolderPaths(node: FileTreeNode, out: string[] = []): string[] {
+  for (const f of node.folders) {
+    out.push(f.path);
+    allFolderPaths(f, out);
+  }
+  return out;
+}
+
+const treeRowBase: CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: 8,
+  width: "100%",
+  border: "none",
+  background: "transparent",
+  cursor: "pointer",
+  fontSize: 13,
+  textAlign: "left",
+  paddingTop: 8,
+  paddingRight: 10,
+  paddingBottom: 8,
+};
+
+function TreeFolderNode({
+  node,
+  depth,
+  expanded,
+  onToggle,
+}: {
+  node: FileTreeNode;
+  depth: number;
+  expanded: ReadonlySet<string>;
+  onToggle: (path: string) => void;
+}) {
+  const open = expanded.has(node.path);
+  const rollup = folderRollup(node.descendants);
   return (
-    <div style={{ border: "1px solid #edebe9", borderRadius: 6, overflow: "hidden", margin: "0 0 8px" }}>
-      <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
-        <thead>
-          <tr style={{ background: "#faf9f8", textAlign: "left", color: "#605e5c" }}>
-            <th style={th}>File</th>
-            <th style={th}>Status</th>
-            <th style={th}>Attempts</th>
-            <th style={th}>Updated</th>
-            <th style={th}>Detail</th>
-          </tr>
-        </thead>
-        <tbody>
-          {items.map((item) => (
-            <tr key={item.itemId} style={{ borderTop: "1px solid #f3f2f1" }}>
-              <td style={{ ...td, maxWidth: 360 }} title={item.spServerRelativeUrl}>
-                {fileName(item.spServerRelativeUrl)}
-              </td>
-              <td style={td}>
-                <StatusBadge status={item.status} />
-              </td>
-              <td style={td}>{item.attempts}</td>
-              <td style={td} title={formatDateTime(item.updatedAt)}>
-                {formatRelative(item.updatedAt)}
-              </td>
-              <td style={{ ...td, color: item.lastError ? "#a4262c" : "#605e5c", whiteSpace: "normal" }} title={item.lastErrorDetail ?? undefined}>
-                {item.lastError ?? "—"}
-              </td>
-            </tr>
+    <div style={{ borderTop: depth === 0 ? undefined : "1px solid #f8f7f6" }}>
+      <button
+        type="button"
+        onClick={() => onToggle(node.path)}
+        aria-expanded={open}
+        style={{ ...treeRowBase, paddingLeft: 10 + depth * 16, background: "#faf9f8" }}
+      >
+        <span style={{ color: "#605e5c" }}>{open ? "▾" : "▸"}</span>
+        <span style={{ fontWeight: 600, flex: "1 1 auto", wordBreak: "break-all" }} title={node.path}>
+          {node.name}
+        </span>
+        <span style={{ fontSize: 12, color: "#605e5c", background: "#f3f2f1", borderRadius: 10, padding: "1px 8px" }}>{node.descendants.length}</span>
+        <span style={{ fontSize: 11, color: "#fff", background: rollup.color, borderRadius: 10, padding: "2px 8px", whiteSpace: "nowrap" }}>
+          {rollup.label}
+        </span>
+      </button>
+      {open && (
+        <div>
+          {node.folders.map((f) => (
+            <TreeFolderNode key={f.path} node={f} depth={depth + 1} expanded={expanded} onToggle={onToggle} />
           ))}
-        </tbody>
-      </table>
+          {node.files.map((f) => (
+            <FileLeaf key={f.item!.itemId} item={f.item!} depth={depth + 1} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function FileLeaf({ item, depth }: { item: JobItemStatus; depth: number }) {
+  return (
+    <div
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 8,
+        borderTop: "1px solid #f8f7f6",
+        fontSize: 13,
+        paddingTop: 5,
+        paddingRight: 10,
+        paddingBottom: 5,
+        paddingLeft: 10 + (depth + 1) * 16,
+      }}
+    >
+      <span style={{ flex: "1 1 auto", wordBreak: "break-all" }} title={item.spServerRelativeUrl}>
+        {fileName(item.spServerRelativeUrl)}
+      </span>
+      {item.lastError && (
+        <span style={{ color: "#a4262c", fontSize: 12, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", maxWidth: 220 }} title={item.lastErrorDetail ?? item.lastError}>
+          {item.lastError}
+        </span>
+      )}
+      <span style={{ color: "#605e5c", fontSize: 12, whiteSpace: "nowrap" }} title={formatDateTime(item.updatedAt)}>
+        {formatRelative(item.updatedAt)}
+      </span>
+      <StatusBadge status={item.status} />
     </div>
   );
 }
@@ -647,7 +769,7 @@ function TransferDetail({ jobId }: { jobId: string }) {
     () => (statusFilter ? items.filter((i) => statusCategory(i.status) === statusFilter) : items),
     [items, statusFilter],
   );
-  const fileGroups = useMemo(() => groupByFolder(filteredItems, (i) => i.spServerRelativeUrl), [filteredItems]);
+  const fileTree = useMemo(() => buildFileTree(filteredItems), [filteredItems]);
   const warningGroups = useMemo(() => groupByFolder(job?.warnings ?? [], warningPath), [job]);
 
   const toggleFolder = useCallback((key: string) => {
@@ -803,7 +925,7 @@ function TransferDetail({ jobId }: { jobId: string }) {
               <option value="skipped">Skipped ({counts.skipped})</option>
             </Select>
             <span style={{ flex: 1 }} />
-            <Button size="small" appearance="subtle" onClick={() => setExpandedFolders(new Set(fileGroups.map((g) => `f-${g.folder}`)))}>
+            <Button size="small" appearance="subtle" onClick={() => setExpandedFolders(new Set(allFolderPaths(fileTree)))}>
               Expand all
             </Button>
             <Button size="small" appearance="subtle" onClick={() => setExpandedFolders(new Set())}>
@@ -811,19 +933,13 @@ function TransferDetail({ jobId }: { jobId: string }) {
             </Button>
           </div>
           <div style={{ border: "1px solid #edebe9", borderRadius: 8, overflow: "hidden", marginBottom: 24 }}>
-            {fileGroups.map((g) => (
-              <FolderDisclosure
-                key={`f-${g.folder}`}
-                folder={g.folder}
-                count={g.items.length}
-                rollup={folderRollup(g.items)}
-                open={expandedFolders.has(`f-${g.folder}`)}
-                onToggle={() => toggleFolder(`f-${g.folder}`)}
-              >
-                <ItemsTable items={g.items} />
-              </FolderDisclosure>
+            {fileTree.folders.map((f) => (
+              <TreeFolderNode key={f.path} node={f} depth={0} expanded={expandedFolders} onToggle={toggleFolder} />
             ))}
-            {fileGroups.length === 0 && (
+            {fileTree.files.map((f) => (
+              <FileLeaf key={f.item!.itemId} item={f.item!} depth={0} />
+            ))}
+            {fileTree.folders.length === 0 && fileTree.files.length === 0 && (
               <div style={{ color: "#605e5c", fontSize: 13, padding: 12 }}>
                 {job.items.length === 0 ? "No files were queued for this transfer." : "No files match this filter."}
               </div>
