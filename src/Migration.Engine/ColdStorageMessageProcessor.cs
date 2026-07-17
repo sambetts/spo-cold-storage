@@ -123,7 +123,51 @@ public sealed class ColdStorageMessageProcessor(Config config, ILogger logger) :
             }
         }
 
-        return success ? MessageOutcome.Complete : MessageOutcome.Abandon;
+        if (success)
+        {
+            return MessageOutcome.Complete;
+        }
+
+        // Bound retries so a poison item can't loop forever (the redelivery storm we
+        // saw when SQL was briefly unreachable made hundreds of attempts per item).
+        // After the configured ceiling, mark the item terminally failed and
+        // dead-letter the message so it lands on the DLQ (firing the depth alert)
+        // instead of being abandoned and endlessly redelivered. The source is always
+        // left intact — a failed migrate never deletes the SharePoint file.
+        var maxAttempts = _config.ColdStorageMaxProcessAttempts > 0 ? _config.ColdStorageMaxProcessAttempts : 5;
+        try
+        {
+            using var db = new SPOColdStorageDbContext(_config);
+            var writer = new JobStatusWriter(db, _logger);
+            var latest = await writer.FindItemAsync(envelope.ItemId, cancellationToken).ConfigureAwait(false);
+            if (latest is not null && latest.Status.IsTerminal())
+            {
+                // The pipeline already recorded a terminal outcome for this item
+                // (e.g. PlaceholderFailed after the source was deleted). Don't relabel
+                // it or redeliver — the result is already persisted.
+                return MessageOutcome.Complete;
+            }
+            var attempts = await writer.IncrementAttemptsAsync(envelope.ItemId, cancellationToken).ConfigureAwait(false);
+            if (attempts >= maxAttempts)
+            {
+                await writer.TransitionAsync(
+                    envelope.ItemId,
+                    envelope.Operation == MigrationOperationKind.Migrate
+                        ? MigrationLifecycleStatus.CopyToColdStorageFailed
+                        : MigrationLifecycleStatus.RestoreFailed,
+                    $"Failed {attempts} time(s); giving up and dead-lettering the message. The source was left intact.",
+                    level: LogLevel.Error,
+                    cancellationToken: cancellationToken).ConfigureAwait(false);
+                _logger.LogWarning("Item {ItemId} dead-lettered after {Attempts} failed attempts.", envelope.ItemId, attempts);
+                return MessageOutcome.DeadLetter;
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to record poison/attempt state for item {ItemId}; abandoning for retry.", envelope.ItemId);
+        }
+
+        return MessageOutcome.Abandon;
     }
 
     private static ColdStorageBusEnvelope? TryDeserialiseEnvelope(string body)

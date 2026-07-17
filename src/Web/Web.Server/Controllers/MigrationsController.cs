@@ -352,53 +352,29 @@ public class MigrationsController(
             await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
         }
 
-        // Publish each envelope. If a publish fails, mark the corresponding DB row
-        // as CopyToColdStorageFailed with the error text so:
-        //   (1) the SPFx UI sees the failure rather than a row stuck in Queued forever
-        //   (2) the idempotency check above will let the user resubmit immediately
-        //       (failed items are terminal -> the next call creates a fresh row)
-        //   (3) ops can correlate the worker log to the specific item
-        // We use Promise.allSettled-style accounting: keep going even if one fails so
-        // partial submits at least queue the publishable items.
-        var publishFailures = new List<(Guid ItemId, string Error)>();
-        foreach (var envelope in queueWork)
+        // Publish decoupled from the request lifetime: use CancellationToken.None so a
+        // client disconnect (the SPFx call giving up on a large submit) can't abort the
+        // publish and orphan un-enqueued items — the exact failure that froze a
+        // 4,000-file job. Batched for throughput. Every item is already persisted as
+        // Queued above, so anything not sent here (a publish error, or a crash before
+        // this line) is re-driven by the worker's dispatch reconciler within the
+        // enqueue grace, rather than sitting Queued with no message forever.
+        DateTime? enqueuedAt = DateTime.UtcNow;
+        try
         {
-            try
-            {
-                await _publisher.PublishAsync(envelope, cancellationToken).ConfigureAwait(false);
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                publishFailures.Add((envelope.ItemId, ex.Message));
-                _logger.LogError(ex, "Failed to publish envelope for item {ItemId} on job {JobId}.", envelope.ItemId, envelope.JobId);
-            }
-        }
-
-        if (publishFailures.Count > 0)
-        {
-            var failedIds = publishFailures.Select(f => f.ItemId).ToHashSet();
-            var failedItems = await _db.MigrationJobItems
-                .Where(i => failedIds.Contains(i.ItemId))
-                .ToListAsync(cancellationToken)
+            await _publisher.PublishManyAsync(queueWork, CancellationToken.None).ConfigureAwait(false);
+            await _db.MigrationJobItems
+                .Where(i => i.JobId == job.JobId && i.Status == MigrationLifecycleStatus.Queued)
+                .ExecuteUpdateAsync(s => s.SetProperty(i => i.LastEnqueuedAt, enqueuedAt), CancellationToken.None)
                 .ConfigureAwait(false);
-            foreach (var item in failedItems)
-            {
-                var err = publishFailures.First(f => f.ItemId == item.ItemId).Error;
-                item.Status = MigrationLifecycleStatus.CopyToColdStorageFailed;
-                item.LastError = $"Failed to publish to Service Bus: {err}";
-                item.UpdatedAt = DateTime.UtcNow;
-                item.CompletedAt = DateTime.UtcNow;
-                _db.MigrationJobLogs.Add(new MigrationJobLog
-                {
-                    JobId = item.JobId,
-                    ItemId = item.ItemId,
-                    Status = MigrationLifecycleStatus.CopyToColdStorageFailed,
-                    Level = (int)LogLevel.Error,
-                    Message = item.LastError!,
-                });
-                warnings.Add($"'{item.SpServerRelativeUrl}': publish failed - {err}");
-            }
-            await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            // Non-fatal: items stay Queued (LastEnqueuedAt unset) and the dispatch
+            // reconciler re-drives them, so a transient Service Bus blip no longer
+            // fails the submit or loses items.
+            _logger.LogError(ex, "Batch publish for job {JobId} failed; {Count} item(s) will be re-driven by the dispatch reconciler.", job.JobId, queueWork.Count);
+            warnings.Add($"{queueWork.Count} item(s) could not be enqueued immediately and will be retried automatically.");
         }
 
         return Accepted(new AcceptedJobResponse

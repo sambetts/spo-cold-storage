@@ -1,39 +1,32 @@
 using Azure.Messaging.ServiceBus;
 using Entities.Configuration;
-using Microsoft.Extensions.Logging;
-using Migration.Engine.Lifecycle;
 using Migration.Engine.Utils;
 using Models.ColdStorage;
 
-namespace Web.Services;
+namespace Migration.Engine.Lifecycle;
 
 /// <summary>
-/// Enqueues cold-storage envelope messages onto the file-discovery service-bus
-/// queue. Wraps <see cref="ServiceBusSender"/> in a singleton so controllers
-/// don't pay per-request connection cost.
+/// Publishes cold-storage envelopes onto the file-discovery queue. Used by the
+/// worker's dispatch reconciler to re-drive items whose original message was never
+/// sent. Wraps a single <see cref="ServiceBusSender"/> so callers can batch cheaply.
 /// </summary>
-public interface IColdStorageBusPublisher : IAsyncDisposable
+public interface IColdStorageQueuePublisher : IAsyncDisposable
 {
     Task PublishAsync(ColdStorageBusEnvelope envelope, CancellationToken cancellationToken = default);
 
-    /// <summary>
-    /// Publishes many envelopes in as few Service Bus batches as possible. Callers
-    /// should pass <see cref="CancellationToken.None"/> so a client disconnect can't
-    /// abort a large submit mid-publish and orphan items. Returns the count sent.
-    /// </summary>
+    /// <summary>Publishes many envelopes in as few batches as possible; returns the count sent.</summary>
     Task<int> PublishManyAsync(IReadOnlyList<ColdStorageBusEnvelope> envelopes, CancellationToken cancellationToken = default);
 }
 
-public sealed class ColdStorageBusPublisher : IColdStorageBusPublisher
+/// <inheritdoc />
+public sealed class ColdStorageQueuePublisher : IColdStorageQueuePublisher
 {
     private readonly ServiceBusClient _client;
     private readonly ServiceBusSender _sender;
-    private readonly ILogger<ColdStorageBusPublisher> _logger;
 
-    public ColdStorageBusPublisher(Config config, ILogger<ColdStorageBusPublisher> logger)
+    public ColdStorageQueuePublisher(Config config)
     {
         ArgumentNullException.ThrowIfNull(config);
-        _logger = logger ?? throw new ArgumentNullException(nameof(logger));
         _client = ServiceBusClientFactory.Create(config.ConnectionStrings.ServiceBus, config);
         _sender = _client.CreateSender(config.ServiceBusQueueName);
     }
@@ -46,9 +39,6 @@ public sealed class ColdStorageBusPublisher : IColdStorageBusPublisher
             throw new InvalidOperationException("Refusing to publish invalid cold-storage envelope.");
         }
         await _sender.SendMessageAsync(ColdStorageBusMessageFactory.BuildMessage(envelope), cancellationToken).ConfigureAwait(false);
-        _logger.LogInformation(
-            "Published {Operation} envelope job={JobId} item={ItemId} container={Container}.",
-            envelope.Operation, envelope.JobId, envelope.ItemId, envelope.ContainerName);
     }
 
     public Task<int> PublishManyAsync(IReadOnlyList<ColdStorageBusEnvelope> envelopes, CancellationToken cancellationToken = default)

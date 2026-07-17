@@ -215,6 +215,35 @@ public sealed class JobStatusWriter(SPOColdStorageDbContext db, ILogger logger) 
             .AnyAsync(cancellationToken);
     }
 
+    /// <summary>
+    /// Increments the item's processing-attempt counter and returns the new value.
+    /// Used by the worker to bound retries on a poison message. Returns
+    /// <see cref="int.MaxValue"/> if the item no longer exists (treat as exhausted).
+    /// </summary>
+    public async Task<int> IncrementAttemptsAsync(Guid itemId, CancellationToken cancellationToken = default)
+    {
+        var item = await _db.MigrationJobItems.FirstOrDefaultAsync(i => i.ItemId == itemId, cancellationToken);
+        if (item == null)
+        {
+            return int.MaxValue;
+        }
+        item.Attempts++;
+        item.UpdatedAt = DateTime.UtcNow;
+        await _db.SaveChangesAsync(cancellationToken);
+        return item.Attempts;
+    }
+
+    /// <summary>
+    /// Recomputes the job-level rollup status from its items and saves. Used by the
+    /// dispatch reconciler after it changes item statuses in bulk, so a job whose
+    /// items are all terminal doesn't stay stuck showing an in-progress status.
+    /// </summary>
+    public async Task RecomputeJobRollupAsync(Guid jobId, CancellationToken cancellationToken = default)
+    {
+        await UpdateRollupAsync(jobId, cancellationToken);
+        await _db.SaveChangesAsync(cancellationToken);
+    }
+
     private void ApplyTransitionInternal(MigrationJobItem item, MigrationLifecycleStatus newStatus, string message)
     {
         var previous = item.Status;

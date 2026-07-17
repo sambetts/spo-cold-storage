@@ -29,6 +29,11 @@ var host = new HostBuilder()
         // Emit the worker heartbeat so the health API / SPFx UI shows this
         // queue-triggered worker as online (the WebJob is being retired).
         services.AddHostedService<HeartbeatBackgroundService>();
+
+        // Safety net: re-drive Queued items whose bus message was never sent and
+        // fail items stuck by a crashed worker, so a migration can never silently
+        // freeze (see DispatchReconcilerService / MigrationDispatchReconciler).
+        services.AddHostedService<DispatchReconcilerService>();
     })
     .Build();
 
