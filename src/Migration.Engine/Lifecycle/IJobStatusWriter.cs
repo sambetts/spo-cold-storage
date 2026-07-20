@@ -29,6 +29,22 @@ public interface IJobStatusWriter
         CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// Parks an item in <see cref="MigrationLifecycleStatus.RetryScheduled"/> with a concrete
+    /// <paramref name="nextRetryUtc"/> due time (from the SharePoint <c>Retry-After</c> header
+    /// when present, else the exponential backoff). Records the retry reason as the friendly
+    /// last-error so the UI can show why it's waiting, and persists the optional
+    /// <paramref name="retryAfterSeconds"/> for reporting. The retry itself is scheduled on the
+    /// bus by the caller; this only advances the lifecycle row.
+    /// </summary>
+    Task ScheduleRetryAsync(
+        Guid itemId,
+        DateTime nextRetryUtc,
+        int? retryAfterSeconds,
+        string message,
+        Exception? exception = null,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Atomically increments and returns the item's processing-attempt counter. Used to
     /// bound retries (throttle backoff in the pipeline; poison-message bounding in the
     /// message processor) so an item can't be retried forever.

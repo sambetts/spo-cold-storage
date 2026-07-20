@@ -147,15 +147,47 @@ public sealed class ColdStorageMigratorPipeline : BaseComponent
         string? tempFile = null;
         long size;
         string md5Base64;
+        var copySkipped = false;
         try
         {
-            var downloader = new SharePointFileDownloader(app, _config, _logger);
-            (tempFile, size) = await downloader.DownloadFileToTempDir(file).ConfigureAwait(false);
-            md5Base64 = ComputeMd5Base64(tempFile);
-
             var containerClient = GetContainerClient(blobContainerName);
-            await UploadToBlobAsync(
-                containerClient, tempFile, blobPath, envelope, md5Base64, cancellationToken).ConfigureAwait(false);
+
+            // Conflict-by-date: if this file is already in cold storage, compare the live
+            // source's last-modified against the source-modified recorded on the existing
+            // archive. Older archive -> overwrite; same version -> skip the (throttle-heavy)
+            // re-copy but still place the placeholder; newer archive -> refuse (an anomaly:
+            // never overwrite a newer archive and never delete the source).
+            var conflict = await ResolveBlobConflictAsync(containerClient, blobPath, file.LastModified, cancellationToken).ConfigureAwait(false);
+            if (conflict.Decision == BlobConflictDecision.DestinationNewer)
+            {
+                _logger.LogError("Refusing to migrate '{Url}': the cold-storage copy (source-modified {Archived:o}) is newer than the source ({Source:o}).",
+                    file.FullSharePointUrl, conflict.ArchivedSourceLastModified, file.LastModified);
+                await _statusWriter.TransitionAsync(envelope.ItemId, MigrationLifecycleStatus.CopyToColdStorageFailed,
+                    $"The existing cold-storage copy is newer than the source, so it was not overwritten and the source was left in place. Archived version {conflict.ArchivedSourceLastModified:u}, source {file.LastModified.ToUniversalTime():u}.",
+                    level: LogLevel.Error, cancellationToken: cancellationToken);
+                return false;
+            }
+
+            if (conflict.Decision == BlobConflictDecision.SkipSameVersion)
+            {
+                // Already archived this exact version — skip the copy but still replace the
+                // source with a placeholder, using the existing blob's size/hash for the
+                // delete-safety length check and the placeholder metadata.
+                size = conflict.ExistingSize;
+                md5Base64 = conflict.ExistingMd5 ?? string.Empty;
+                copySkipped = true;
+                await _statusWriter.LogAsync(envelope.JobId, envelope.ItemId, MigrationLifecycleStatus.MigrationInProgress, LogLevel.Information,
+                    "Already in cold storage with the same version; skipping the copy and replacing the source with a placeholder.", cancellationToken: cancellationToken);
+            }
+            else
+            {
+                // Copy (new) or Overwrite (older archive) — both upload the current source bytes.
+                var downloader = new SharePointFileDownloader(app, _config, _logger);
+                (tempFile, size) = await downloader.DownloadFileToTempDir(file).ConfigureAwait(false);
+                md5Base64 = ComputeMd5Base64(tempFile);
+                await UploadToBlobAsync(
+                    containerClient, tempFile, blobPath, envelope, md5Base64, cancellationToken).ConfigureAwait(false);
+            }
         }
         catch (Exception ex)
         {
@@ -178,7 +210,12 @@ public sealed class ColdStorageMigratorPipeline : BaseComponent
 
         try
         {
-            await VerifyBlobAsync(blobContainerName, blobPath, size, md5Base64, cancellationToken).ConfigureAwait(false);
+            // Nothing was uploaded when we skipped a same-version copy, so there is no new
+            // blob to verify — the existing archive was already validated when it was written.
+            if (!copySkipped)
+            {
+                await VerifyBlobAsync(blobContainerName, blobPath, size, md5Base64, cancellationToken).ConfigureAwait(false);
+            }
         }
         catch (Exception ex)
         {
@@ -207,7 +244,7 @@ public sealed class ColdStorageMigratorPipeline : BaseComponent
             spCtx = await AuthUtils.GetClientContext(_config, file.SiteUrl, _logger, null).ConfigureAwait(false);
             var spFile = spCtx.Web.GetFileByServerRelativeUrl(file.ServerRelativeFilePath);
             spCtx.Load(spFile, f => f.Exists, f => f.Length, f => f.CheckOutType, f => f.ListItemAllFields);
-            await spCtx.ExecuteQueryAsync().ConfigureAwait(false);
+            await spCtx.ExecuteQueryAsyncWithThrottleRetries(_logger).ConfigureAwait(false);
 
             if (!spFile.Exists)
             {
@@ -263,7 +300,7 @@ public sealed class ColdStorageMigratorPipeline : BaseComponent
                 }
 
                 spFile.DeleteObject();
-                await spCtx.ExecuteQueryAsync().ConfigureAwait(false);
+                await spCtx.ExecuteQueryAsyncWithThrottleRetries(_logger).ConfigureAwait(false);
             }
             await _statusWriter.RecordSourceMetadataAsync(envelope.ItemId, originalCreatedBy, originalModifiedBy, originalCreated, originalModified, cancellationToken);
             await _statusWriter.RecordSourceDeletedAsync(envelope.ItemId, cancellationToken);
@@ -352,9 +389,18 @@ public sealed class ColdStorageMigratorPipeline : BaseComponent
             if (attempts < maxAttempts)
             {
                 var backoffSeconds = ThrottleBackoff.SecondsFor(attempts, _config);
-                await _statusWriter.TransitionAsync(itemId, MigrationLifecycleStatus.RetryScheduled,
-                    $"Throttled or hit a transient error; waiting ~{backoffSeconds}s before automatic retry {attempts + 1} of {maxAttempts}.",
-                    exception: ex, level: LogLevel.Warning, cancellationToken: cancellationToken).ConfigureAwait(false);
+                var retryAfterSeconds = ThrottleInfo.TryGetRetryAfterSeconds(ex);
+                // Honour the server's Retry-After when it asked for longer than our backoff, but
+                // never wait less than the backoff, and cap at 1h so a bogus header can't park an
+                // item for days. The concrete due time is persisted (NextRetryAt) and the retry is
+                // scheduled directly on the bus for that time (see ColdStorageMessageProcessor),
+                // so the resume no longer depends on the reconciler being awake.
+                var waitSeconds = Math.Clamp(Math.Max(backoffSeconds, retryAfterSeconds ?? 0), 1, 3600);
+                var nextRetryUtc = DateTime.UtcNow.AddSeconds(waitSeconds);
+                var reason = retryAfterSeconds is int ra
+                    ? $"SharePoint or Azure is busy and throttled the request (asked to wait {ra}s). It will be retried automatically at {nextRetryUtc:HH:mm:ss} UTC (attempt {attempts + 1} of {maxAttempts})."
+                    : $"Throttled or hit a transient error; it will be retried automatically at {nextRetryUtc:HH:mm:ss} UTC (attempt {attempts + 1} of {maxAttempts}).";
+                await _statusWriter.ScheduleRetryAsync(itemId, nextRetryUtc, retryAfterSeconds, reason, ex, cancellationToken).ConfigureAwait(false);
                 return;
             }
             await _statusWriter.TransitionAsync(itemId, terminalStatus,
@@ -509,6 +555,51 @@ public sealed class ColdStorageMigratorPipeline : BaseComponent
             return null;
         }
         return $"{_config.AppBaseUrl.TrimEnd('/')}/cold-storage/download/{itemId}";
+    }
+
+    /// <summary>Outcome of comparing a file against an existing cold-storage blob.</summary>
+    private readonly record struct BlobConflictResult(
+        BlobConflictDecision Decision,
+        long ExistingSize,
+        string? ExistingMd5,
+        DateTime? ArchivedSourceLastModified);
+
+    /// <summary>
+    /// Reads the existing cold-storage blob (if any) and applies the conflict-by-date rule
+    /// (<see cref="MigrateConflictResolver"/>) using the source-modified time recorded on it.
+    /// A missing blob means "copy"; an unreadable/legacy timestamp defaults to "overwrite".
+    /// </summary>
+    private async Task<BlobConflictResult> ResolveBlobConflictAsync(
+        BlobContainerClient containerClient,
+        string blobPath,
+        DateTime sourceLastModifiedUtc,
+        CancellationToken cancellationToken)
+    {
+        var blob = containerClient.GetBlobClient(blobPath);
+        Azure.Storage.Blobs.Models.BlobProperties props;
+        try
+        {
+            props = (await blob.GetPropertiesAsync(cancellationToken: cancellationToken).ConfigureAwait(false)).Value;
+        }
+        catch (Azure.RequestFailedException ex) when (ex.Status == 404)
+        {
+            // No blob (or no container) yet — first-time copy.
+            return new BlobConflictResult(BlobConflictDecision.Copy, 0, null, null);
+        }
+
+        DateTime? archived = null;
+        var archivedRaw = props.Metadata
+            .FirstOrDefault(kv => string.Equals(kv.Key, BlobMetadataKeys.OriginalLastModifiedUtc, StringComparison.OrdinalIgnoreCase))
+            .Value;
+        if (!string.IsNullOrEmpty(archivedRaw)
+            && DateTime.TryParse(archivedRaw, CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.RoundtripKind, out var parsed))
+        {
+            archived = parsed;
+        }
+
+        var decision = MigrateConflictResolver.Decide(sourceLastModifiedUtc, archived);
+        var md5 = props.ContentHash is { Length: > 0 } hash ? Convert.ToBase64String(hash) : null;
+        return new BlobConflictResult(decision, props.ContentLength, md5, archived);
     }
 
     private async Task UploadToBlobAsync(

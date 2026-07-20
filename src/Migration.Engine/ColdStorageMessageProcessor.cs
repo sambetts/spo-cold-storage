@@ -34,8 +34,9 @@ public enum MessageOutcome
 /// item / placeholder twice concurrently; cross-process duplicates are still
 /// coalesced by the DB status guards inside the pipelines.
 /// </summary>
-public sealed class ColdStorageMessageProcessor(Config config, ILogger logger) : BaseComponent(config, logger)
+public sealed class ColdStorageMessageProcessor(Config config, ILogger logger, IColdStorageQueuePublisher? retryPublisher = null) : BaseComponent(config, logger)
 {
+    private readonly IColdStorageQueuePublisher? _retryPublisher = retryPublisher;
     private readonly ConcurrentDictionary<Guid, byte> _inFlightItems = new();
     // Serialises concurrent restores of the SAME placeholder on this host so a
     // second in-flight restore can't double-upload (issue #10). Cross-host
@@ -149,10 +150,33 @@ public sealed class ColdStorageMessageProcessor(Config config, ILogger logger) :
             }
             if (latest is not null && latest.Status == MigrationLifecycleStatus.RetryScheduled)
             {
-                // The pipeline scheduled a transient/throttle backoff retry. Complete the
-                // message so it leaves the queue; the dispatch reconciler re-drives the item
-                // once the backoff window elapses. Abandoning here would redeliver it
-                // immediately (defeating the backoff); dead-lettering would strand it.
+                // The pipeline parked this item with a concrete NextRetryAt. Schedule the retry
+                // directly on the bus for that time so it resumes reliably even when the Function
+                // idles between bursts (an in-process reconciler timer can't be relied on then).
+                // The dispatch reconciler stays a late safety net if the scheduled message never
+                // fires. Abandoning here would redeliver immediately (defeating the backoff);
+                // dead-lettering would strand it.
+                if (_retryPublisher is not null && latest.NextRetryAt is DateTime dueUtc)
+                {
+                    try
+                    {
+                        var enqueueAt = dueUtc <= DateTime.UtcNow
+                            ? DateTimeOffset.UtcNow.AddSeconds(1)
+                            : new DateTimeOffset(DateTime.SpecifyKind(dueUtc, DateTimeKind.Utc));
+                        await _retryPublisher.ScheduleAsync(envelope, enqueueAt, cancellationToken).ConfigureAwait(false);
+                        _logger.LogWarning("Item {ItemId} throttled; scheduled automatic retry for {Due:o}.", envelope.ItemId, enqueueAt);
+                        return MessageOutcome.Complete;
+                    }
+                    catch (Exception ex)
+                    {
+                        // Couldn't schedule the retry — don't complete (that would strand the item
+                        // until the reconciler happens to run). Abandon so Service Bus redelivers it
+                        // and the next attempt reschedules.
+                        _logger.LogError(ex, "Failed to schedule bus retry for item {ItemId}; abandoning for redelivery.", envelope.ItemId);
+                        return MessageOutcome.Abandon;
+                    }
+                }
+                // No retry publisher wired (legacy host) — complete and rely on the reconciler.
                 return MessageOutcome.Complete;
             }
             var attempts = await writer.IncrementAttemptsAsync(envelope.ItemId, cancellationToken).ConfigureAwait(false);

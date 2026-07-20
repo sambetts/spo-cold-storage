@@ -1,4 +1,5 @@
 using Entities.Configuration;
+using Microsoft.Azure.Functions.Worker;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -13,6 +14,15 @@ var host = new HostBuilder()
     .ConfigureFunctionsWorkerDefaults()
     .ConfigureServices((context, services) =>
     {
+        // Detailed telemetry: route worker logs + custom events/metrics to the shared
+        // Application Insights resource (APPLICATIONINSIGHTS_CONNECTION_STRING). This is what
+        // makes the reconciler's liveness and each message's outcome queryable — the exact
+        // signals that were missing when a throttled migration silently froze. Operational
+        // signals are emitted as custom events (TrackEvent), which bypass the worker's default
+        // Information log filter, so we keep that filter (no EF-command log flood).
+        services.AddApplicationInsightsTelemetryWorkerService();
+        services.ConfigureFunctionsApplicationInsights();
+
         // Reuse the exact same Config binding the WebJob worker uses. Every value
         // (ConnectionStrings__*, AzureAd__*, BlobContainerName, …) comes from the
         // Function App's application settings.
@@ -21,10 +31,15 @@ var host = new HostBuilder()
 
         // Shared, transport-agnostic dispatch core — identical behaviour to the
         // WebJob listener (envelope + legacy fallback, per-host in-flight guards,
-        // dead-letter of unparseable messages).
+        // dead-letter of unparseable messages). The retry publisher lets it schedule
+        // a throttled item's next attempt directly on the bus (bus-driven retry) so a
+        // freeze can't happen when the Function idles between bursts.
+        services.AddSingleton<Migration.Engine.Lifecycle.IColdStorageQueuePublisher>(
+            sp => new Migration.Engine.Lifecycle.ColdStorageQueuePublisher(sp.GetRequiredService<Config>()));
         services.AddSingleton(sp => new ColdStorageMessageProcessor(
             sp.GetRequiredService<Config>(),
-            sp.GetRequiredService<ILoggerFactory>().CreateLogger("ColdStorage")));
+            sp.GetRequiredService<ILoggerFactory>().CreateLogger("ColdStorage"),
+            sp.GetRequiredService<Migration.Engine.Lifecycle.IColdStorageQueuePublisher>()));
 
         // Emit the worker heartbeat so the health API / SPFx UI shows this
         // queue-triggered worker as online (the WebJob is being retired).

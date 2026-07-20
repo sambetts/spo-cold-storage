@@ -95,10 +95,15 @@ export interface IJobItemStatus {
   itemKind: ColdStorageItemKind;
   status: MigrationLifecycleStatus;
   attempts: number;
+  /** When this item's automatic retry is due (UTC ISO), if it's waiting on a throttle. */
+  nextRetryAt?: string;
+  /** Server-provided Retry-After seconds from the last throttle, when present. */
+  lastRetryAfterSeconds?: number;
   lastError?: string;
   lastErrorDetail?: string;
   createdAt?: string;
   updatedAt?: string;
+  validatedAt?: string;
   copiedAt?: string;
   sourceDeletedAt?: string;
   placeholderCreatedAt?: string;
@@ -117,6 +122,12 @@ export interface IJobStatusResponse {
   createdAt?: string;
   updatedAt?: string;
   completedAt?: string;
+  /** Estimated completion time (UTC ISO), null until estimable. */
+  estimatedCompletionUtc?: string;
+  /** Items currently waiting on a throttle/transient retry. */
+  throttledCount?: number;
+  /** Earliest time a waiting item is due to retry (UTC ISO). */
+  nextRetryUtc?: string;
   items: IJobItemStatus[];
   warnings: string[];
   errors: string[];

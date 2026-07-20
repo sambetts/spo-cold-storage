@@ -1,5 +1,6 @@
 using Microsoft.Extensions.Logging;
 using Microsoft.SharePoint.Client;
+using Migration.Engine.Utils;
 using Models.ColdStorage;
 using System.Text;
 
@@ -56,7 +57,7 @@ public sealed class SharePointPlaceholderWriter(ILogger logger)
         var folderServerRelativeUrl = GetParentFolder(originalServerRelativeUrl);
         var folder = ctx.Web.GetFolderByServerRelativeUrl(folderServerRelativeUrl);
         ctx.Load(folder);
-        await ctx.ExecuteQueryAsync().ConfigureAwait(false);
+        await ctx.ExecuteQueryAsyncWithThrottleRetries(_logger).ConfigureAwait(false);
 
         using var ms = new MemoryStream(bytes);
         var fileInfo = new FileCreationInformation
@@ -68,7 +69,7 @@ public sealed class SharePointPlaceholderWriter(ILogger logger)
 
         var addedFile = folder.Files.Add(fileInfo);
         ctx.Load(addedFile, f => f.ServerRelativeUrl);
-        await ctx.ExecuteQueryAsync().ConfigureAwait(false);
+        await ctx.ExecuteQueryAsyncWithThrottleRetries(_logger).ConfigureAwait(false);
 
         _logger.LogInformation("Placeholder uploaded to '{Url}'.", addedFile.ServerRelativeUrl);
         return addedFile.ServerRelativeUrl;

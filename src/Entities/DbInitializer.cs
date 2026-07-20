@@ -226,6 +226,12 @@ IF COL_LENGTH('dbo.migration_job_items', 'priority') IS NULL
 
 IF COL_LENGTH('dbo.migration_job_items', 'last_enqueued_at') IS NULL
     ALTER TABLE dbo.migration_job_items ADD last_enqueued_at DATETIME2 NULL;
+
+IF COL_LENGTH('dbo.migration_job_items', 'next_retry_at') IS NULL
+    ALTER TABLE dbo.migration_job_items ADD next_retry_at DATETIME2 NULL;
+
+IF COL_LENGTH('dbo.migration_job_items', 'last_retry_after_seconds') IS NULL
+    ALTER TABLE dbo.migration_job_items ADD last_retry_after_seconds INT NULL;
 ";
 
         const string addColdStorageLogColumnsSql = @"
@@ -315,6 +321,9 @@ IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_migration_job_items_jo
 
 IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_migration_job_items_status_enqueue' AND object_id = OBJECT_ID('dbo.migration_job_items'))
     CREATE INDEX IX_migration_job_items_status_enqueue ON dbo.migration_job_items(status, last_enqueued_at);
+
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_migration_job_items_status_next_retry' AND object_id = OBJECT_ID('dbo.migration_job_items'))
+    CREATE INDEX IX_migration_job_items_status_next_retry ON dbo.migration_job_items(status, next_retry_at);
 
 IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_migration_job_logs_job_ts' AND object_id = OBJECT_ID('dbo.migration_job_logs'))
     CREATE INDEX IX_migration_job_logs_job_ts ON dbo.migration_job_logs(job_id, timestamp);

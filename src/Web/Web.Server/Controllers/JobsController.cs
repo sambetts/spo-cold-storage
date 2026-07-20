@@ -124,6 +124,20 @@ public class JobsController(
             }
         }
 
+        // ETA + throttle rollup from the item set. A job can't finish before its latest
+        // scheduled throttle retry fires (see JobEtaCalculator).
+        var now = DateTime.UtcNow;
+        var completedItems = job.Items.Count(i => IsCompletedStatus(i.Status));
+        var remainingItems = job.Items.Count(i => !global::Models.ColdStorage.MigrationLifecycleStatusExtensions.IsTerminal(i.Status));
+        var throttledItems = job.Items
+            .Where(i => i.Status == global::Models.ColdStorage.MigrationLifecycleStatus.RetryScheduled)
+            .ToList();
+        DateTime? earliestNextRetry = throttledItems.Where(i => i.NextRetryAt != null).Select(i => i.NextRetryAt).Min();
+        DateTime? latestNextRetry = throttledItems.Where(i => i.NextRetryAt != null).Select(i => i.NextRetryAt).Max();
+        var eta = job.CompletedAt is null
+            ? global::Migration.Engine.Lifecycle.JobEtaCalculator.EstimateCompletion(completedItems, remainingItems, job.CreatedAt, now, latestNextRetry)
+            : null;
+
         return new JobStatusResponse
         {
             JobId = job.JobId,
@@ -136,6 +150,9 @@ public class JobsController(
             CreatedAt = job.CreatedAt,
             UpdatedAt = job.UpdatedAt,
             CompletedAt = job.CompletedAt,
+            EstimatedCompletionUtc = eta,
+            ThrottledCount = throttledItems.Count,
+            NextRetryUtc = earliestNextRetry,
             Items = job.Items
                 .OrderBy(i => i.CreatedAt)
                 .Select(i => new JobItemStatusResponse
@@ -146,6 +163,8 @@ public class JobsController(
                     ItemKind = i.ItemKind,
                     Status = i.Status,
                     Attempts = i.Attempts,
+                    NextRetryAt = i.NextRetryAt,
+                    LastRetryAfterSeconds = i.LastRetryAfterSeconds,
                     LastError = i.LastError,
                     LastErrorDetail = i.LastErrorDetail,
                     CreatedAt = i.CreatedAt,
@@ -224,6 +243,25 @@ public class JobsController(
 
         var byJob = counts.GroupBy(c => c.JobId).ToDictionary(g => g.Key, g => g.ToList());
 
+        // Per-job throttle aggregate: how many items are waiting on a retry and the earliest/
+        // latest due time, so the summary can show an ETA that throttling has pushed out.
+        var retryAgg = await _db.MigrationJobItems
+            .AsNoTracking()
+            .Where(i => jobIds.Contains(i.JobId)
+                        && i.Status == global::Models.ColdStorage.MigrationLifecycleStatus.RetryScheduled)
+            .GroupBy(i => i.JobId)
+            .Select(g => new
+            {
+                JobId = g.Key,
+                Count = g.Count(),
+                Earliest = g.Min(i => i.NextRetryAt),
+                Latest = g.Max(i => i.NextRetryAt),
+            })
+            .ToListAsync(cancellationToken)
+            .ConfigureAwait(false);
+        var retryByJob = retryAgg.ToDictionary(r => r.JobId);
+        var now = DateTime.UtcNow;
+
         var result = new List<JobSummaryResponse>(jobs.Count);
         foreach (var job in jobs)
         {
@@ -259,6 +297,17 @@ public class JobsController(
                     }
                 }
             }
+            DateTime? latestNextRetry = null;
+            if (retryByJob.TryGetValue(job.JobId, out var retry))
+            {
+                summary.ThrottledCount = retry.Count;
+                summary.NextRetryUtc = retry.Earliest;
+                latestNextRetry = retry.Latest;
+            }
+            summary.EstimatedCompletionUtc = job.CompletedAt is null
+                ? global::Migration.Engine.Lifecycle.JobEtaCalculator.EstimateCompletion(
+                    summary.CompletedCount, summary.InProgressCount, job.CreatedAt, now, latestNextRetry)
+                : null;
             result.Add(summary);
         }
         return result;
