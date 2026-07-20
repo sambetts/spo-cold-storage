@@ -1,7 +1,9 @@
 using Azure.Messaging.ServiceBus;
+using Microsoft.ApplicationInsights;
 using Microsoft.Azure.Functions.Worker;
 using Microsoft.Extensions.Logging;
 using Migration.Engine;
+using System.Diagnostics;
 
 namespace Migration.Functions;
 
@@ -14,11 +16,16 @@ namespace Migration.Functions;
 ///
 /// Manual settlement (<c>autoCompleteMessages: false</c> in host.json) is required
 /// so we can dead-letter unparseable messages exactly like the WebJob does.
+///
+/// Each message emits a <c>ColdStorage.MessageProcessed</c> Application Insights
+/// custom event (outcome + delivery count + duration) so per-message throughput and
+/// throttle/dead-letter rates are queryable.
 /// </summary>
-public class ColdStorageQueueFunction(ColdStorageMessageProcessor processor, ILogger<ColdStorageQueueFunction> logger)
+public class ColdStorageQueueFunction(ColdStorageMessageProcessor processor, ILogger<ColdStorageQueueFunction> logger, TelemetryClient telemetry)
 {
     private readonly ColdStorageMessageProcessor _processor = processor ?? throw new ArgumentNullException(nameof(processor));
     private readonly ILogger<ColdStorageQueueFunction> _logger = logger ?? throw new ArgumentNullException(nameof(logger));
+    private readonly TelemetryClient _telemetry = telemetry ?? throw new ArgumentNullException(nameof(telemetry));
 
     [Function("ColdStorageQueue")]
     public async Task RunAsync(
@@ -34,7 +41,19 @@ public class ColdStorageQueueFunction(ColdStorageMessageProcessor processor, ILo
             "Received cold-storage message id={MessageId} subject={Subject} deliveryCount={DeliveryCount}.",
             message.MessageId, message.Subject, message.DeliveryCount);
 
+        var sw = Stopwatch.StartNew();
         var outcome = await _processor.ProcessMessageAsync(body, cancellationToken).ConfigureAwait(false);
+        sw.Stop();
+
+        _telemetry.TrackEvent(
+            "ColdStorage.MessageProcessed",
+            new Dictionary<string, string>
+            {
+                ["outcome"] = outcome.ToString(),
+                ["operation"] = message.Subject ?? string.Empty,
+                ["deliveryCount"] = message.DeliveryCount.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                ["durationMs"] = sw.Elapsed.TotalMilliseconds.ToString("F0", System.Globalization.CultureInfo.InvariantCulture),
+            });
 
         switch (outcome)
         {

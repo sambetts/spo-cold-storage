@@ -1,4 +1,5 @@
 using Entities.Configuration;
+using Microsoft.Azure.Functions.Worker;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -13,6 +14,15 @@ var host = new HostBuilder()
     .ConfigureFunctionsWorkerDefaults()
     .ConfigureServices((context, services) =>
     {
+        // Detailed telemetry: route worker logs + custom events/metrics to the shared
+        // Application Insights resource (APPLICATIONINSIGHTS_CONNECTION_STRING). This is what
+        // makes the reconciler's liveness and each message's outcome queryable — the exact
+        // signals that were missing when a throttled migration silently froze. Operational
+        // signals are emitted as custom events (TrackEvent), which bypass the worker's default
+        // Information log filter, so we keep that filter (no EF-command log flood).
+        services.AddApplicationInsightsTelemetryWorkerService();
+        services.ConfigureFunctionsApplicationInsights();
+
         // Reuse the exact same Config binding the WebJob worker uses. Every value
         // (ConnectionStrings__*, AzureAd__*, BlobContainerName, …) comes from the
         // Function App's application settings.
