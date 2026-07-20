@@ -164,7 +164,7 @@ public sealed class ColdStorageMessageProcessor(Config config, ILogger logger, I
                             ? DateTimeOffset.UtcNow.AddSeconds(1)
                             : new DateTimeOffset(DateTime.SpecifyKind(dueUtc, DateTimeKind.Utc));
                         await _retryPublisher.ScheduleAsync(envelope, enqueueAt, cancellationToken).ConfigureAwait(false);
-                        _logger.LogWarning("Item {ItemId} throttled; scheduled automatic retry for {Due:o}.", envelope.ItemId, enqueueAt);
+                        _logger.LogInformation("Item {ItemId} throttled; scheduled automatic retry for {Due:o}.", envelope.ItemId, enqueueAt);
                         return MessageOutcome.Complete;
                     }
                     catch (Exception ex)
