@@ -15,4 +15,19 @@
 	<TreatWarningsAsErrors>true</TreatWarningsAsErrors>
   </PropertyGroup>
 
+  <ItemGroup>
+	<!--
+	  Accepted-risk audit suppression: AngleSharp 0.17.0 (GHSA-pgww-w46g-26qg, moderate mXSS in the
+	  HTML parser/serializer) is pulled in transitively by PnP.Framework -> AngleSharp.Css 0.17.0,
+	  which hard-pins AngleSharp to [0.17.0, 0.18.0). The advisory is only fixed in AngleSharp >= 1.5.0,
+	  and no PnP.Framework release (checked up to 1.20.0) has moved off AngleSharp.Css 0.17.0, so there
+	  is no compatible upgrade path today. This solution only uses PnP.Framework for SharePoint file
+	  I/O + auth in the cold-storage worker and never parses or sanitizes untrusted HTML through
+	  AngleSharp, so the mXSS vector is not reachable. Removing this suppression restores the
+	  build/deploy failure (NU1902 as error via TreatWarningsAsErrors). Re-evaluate and delete this
+	  line once PnP.Framework/AngleSharp.Css adopt AngleSharp 1.5+.
+	-->
+	<NuGetAuditSuppress Include="https://github.com/advisories/GHSA-pgww-w46g-26qg" />
+  </ItemGroup>
+
 </Project>
