@@ -276,6 +276,14 @@ public class QueueController(
             item.LastError = null;
             item.LastErrorDetail = null;
             item.CompletedAt = null;
+            // A manual requeue is an explicit "try this again from scratch": reset the
+            // attempt budget and clear any pending retry schedule, otherwise an item that
+            // had already exhausted ColdStorageMaxProcessAttempts fails again on its very
+            // first throttle (one shot instead of the full retry budget), which makes a
+            // "Recover failed" click look like it does nothing under heavy throttling.
+            item.Attempts = 0;
+            item.NextRetryAt = null;
+            item.LastRetryAfterSeconds = null;
             item.UpdatedAt = DateTime.UtcNow;
             _db.MigrationJobLogs.Add(new MigrationJobLog
             {
