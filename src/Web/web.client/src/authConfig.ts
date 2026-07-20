@@ -24,7 +24,17 @@ export const msalConfig = {
     // Also keep auth state in a cookie — the redirect flow uses it to carry state
     // across the round-trip to Entra ID.
     storeAuthStateInCookie: true,
-  }
+  },
+  system: {
+    // Silent token renewal runs in a hidden iframe. The default 6s hash-monitor
+    // window is easily exceeded on slow connections or when the browser throttles
+    // background frames, surfacing as `BrowserAuthError: monitor_window_timeout`.
+    // Give the iframe (and popup) renewal more headroom; genuine silent failures
+    // (e.g. blocked third-party cookies) still fall back to an interactive
+    // sign-in in the API client (see api/client.ts).
+    iframeHashTimeout: 12000,
+    windowHashTimeout: 12000,
+  },
 };
 
 // Scope of THIS app's web API (e.g. api://<client-id>/access_as_user).
