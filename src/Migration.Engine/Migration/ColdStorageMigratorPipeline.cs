@@ -300,7 +300,24 @@ public sealed class ColdStorageMigratorPipeline : BaseComponent
                 }
 
                 spFile.DeleteObject();
-                await spCtx.ExecuteQueryAsyncWithThrottleRetries(_logger).ConfigureAwait(false);
+                try
+                {
+                    await spCtx.ExecuteQueryAsyncWithThrottleRetries(_logger).ConfigureAwait(false);
+                }
+                catch (Exception delEx) when (IsSourceAlreadyGone(delEx))
+                {
+                    // Race/duplicate: the source was already deleted (a prior or concurrent
+                    // attempt on another worker instance, or an external delete) between the
+                    // Exists check above and this delete. We only reach here after a successful
+                    // copy + post-copy validation, so we already hold a validated cold-storage
+                    // copy and the archival goal (remove the source) is met — treat this as a
+                    // successful delete and continue to the placeholder step. Failing here
+                    // instead made already-archived items bounce back to "failed" on every
+                    // "Recover failed", which is why the failed count oscillated. The
+                    // never-delete-source-without-a-confirmed-copy invariant is unaffected: we
+                    // are not deleting anything new, the file is simply already gone.
+                    _logger.LogWarning("Source '{Url}' was already gone at delete (File Not Found); treating as already deleted.", file.FullSharePointUrl);
+                }
             }
             await _statusWriter.RecordSourceMetadataAsync(envelope.ItemId, originalCreatedBy, originalModifiedBy, originalCreated, originalModified, cancellationToken);
             await _statusWriter.RecordSourceDeletedAsync(envelope.ItemId, cancellationToken);
@@ -665,6 +682,25 @@ public sealed class ColdStorageMigratorPipeline : BaseComponent
         using var md5 = System.Security.Cryptography.MD5.Create();
         using var fs = IOFile.OpenRead(filePath);
         return Convert.ToBase64String(md5.ComputeHash(fs));
+    }
+
+    /// <summary>
+    /// True if the exception chain indicates the SharePoint source file is already gone
+    /// (a "File Not Found" server error). Used so a delete that races a prior/concurrent
+    /// delete of the same item is treated as already-deleted rather than a hard failure.
+    /// </summary>
+    private static bool IsSourceAlreadyGone(Exception? ex)
+    {
+        for (var e = ex; e is not null; e = e.InnerException)
+        {
+            if (e is ServerException se
+                && ((se.ServerErrorTypeName?.Contains("FileNotFound", StringComparison.OrdinalIgnoreCase) ?? false)
+                    || (se.Message?.Contains("File Not Found", StringComparison.OrdinalIgnoreCase) ?? false)))
+            {
+                return true;
+            }
+        }
+        return false;
     }
 
     private string BuildBlobUrl(string containerName, string blobPath)
