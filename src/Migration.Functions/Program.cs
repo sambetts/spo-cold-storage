@@ -21,10 +21,15 @@ var host = new HostBuilder()
 
         // Shared, transport-agnostic dispatch core — identical behaviour to the
         // WebJob listener (envelope + legacy fallback, per-host in-flight guards,
-        // dead-letter of unparseable messages).
+        // dead-letter of unparseable messages). The retry publisher lets it schedule
+        // a throttled item's next attempt directly on the bus (bus-driven retry) so a
+        // freeze can't happen when the Function idles between bursts.
+        services.AddSingleton<Migration.Engine.Lifecycle.IColdStorageQueuePublisher>(
+            sp => new Migration.Engine.Lifecycle.ColdStorageQueuePublisher(sp.GetRequiredService<Config>()));
         services.AddSingleton(sp => new ColdStorageMessageProcessor(
             sp.GetRequiredService<Config>(),
-            sp.GetRequiredService<ILoggerFactory>().CreateLogger("ColdStorage")));
+            sp.GetRequiredService<ILoggerFactory>().CreateLogger("ColdStorage"),
+            sp.GetRequiredService<Migration.Engine.Lifecycle.IColdStorageQueuePublisher>()));
 
         // Emit the worker heartbeat so the health API / SPFx UI shows this
         // queue-triggered worker as online (the WebJob is being retired).

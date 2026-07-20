@@ -47,6 +47,12 @@ export interface JobSummary {
   completedCount: number;
   failedCount: number;
   inProgressCount: number;
+  /** Items currently waiting on a throttle/transient retry. */
+  throttledCount?: number;
+  /** Estimated completion time (UTC ISO), null until estimable. */
+  estimatedCompletionUtc?: string | null;
+  /** Earliest time a waiting item is due to retry (UTC ISO). */
+  nextRetryUtc?: string | null;
   createdAt: string;
   updatedAt: string;
   completedAt?: string | null;
@@ -59,6 +65,10 @@ export interface JobItemStatus {
   itemKind: string;
   status: MigrationLifecycleStatus;
   attempts: number;
+  /** When this item's automatic retry is due (UTC ISO), if it's waiting on a throttle. */
+  nextRetryAt?: string | null;
+  /** Server-provided Retry-After seconds from the last throttle, when present. */
+  lastRetryAfterSeconds?: number | null;
   lastError?: string | null;
   lastErrorDetail?: string | null;
   createdAt: string;
@@ -83,6 +93,12 @@ export interface JobStatus {
   createdAt: string;
   updatedAt: string;
   completedAt?: string | null;
+  /** Estimated completion time (UTC ISO), null until estimable. */
+  estimatedCompletionUtc?: string | null;
+  /** Items currently waiting on a throttle/transient retry. */
+  throttledCount?: number;
+  /** Earliest time a waiting item is due to retry (UTC ISO). */
+  nextRetryUtc?: string | null;
   items: JobItemStatus[];
   warnings: string[];
   errors: string[];

@@ -212,7 +212,13 @@ public sealed class MigrationDispatchReconciler : BaseComponent
         var retryItems = new List<MigrationJobItem>();
         foreach (var item in retryCandidates)
         {
-            var dueAt = item.UpdatedAt.AddSeconds(ThrottleBackoff.SecondsFor(item.Attempts, _config));
+            // Primary retry is a scheduled bus message enqueued for NextRetryAt (see
+            // ColdStorageMessageProcessor), so the reconciler is only a safety net for when that
+            // scheduled message never fired. Wait a grace past NextRetryAt before re-driving so we
+            // don't double-send. Fall back to the backoff schedule for legacy rows with no NextRetryAt.
+            var dueAt = item.NextRetryAt is DateTime next
+                ? next.AddSeconds(RetryScheduleSafetyGraceSeconds(_config))
+                : item.UpdatedAt.AddSeconds(ThrottleBackoff.SecondsFor(item.Attempts, _config));
             if (now < dueAt)
             {
                 continue;
@@ -337,4 +343,16 @@ public sealed class MigrationDispatchReconciler : BaseComponent
             or MigrationLifecycleStatus.PlaceholderFailed => MigrationLifecycleStatus.PlaceholderFailed,
         _ => MigrationLifecycleStatus.CopyToColdStorageFailed,
     };
+
+    /// <summary>
+    /// How long past an item's <c>NextRetryAt</c> the reconciler waits before re-driving it as a
+    /// safety net, giving the primary bus-scheduled retry message time to fire first. At least
+    /// two dispatch intervals (so a normally-firing scheduled message is never double-sent),
+    /// floored at two minutes.
+    /// </summary>
+    private static int RetryScheduleSafetyGraceSeconds(Config config)
+    {
+        var interval = config.ColdStorageDispatchIntervalSeconds > 0 ? config.ColdStorageDispatchIntervalSeconds : 30;
+        return Math.Max(interval * 2, 120);
+    }
 }

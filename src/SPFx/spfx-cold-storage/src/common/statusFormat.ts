@@ -123,6 +123,33 @@ export function isTerminal(value: StatusLike): boolean {
   return status ? TERMINAL.has(status) : false;
 }
 
+/**
+ * Compact "time from now" for a future instant, e.g. "in 45s", "in 12m", "in 3h",
+ * or "now" when due/overdue. Returns "" for missing/invalid values.
+ */
+export function formatCountdown(value: string | null | undefined): string {
+  if (!value) return '';
+  const target = new Date(value).getTime();
+  if (isNaN(target)) return '';
+  const seconds = Math.round((target - Date.now()) / 1000);
+  if (seconds <= 0) return 'now';
+  if (seconds < 60) return `in ${seconds}s`;
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `in ${minutes}m`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `in ${hours}h`;
+  return `in ${Math.round(hours / 24)}d`;
+}
+
+/** ETA label combining clock time and countdown, e.g. "~14:32 (in 12m)". */
+export function formatEta(value: string | null | undefined): string {
+  if (!value) return '';
+  const date = new Date(value);
+  if (isNaN(date.getTime())) return '';
+  const clock = new Intl.DateTimeFormat(undefined, { hour: '2-digit', minute: '2-digit' }).format(date);
+  return `~${clock} (${formatCountdown(value)})`;
+}
+
 const DESCRIPTIONS: Partial<Record<MigrationLifecycleStatus, string>> = {
   [MigrationLifecycleStatus.Queued]: 'Waiting for a background worker to pick this up.',
   [MigrationLifecycleStatus.Validating]: 'Checking the item is eligible and reading its details.',

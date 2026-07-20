@@ -5,7 +5,7 @@ import { ArrowClockwise20Regular, ArrowLeft20Regular, ArrowSync20Regular } from 
 import { ApiError, useApi } from "../../api/client";
 import { JobItemStatus, JobLogEntry, JobStatus, JobSummary, MigrationOperationKind, WorkerHealth } from "../../api/types";
 import { describeLogLevel, describeOperation, describeStatus, isErrorLevel, isFailedStatus, isInProgressStatus, isWarnLevel, StatusCategory, statusCategory } from "../../api/status";
-import { fileName, formatDateTime, formatRelative } from "../../utils/format";
+import { fileName, formatCountdown, formatDateTime, formatEta, formatRelative } from "../../utils/format";
 
 const REFRESH_MS = 10000;
 
@@ -384,7 +384,13 @@ function TransfersList() {
                     <span title="total">{job.itemCount}</span>
                     {job.completedCount > 0 && <span style={{ color: "#107c10" }}> · {job.completedCount}✓</span>}
                     {job.inProgressCount > 0 && <span style={{ color: "#0f6cbd" }}> · {job.inProgressCount}⋯</span>}
+                    {(job.throttledCount ?? 0) > 0 && <span style={{ color: "#835c00" }}> · {job.throttledCount}⏳</span>}
                     {job.failedCount > 0 && <span style={{ color: "#a4262c" }}> · {job.failedCount}✕</span>}
+                    {job.inProgressCount > 0 && job.estimatedCompletionUtc && (
+                      <div style={{ fontSize: 11, color: "#605e5c" }} title={`Estimated done ${formatEta(job.estimatedCompletionUtc)}`}>
+                        ETA {formatCountdown(job.estimatedCompletionUtc)}
+                      </div>
+                    )}
                   </td>
                 </tr>
               ))}
@@ -650,6 +656,14 @@ function FileLeaf({ item, depth }: { item: JobItemStatus; depth: number }) {
           {item.lastError}
         </span>
       )}
+      {item.status === "RetryScheduled" && item.nextRetryAt && (
+        <span
+          style={{ color: "#835c00", fontSize: 12, whiteSpace: "nowrap" }}
+          title={`Throttled — automatic retry at ${formatDateTime(item.nextRetryAt)}${item.lastRetryAfterSeconds ? ` (server asked to wait ${item.lastRetryAfterSeconds}s)` : ""}`}
+        >
+          ⏳ retry {formatCountdown(item.nextRetryAt)}
+        </span>
+      )}
       <span style={{ color: "#605e5c", fontSize: 12, whiteSpace: "nowrap" }} title={formatDateTime(item.updatedAt)}>
         {formatRelative(item.updatedAt)}
       </span>
@@ -666,10 +680,23 @@ interface Counts {
   total: number;
 }
 
-function TransferProgress({ counts, inProgress }: { counts: Counts; inProgress: boolean }) {
+function TransferProgress({
+  counts,
+  inProgress,
+  eta,
+  throttled,
+  nextRetry,
+}: {
+  counts: Counts;
+  inProgress: boolean;
+  eta?: string | null;
+  throttled?: number;
+  nextRetry?: string | null;
+}) {
   const { completed, failed, skipped, inprogress, total } = counts;
   if (total === 0) return null;
   const pct = (n: number) => `${(n / total) * 100}%`;
+  const throttledCount = throttled ?? 0;
   return (
     <div style={{ marginBottom: 16 }}>
       <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, color: "#605e5c", marginBottom: 4, gap: 12, flexWrap: "wrap" }}>
@@ -677,6 +704,7 @@ function TransferProgress({ counts, inProgress }: { counts: Counts; inProgress: 
           <strong style={{ color: "#201f1e" }}>{completed}</strong> of {total} done
           {failed > 0 ? ` · ${failed} failed` : ""}
           {skipped > 0 ? ` · ${skipped} skipped` : ""}
+          {throttledCount > 0 ? ` · ${throttledCount} throttled` : ""}
         </span>
         <span>{inProgress ? `${inprogress} in progress · auto-refreshing…` : "Finished"}</span>
       </div>
@@ -686,6 +714,20 @@ function TransferProgress({ counts, inProgress }: { counts: Counts; inProgress: 
         {inprogress > 0 && <div style={{ width: pct(inprogress), background: "#0f6cbd" }} />}
         {skipped > 0 && <div style={{ width: pct(skipped), background: "#c8c6c4" }} />}
       </div>
+      {inProgress && (eta || (throttledCount > 0 && nextRetry)) && (
+        <div style={{ display: "flex", gap: 16, flexWrap: "wrap", fontSize: 12, color: "#605e5c", marginTop: 6 }}>
+          {eta && (
+            <span>
+              Estimated done <strong style={{ color: "#201f1e" }}>{formatEta(eta)}</strong>
+            </span>
+          )}
+          {throttledCount > 0 && nextRetry && (
+            <span style={{ color: "#835c00" }} title={`Next automatic retry at ${formatDateTime(nextRetry)}`}>
+              ⏳ {throttledCount} throttled — next retry {formatCountdown(nextRetry)}
+            </span>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -866,7 +908,13 @@ function TransferDetail({ jobId }: { jobId: string }) {
             {job.completedAt ? ` · finished ${formatDateTime(job.completedAt)}` : ""} · job {job.jobId}
           </div>
 
-          <TransferProgress counts={counts} inProgress={inProgress} />
+          <TransferProgress
+            counts={counts}
+            inProgress={inProgress}
+            eta={job?.estimatedCompletionUtc}
+            throttled={job?.throttledCount}
+            nextRetry={job?.nextRetryUtc}
+          />
 
           {job.errors.length > 0 && (
             <div style={{ marginBottom: 12 }}>

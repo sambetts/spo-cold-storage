@@ -9,7 +9,7 @@ import {
   IWorkerHealth,
   MigrationLifecycleStatus,
 } from '../../common/ColdStorageApiClient';
-import { colorFor, describeStatus, formatLabel, isTerminal } from '../../common/statusFormat';
+import { colorFor, describeStatus, formatCountdown, formatEta, formatLabel, isTerminal, normalizeStatus } from '../../common/statusFormat';
 
 export type DialogPhase = 'submitting' | 'confirm' | 'polling' | 'terminal' | 'expired' | 'error' | 'browse';
 
@@ -192,6 +192,67 @@ function folderRollup(items: IJobItemStatus[]): { label: string; color: string }
   return { label: `All ${total} done`, color: '#107c10' };
 }
 
+interface JobCounts { completed: number; failed: number; skipped: number; inprogress: number; throttled: number; total: number; }
+
+/** Categorise items into progress-bar segments (mirrors the SPA's TransferProgress). */
+function jobCounts(items: IJobItemStatus[]): JobCounts {
+  let completed = 0, failed = 0, skipped = 0, inprogress = 0, throttled = 0;
+  for (const it of items) {
+    const s = normalizeStatus(it.status);
+    if (s === MigrationLifecycleStatus.ColdStorageMigrationCompleted
+      || s === MigrationLifecycleStatus.RestoreCompleted
+      || s === MigrationLifecycleStatus.CompletedWithWarning) { completed++; }
+    else if (s === MigrationLifecycleStatus.Skipped) { skipped++; }
+    else if (s === MigrationLifecycleStatus.RetryScheduled) { throttled++; inprogress++; }
+    else if (s !== undefined && isTerminal(s)) { failed++; }
+    else { inprogress++; }
+  }
+  return { completed, failed, skipped, inprogress, throttled, total: items.length };
+}
+
+/**
+ * Horizontal progress bar + ETA for a job — parity with the SPA "Transfers" view.
+ * Shows completed/failed/in-progress/skipped segments, the estimated completion time,
+ * and (when throttled) the count and when the queue resumes.
+ */
+const JobProgress: React.FC<{ job: ITrackedJob; items: IJobItemStatus[]; active: boolean }> = ({ job, items, active }) => {
+  const c = jobCounts(items);
+  if (c.total === 0) return null;
+  const pct = (n: number): string => `${(n / c.total) * 100}%`;
+  const eta = job.lastResponse?.estimatedCompletionUtc;
+  const throttled = job.lastResponse?.throttledCount ?? c.throttled;
+  const nextRetry = job.lastResponse?.nextRetryUtc;
+  return (
+    <div style={{ padding: '6px 12px 10px' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px', color: '#605e5c', marginBottom: '4px', gap: '12px', flexWrap: 'wrap' }}>
+        <span>
+          <strong style={{ color: '#201f1e' }}>{c.completed}</strong> of {c.total} done
+          {c.failed > 0 ? ` · ${c.failed} failed` : ''}
+          {c.skipped > 0 ? ` · ${c.skipped} skipped` : ''}
+          {throttled > 0 ? ` · ${throttled} throttled` : ''}
+        </span>
+        <span>{active ? `${c.inprogress} in progress · auto-refreshing…` : 'Finished'}</span>
+      </div>
+      <div style={{ display: 'flex', height: '10px', borderRadius: '6px', overflow: 'hidden', background: '#edebe9' }}>
+        {c.completed > 0 && <div style={{ width: pct(c.completed), background: '#107c10' }} />}
+        {c.failed > 0 && <div style={{ width: pct(c.failed), background: '#a4262c' }} />}
+        {c.inprogress > 0 && <div style={{ width: pct(c.inprogress), background: '#0f6cbd' }} />}
+        {c.skipped > 0 && <div style={{ width: pct(c.skipped), background: '#c8c6c4' }} />}
+      </div>
+      {active && (eta || (throttled > 0 && nextRetry)) && (
+        <div style={{ display: 'flex', gap: '16px', flexWrap: 'wrap', fontSize: '12px', color: '#605e5c', marginTop: '6px' }}>
+          {eta && <span>Estimated done <strong style={{ color: '#201f1e' }}>{formatEta(eta)}</strong></span>}
+          {throttled > 0 && nextRetry && (
+            <span style={{ color: '#835c00' }} title={`Next automatic retry at ${new Date(nextRetry).toLocaleString()}`}>
+              {`\u23F3 ${throttled} throttled — next retry ${formatCountdown(nextRetry)}`}
+            </span>
+          )}
+        </div>
+      )}
+    </div>
+  );
+};
+
 function mergedWarnings(job: ITrackedJob): string[] {
   const out: string[] = [];
   const seen = new Set<string>();
@@ -335,6 +396,12 @@ const FileLeaf: React.FC<{ item: IJobItemStatus; depth: number }> = ({ item, dep
   <div style={{ display: 'flex', alignItems: 'flex-start', gap: '8px', borderTop: '1px solid #f8f7f6', fontSize: '13px', paddingTop: '5px', paddingBottom: '5px', paddingRight: '12px', paddingLeft: 12 + (depth + 1) * 16 }}>
     <span style={{ flex: '1 1 auto', wordBreak: 'break-all' }} title={item.spServerRelativeUrl}>{basename(item.spServerRelativeUrl)}</span>
     {item.lastError && <span style={{ color: '#a4262c', fontSize: '12px', maxWidth: '200px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={item.lastErrorDetail ?? item.lastError}>{item.lastError}</span>}
+    {normalizeStatus(item.status) === MigrationLifecycleStatus.RetryScheduled && item.nextRetryAt && (
+      <span
+        style={{ color: '#835c00', fontSize: '12px', whiteSpace: 'nowrap', flex: '0 0 auto' }}
+        title={`Throttled — automatic retry at ${new Date(item.nextRetryAt).toLocaleString()}${item.lastRetryAfterSeconds ? ` (server asked to wait ${item.lastRetryAfterSeconds}s)` : ''}`}
+      >{`\u23F3 retry ${formatCountdown(item.nextRetryAt)}`}</span>
+    )}
     <div style={{ flex: '0 0 auto', textAlign: 'right' }}>
       <Badge value={item.status} />
       <ItemStep item={item} />
@@ -430,6 +497,14 @@ const JobBlock: React.FC<{
   const overallStatus = job.lastResponse?.status ?? job.acceptResponse?.status;
   const items = job.lastResponse?.items ?? [];
   const warnings = mergedWarnings(job);
+  const jobTerminal = job.lastResponse ? isTerminal(job.lastResponse.status) : false;
+  const active = !jobTerminal;
+
+  // Completed migrations collapse to a 1–2 line summary that expands on demand, so a big
+  // batch doesn't fill the dialog with finished detail. Active jobs are always expanded.
+  const [expanded, setExpanded] = React.useState(false);
+  const showDetail = active || expanded;
+  const c = jobCounts(items);
 
   let emptyText: string | undefined;
   if (items.length === 0) {
@@ -442,11 +517,29 @@ const JobBlock: React.FC<{
     }
   }
 
+  // Compact one-line result shown in the (collapsed) header of a finished job.
+  const collapsedSummary = jobTerminal && c.total > 0
+    ? `${c.completed}/${c.total} done${c.failed > 0 ? ` · ${c.failed} failed` : ''}${c.skipped > 0 ? ` · ${c.skipped} skipped` : ''}`
+    : undefined;
+
+  const headerToggle = jobTerminal ? (): void => setExpanded(v => !v) : undefined;
+
   return (
     <section style={{ border: '1px solid #edebe9', borderRadius: '2px', marginBottom: '12px' }}>
-      <div style={{ display: 'flex', flexWrap: 'wrap', gap: '12px', alignItems: 'center', padding: '10px 12px', background: '#faf9f8', borderBottom: '1px solid #edebe9' }}>
+      <div
+        role={headerToggle ? 'button' : undefined}
+        tabIndex={headerToggle ? 0 : undefined}
+        aria-expanded={headerToggle ? expanded : undefined}
+        onClick={headerToggle}
+        onKeyDown={headerToggle ? (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setExpanded(v => !v); } } : undefined}
+        style={{ display: 'flex', flexWrap: 'wrap', gap: '12px', alignItems: 'center', padding: '10px 12px', background: '#faf9f8', borderBottom: '1px solid #edebe9', cursor: headerToggle ? 'pointer' : undefined }}
+      >
+        {jobTerminal && <span style={{ color: '#605e5c', flex: '0 0 auto' }}>{expanded ? '▾' : '▸'}</span>}
         <span style={{ fontWeight: 600 }}>{job.label}</span>
         <Badge value={overallStatus} />
+        {collapsedSummary && !expanded && (
+          <span style={{ fontSize: '12px', color: c.failed > 0 ? '#a4262c' : '#605e5c' }}>{collapsedSummary}</span>
+        )}
         <span style={{ fontSize: '12px', color: '#605e5c', fontFamily: 'Consolas, "Courier New", monospace' }}>{job.jobId}</span>
         {job.lastPollError && (
           <span style={{ fontSize: '12px', color: '#a4262c' }}>
@@ -455,16 +548,23 @@ const JobBlock: React.FC<{
         )}
       </div>
 
-      <JobMeta job={job} overallStatus={overallStatus} />
+      {/* Progress bar + ETA is always shown for active jobs (parity with the SPA). */}
+      {active && <JobProgress job={job} items={items} active={active} />}
 
-      {emptyText
-        ? <p style={{ margin: '12px', color: '#605e5c', fontSize: '13px' }}>{emptyText}</p>
-        : <ItemsByFolder job={job} items={items} expandedFolders={expandedFolders} onToggleFolder={onToggleFolder} onToggleAllFolders={onToggleAllFolders} />}
+      {showDetail && (
+        <>
+          <JobMeta job={job} overallStatus={overallStatus} />
 
-      {warnings.length > 0 && <CollapsibleMessageList title="Warnings" messages={warnings} color="#797775" />}
-      {job.lastResponse && job.lastResponse.errors.length > 0 && <CollapsibleMessageList title="Errors" messages={job.lastResponse.errors} color="#a4262c" defaultOpen />}
-      {job.lastResponse?.summary && <p style={{ margin: '8px 12px', fontSize: '12px', color: '#605e5c' }}>{job.lastResponse.summary}</p>}
-      {job.logs && job.logs.length > 0 && <Timeline logs={job.logs} />}
+          {emptyText
+            ? <p style={{ margin: '12px', color: '#605e5c', fontSize: '13px' }}>{emptyText}</p>
+            : <ItemsByFolder job={job} items={items} expandedFolders={expandedFolders} onToggleFolder={onToggleFolder} onToggleAllFolders={onToggleAllFolders} />}
+
+          {warnings.length > 0 && <CollapsibleMessageList title="Warnings" messages={warnings} color="#797775" />}
+          {job.lastResponse && job.lastResponse.errors.length > 0 && <CollapsibleMessageList title="Errors" messages={job.lastResponse.errors} color="#a4262c" defaultOpen />}
+          {job.lastResponse?.summary && <p style={{ margin: '8px 12px', fontSize: '12px', color: '#605e5c' }}>{job.lastResponse.summary}</p>}
+          {job.logs && job.logs.length > 0 && <Timeline logs={job.logs} />}
+        </>
+      )}
     </section>
   );
 };

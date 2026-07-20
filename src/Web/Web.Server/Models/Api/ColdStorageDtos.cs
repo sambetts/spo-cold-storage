@@ -114,6 +114,12 @@ public class JobStatusResponse
     public DateTime CreatedAt { get; set; }
     public DateTime UpdatedAt { get; set; }
     public DateTime? CompletedAt { get; set; }
+    /// <summary>Estimated UTC completion time for the whole job (null if not estimable yet).</summary>
+    public DateTime? EstimatedCompletionUtc { get; set; }
+    /// <summary>Number of items currently waiting on a throttle/transient retry.</summary>
+    public int ThrottledCount { get; set; }
+    /// <summary>Earliest UTC time a waiting item is due to retry (when the queue resumes).</summary>
+    public DateTime? NextRetryUtc { get; set; }
     public List<JobItemStatusResponse> Items { get; set; } = [];
     public List<string> Warnings { get; set; } = [];
     public List<string> Errors { get; set; } = [];
@@ -138,6 +144,12 @@ public class JobSummaryResponse
     public int CompletedCount { get; set; }
     public int FailedCount { get; set; }
     public int InProgressCount { get; set; }
+    /// <summary>Number of items currently waiting on a throttle/transient retry.</summary>
+    public int ThrottledCount { get; set; }
+    /// <summary>Estimated UTC completion time for the whole job (null if not estimable yet).</summary>
+    public DateTime? EstimatedCompletionUtc { get; set; }
+    /// <summary>Earliest UTC time a waiting item is due to retry (when the queue resumes).</summary>
+    public DateTime? NextRetryUtc { get; set; }
     public DateTime CreatedAt { get; set; }
     public DateTime UpdatedAt { get; set; }
     public DateTime? CompletedAt { get; set; }
@@ -151,6 +163,10 @@ public class JobItemStatusResponse
     public ColdStorageItemKind ItemKind { get; set; }
     public MigrationLifecycleStatus Status { get; set; }
     public int Attempts { get; set; }
+    /// <summary>When this item's automatic retry is due (UTC), if it's waiting on a throttle/transient retry.</summary>
+    public DateTime? NextRetryAt { get; set; }
+    /// <summary>The server-provided Retry-After seconds from the last throttle, when present.</summary>
+    public int? LastRetryAfterSeconds { get; set; }
     public string? LastError { get; set; }
     public string? LastErrorDetail { get; set; }
     public DateTime CreatedAt { get; set; }

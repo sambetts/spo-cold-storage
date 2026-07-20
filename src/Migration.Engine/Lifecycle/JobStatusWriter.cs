@@ -215,6 +215,38 @@ public sealed class JobStatusWriter(SPOColdStorageDbContext db, ILogger logger) 
             .AnyAsync(cancellationToken);
     }
 
+    /// <inheritdoc />
+    public async Task ScheduleRetryAsync(
+        Guid itemId,
+        DateTime nextRetryUtc,
+        int? retryAfterSeconds,
+        string message,
+        Exception? exception = null,
+        CancellationToken cancellationToken = default)
+    {
+        var item = await _db.MigrationJobItems.FirstOrDefaultAsync(i => i.ItemId == itemId, cancellationToken);
+        if (item == null)
+        {
+            _logger.LogWarning("JobStatusWriter: item {ItemId} not found, retry schedule dropped.", itemId);
+            return;
+        }
+
+        ApplyTransitionInternal(item, MigrationLifecycleStatus.RetryScheduled, message);
+        item.NextRetryAt = nextRetryUtc;
+        item.LastRetryAfterSeconds = retryAfterSeconds;
+        // Surface the throttle/transient reason on the row so the UI can explain the wait,
+        // even though RetryScheduled is not a terminal failure.
+        if (exception != null)
+        {
+            item.LastError = Truncate(FriendlyErrorMapper.ToFriendly(exception, MigrationLifecycleStatus.RetryScheduled), 2048);
+            item.LastErrorDetail = Truncate(exception.ToString(), 8000);
+        }
+
+        await WriteLogAsync(item.JobId, item.ItemId, MigrationLifecycleStatus.RetryScheduled, LogLevel.Warning, message, exception, cancellationToken);
+        await UpdateRollupAsync(item.JobId, cancellationToken);
+        await _db.SaveChangesAsync(cancellationToken);
+    }
+
     /// <summary>
     /// Increments the item's processing-attempt counter and returns the new value.
     /// Used by the worker to bound retries on a poison message. Returns

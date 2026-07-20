@@ -1,3 +1,4 @@
+using Migration.Engine.Lifecycle;
 using Microsoft.SharePoint.Client;
 using System.Net;
 
@@ -11,6 +12,7 @@ public static class CSOMExtensions
         int retryAttempts = 0;
         int backoffIntervalSeconds = 1;
         int retryAfterInterval = 0;
+        int? lastRetryAfterSeconds = null;
         bool retryWithWrapper = false;
         ClientRequestWrapper? wrapper = null;
 
@@ -57,12 +59,9 @@ public static class CSOMExtensions
 
                     // Determine the retry after value - use the `Retry-After` header when available
                     string retryAfterHeader = response.GetResponseHeader("Retry-After");
-                    if (!string.IsNullOrEmpty(retryAfterHeader))
+                    if (!string.IsNullOrEmpty(retryAfterHeader) && Int32.TryParse(retryAfterHeader, out retryAfterInterval))
                     {
-                        if (!Int32.TryParse(retryAfterHeader, out retryAfterInterval))
-                        {
-                            retryAfterInterval = backoffIntervalSeconds;
-                        }
+                        lastRetryAfterSeconds = retryAfterInterval;
                     }
                     else
                     {
@@ -85,10 +84,17 @@ public static class CSOMExtensions
             }
         }
 
-        // Track error & throw exception
+        // Track error & throw exception. Carry the last server-provided Retry-After so the
+        // pipeline can schedule the item's next attempt for the time SharePoint asked for
+        // (see ThrottleInfo) instead of falling back to a generic backoff.
         var givingUpMsgBody = $"Maximum retry attempts {Constants.MAX_SPO_API_RETRIES} has been attempted.";
         logger.LogError($"{Constants.THROTTLE_ERROR} executing CSOM request. {givingUpMsgBody}");
-        throw new Exception($"Error executing CSOM request. {givingUpMsgBody}");
+        var giveUp = new Exception($"{Constants.THROTTLE_ERROR} executing CSOM request. {givingUpMsgBody}");
+        if (lastRetryAfterSeconds is int retryAfter)
+        {
+            giveUp.Data[ThrottleInfo.RetryAfterDataKey] = retryAfter;
+        }
+        throw giveUp;
 
     }
 }

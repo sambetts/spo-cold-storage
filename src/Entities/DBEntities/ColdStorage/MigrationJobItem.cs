@@ -139,6 +139,26 @@ public class MigrationJobItem
     public int Attempts { get; set; }
 
     /// <summary>
+    /// When a throttled/transient failure parked this item in
+    /// <see cref="MigrationLifecycleStatus.RetryScheduled"/>, the UTC time its automatic
+    /// retry is due. Set from the SharePoint <c>Retry-After</c> header when present, else the
+    /// exponential backoff. The retry is scheduled directly on the Service Bus queue
+    /// (a scheduled message enqueued for this time), and the dispatch reconciler uses it as a
+    /// safety-net re-drive time. Surfaced to the UI so users can see when each file will retry.
+    /// Null when the item is not waiting on a retry.
+    /// </summary>
+    [Column("next_retry_at")]
+    public DateTime? NextRetryAt { get; set; }
+
+    /// <summary>
+    /// The <c>Retry-After</c> seconds SharePoint/Azure asked us to wait on the most recent
+    /// throttle (429/503), when the header was present. Null when the last wait came from the
+    /// local backoff schedule rather than a server-provided value. Recorded for reporting.
+    /// </summary>
+    [Column("last_retry_after_seconds")]
+    public int? LastRetryAfterSeconds { get; set; }
+
+    /// <summary>
     /// When the API / dispatch reconciler last published a Service Bus message for
     /// this item. Null means "never enqueued". The reconciler re-publishes Queued
     /// items whose message was never sent or is older than the enqueue grace, so a
