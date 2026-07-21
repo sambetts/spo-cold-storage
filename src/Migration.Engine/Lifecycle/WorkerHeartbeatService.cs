@@ -29,6 +29,15 @@ public sealed class WorkerHeartbeatService
     /// </summary>
     public static readonly TimeSpan OnlineWindow = TimeSpan.FromSeconds(100);
 
+    /// <summary>
+    /// Rows whose last heartbeat is older than this are pruned (a brand-new instance
+    /// sweeps them on its first beat). Auto-scaling hosts give every new instance a
+    /// unique machine name / row, so without this the table — and the "active instances"
+    /// count — would accumulate every ephemeral instance that ever ran. Far longer than
+    /// <see cref="OnlineWindow"/> so a row is only removed once its worker is unambiguously gone.
+    /// </summary>
+    public static readonly TimeSpan StaleRetention = TimeSpan.FromHours(1);
+
     private readonly Config _config;
     private readonly ILogger _logger;
     private readonly string _workerId;
@@ -99,6 +108,19 @@ public sealed class WorkerHeartbeatService
             }
 
             await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+
+            // A brand-new instance's first beat is the natural, self-limiting moment to
+            // sweep out rows left by instances that have since been recycled — new
+            // instances are exactly what grow the table, so pruning here matches the
+            // growth without a per-beat delete on every instance. Best-effort.
+            if (existing is null)
+            {
+                var staleCutoff = DateTime.UtcNow - StaleRetention;
+                await db.ColdStorageWorkerHeartbeats
+                    .Where(h => h.LastSeenUtc < staleCutoff)
+                    .ExecuteDeleteAsync(cancellationToken)
+                    .ConfigureAwait(false);
+            }
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

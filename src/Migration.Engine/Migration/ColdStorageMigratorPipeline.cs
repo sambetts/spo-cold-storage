@@ -123,7 +123,7 @@ public sealed class ColdStorageMigratorPipeline : BaseComponent
         // Runs before any download so held content never leaves SharePoint.
         if (_holdDetector is not null)
         {
-            using var holdCtx = await AuthUtils.GetClientContext(_config, file.SiteUrl, _logger, null).ConfigureAwait(false);
+            using var holdCtx = await AuthUtils.GetClientContext(_config, file.SiteUrl, _logger, null, warmUpWeb: false).ConfigureAwait(false);
             var hold = await _holdDetector.CheckAsync(holdCtx, file.ServerRelativeFilePath, cancellationToken).ConfigureAwait(false);
             if (hold.IsOnHold)
             {
@@ -242,7 +242,7 @@ public sealed class ColdStorageMigratorPipeline : BaseComponent
         ClientContext? spCtx = null;
         try
         {
-            spCtx = await AuthUtils.GetClientContext(_config, file.SiteUrl, _logger, null).ConfigureAwait(false);
+            spCtx = await AuthUtils.GetClientContext(_config, file.SiteUrl, _logger, null, warmUpWeb: false).ConfigureAwait(false);
             var spFile = spCtx.Web.GetFileByServerRelativeUrl(file.ServerRelativeFilePath);
             spCtx.Load(spFile, f => f.Exists, f => f.Length, f => f.CheckOutType, f => f.ListItemAllFields);
             await spCtx.ExecuteQueryAsyncWithThrottleRetries(_logger).ConfigureAwait(false);
@@ -494,7 +494,7 @@ public sealed class ColdStorageMigratorPipeline : BaseComponent
                 JobId = envelope.JobId,
             };
 
-            spCtx = await AuthUtils.GetClientContext(_config, file.SiteUrl, _logger, null).ConfigureAwait(false);
+            spCtx = await AuthUtils.GetClientContext(_config, file.SiteUrl, _logger, null, warmUpWeb: false).ConfigureAwait(false);
             var placeholderUrl = await _placeholderWriter.WritePlaceholderAsync(
                 spCtx, file.ServerRelativeFilePath, metadata, cancellationToken,
                 userFacingUrl: BuildPlaceholderUserFacingUrl(envelope.ItemId)).ConfigureAwait(false);

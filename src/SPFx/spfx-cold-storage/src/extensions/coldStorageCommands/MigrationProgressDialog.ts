@@ -28,7 +28,7 @@ import {
   IJobStatusResponse,
   IWorkerHealth,
 } from '../../common/ColdStorageApiClient';
-import { isTerminal } from '../../common/statusFormat';
+import { formatNumber, isTerminal } from '../../common/statusFormat';
 import {
   DialogPhase,
   IConfirmRequest,
@@ -140,7 +140,7 @@ export class MigrationProgressDialog {
     this.phase = 'browse';
     this.statusMessage = jobs.length === 0
       ? 'No migration or restore jobs have been submitted from this site yet.'
-      : `Showing ${jobs.length} most recent job${jobs.length === 1 ? '' : 's'} for this site.`;
+      : `Showing ${formatNumber(jobs.length)} most recent job${jobs.length === 1 ? '' : 's'} for this site.`;
     this.render();
     void this.refreshWorkerHealthAndRender();
   }
@@ -313,7 +313,7 @@ export class MigrationProgressDialog {
     const created = job.items.length > 0
       ? job.items.map(i => i.spServerRelativeUrl.split('/').pop()).filter(Boolean).slice(0, 2).join(', ')
       : '';
-    const summary = created ? ` — ${created}${job.items.length > 2 ? `, +${job.items.length - 2} more` : ''}` : '';
+    const summary = created ? ` — ${created}${job.items.length > 2 ? `, +${formatNumber(job.items.length - 2)} more` : ''}` : '';
     return `${total - idx}. ${job.operation}${summary}`;
   }
 

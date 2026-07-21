@@ -1,11 +1,21 @@
 /** Shared display formatters used across the SPA. */
 
+/**
+ * Culture-aware number formatting with grouping separators, using the user's locale:
+ * 1000 -> "1,000" (en-US/GB), "1.000" (es-ES). Values under 1000 are unchanged. Any
+ * fractional part is localised too (e.g. decimal comma in es-ES). Null/undefined/NaN -> "0".
+ */
+export function formatNumber(value: number | null | undefined, options?: Intl.NumberFormatOptions): string {
+  if (value == null || Number.isNaN(value)) return "0";
+  return value.toLocaleString(undefined, options);
+}
+
 export function formatBytes(bytes: number): string {
   if (!bytes || bytes <= 0) return "0 B";
   const units = ["B", "KB", "MB", "GB", "TB", "PB"];
   const i = Math.min(units.length - 1, Math.floor(Math.log(bytes) / Math.log(1024)));
   const value = bytes / Math.pow(1024, i);
-  return `${Math.round(value * 100) / 100} ${units[i]}`;
+  return `${formatNumber(value, { maximumFractionDigits: 2 })} ${units[i]}`;
 }
 
 export function formatDateTime(value: string | null | undefined): string {
