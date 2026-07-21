@@ -409,6 +409,14 @@ public class RequeueRequest
 public class RequeueResultResponse
 {
     public int Requeued { get; set; }
+
+    /// <summary>
+    /// Items that were already fully archived (copied + source deleted + placeholder created)
+    /// but showed as failed; corrected straight to completed rather than re-driven through the
+    /// pipeline (whose source is legitimately gone). Counted separately from <see cref="Requeued"/>.
+    /// </summary>
+    public int Recovered { get; set; }
+
     public int Skipped { get; set; }
     public int PublishFailed { get; set; }
     public List<string> Messages { get; set; } = [];

@@ -61,8 +61,8 @@ public sealed class DispatchReconcilerService(Config config, ILoggerFactory logg
                     // visible in App Insights — its silence is exactly what hid the earlier freeze.
                     // A pass is cheap and runs on the dispatch interval, so this is low volume.
                     _logger.LogInformation(
-                        "ColdStorage reconciler pass: hasWork={HasWork} reDriven={ReDriven} throttleRetried={ThrottleRetried} failedGaveUp={FailedGaveUp} failedStalled={FailedStalled} emptyJobsClosed={EmptyJobsClosed} jobsFinalized={JobsFinalized}.",
-                        summary.HasWork, summary.ReDriven, summary.ThrottleRetried, summary.FailedGaveUp, summary.FailedStalled, summary.EmptyJobsClosed, summary.JobsFinalized);
+                        "ColdStorage reconciler pass: hasWork={HasWork} reconciled={Reconciled} reDriven={ReDriven} throttleRetried={ThrottleRetried} failedGaveUp={FailedGaveUp} failedStalled={FailedStalled} emptyJobsClosed={EmptyJobsClosed} jobsFinalized={JobsFinalized}.",
+                        summary.HasWork, summary.Reconciled, summary.ReDriven, summary.ThrottleRetried, summary.FailedGaveUp, summary.FailedStalled, summary.EmptyJobsClosed, summary.JobsFinalized);
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {

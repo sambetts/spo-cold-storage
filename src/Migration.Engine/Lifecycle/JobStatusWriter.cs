@@ -276,6 +276,70 @@ public sealed class JobStatusWriter(SPOColdStorageDbContext db, ILogger logger) 
         await _db.SaveChangesAsync(cancellationToken);
     }
 
+    /// <inheritdoc />
+    public async Task<int> CompleteAlreadyArchivedAsync(int maxItems, CancellationToken cancellationToken = default)
+    {
+        if (maxItems <= 0)
+        {
+            return 0;
+        }
+
+        // Fully archived = content copied to blob AND source deleted AND placeholder created.
+        // The source is gone and the blob + placeholder exist, so the file IS in cold storage;
+        // any non-completed status on such a row is a false failure from an interrupted run or a
+        // requeue that reset the status but not the progress. Correct it to completed. This never
+        // touches SharePoint or blob storage — it only fixes the record.
+        var stuck = await _db.MigrationJobItems
+            .Where(i => i.SourceDeletedAt != null
+                        && i.PlaceholderCreatedAt != null
+                        && i.Status != MigrationLifecycleStatus.ColdStorageMigrationCompleted)
+            .OrderBy(i => i.UpdatedAt)
+            .Take(maxItems)
+            .ToListAsync(cancellationToken)
+            .ConfigureAwait(false);
+
+        if (stuck.Count == 0)
+        {
+            return 0;
+        }
+
+        var now = DateTime.UtcNow;
+        var affectedJobs = new HashSet<Guid>();
+        foreach (var item in stuck)
+        {
+            var previous = item.Status;
+            item.Status = MigrationLifecycleStatus.ColdStorageMigrationCompleted;
+            item.CompletedAt = now;
+            item.UpdatedAt = now;
+            item.LastError = null;
+            item.LastErrorDetail = null;
+            item.NextRetryAt = null;
+            item.LastRetryAfterSeconds = null;
+            affectedJobs.Add(item.JobId);
+
+            await WriteLogAsync(item.JobId, item.ItemId, MigrationLifecycleStatus.ColdStorageMigrationCompleted,
+                LogLevel.Information,
+                $"Reconciled to completed: file was already archived (copied {item.CopiedAt:u}, source deleted {item.SourceDeletedAt:u}, placeholder created {item.PlaceholderCreatedAt:u}); an interrupted run left a stale '{previous}' status.",
+                null, cancellationToken).ConfigureAwait(false);
+            _logger.LogInformation(
+                "ColdStorage item {ItemId} (job {JobId}) {PrevStatus} -> {NewStatus}: reconciled already-archived file to completed.",
+                item.ItemId, item.JobId, previous, MigrationLifecycleStatus.ColdStorageMigrationCompleted);
+        }
+
+        await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+
+        // Recompute rollups so a job whose items are now all complete stops reporting failures.
+        // UpdateRollupAsync recomputes unconditionally, so it will pull a job out of a stale
+        // CompletedWithWarning back to ColdStorageMigrationCompleted once every item is completed.
+        foreach (var jobId in affectedJobs)
+        {
+            await UpdateRollupAsync(jobId, cancellationToken).ConfigureAwait(false);
+        }
+        await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+
+        return stuck.Count;
+    }
+
     private void ApplyTransitionInternal(MigrationJobItem item, MigrationLifecycleStatus newStatus, string message)
     {
         var previous = item.Status;
