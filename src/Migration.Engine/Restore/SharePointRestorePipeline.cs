@@ -55,9 +55,19 @@ public sealed class SharePointRestorePipeline : BaseComponent
         {
             spCtx = await AuthUtils.GetClientContext(_config, target.SiteUrl, _logger, null).ConfigureAwait(false);
 
+            // Resume: a prior attempt already uploaded + recorded the restored content (RestoredAt
+            // set) but hit a transient error before removing the placeholder. Re-running the full
+            // download/upload would collide with the file we already restored, so finish the tail
+            // only. This keeps throttle retries safe once the upload has succeeded.
+            var prior = await _statusWriter.FindItemAsync(envelope.ItemId, cancellationToken).ConfigureAwait(false);
+            if (prior?.RestoredAt is not null && !prior.Status.IsTerminal())
+            {
+                return await ResumeRemovePlaceholderAsync(envelope, spCtx, target, cancellationToken).ConfigureAwait(false);
+            }
+
             var placeholderFile = spCtx.Web.GetFileByServerRelativeUrl(target.PlaceholderServerRelativeUrl);
             spCtx.Load(placeholderFile, f => f.Exists, f => f.ServerRelativeUrl, f => f.ListItemAllFields);
-            await spCtx.ExecuteQueryAsync().ConfigureAwait(false);
+            await spCtx.ExecuteQueryAsyncWithThrottleRetries(_logger).ConfigureAwait(false);
             if (!placeholderFile.Exists)
             {
                 await _statusWriter.TransitionAsync(envelope.ItemId, MigrationLifecycleStatus.ValidationFailed,
@@ -121,8 +131,9 @@ public sealed class SharePointRestorePipeline : BaseComponent
             {
                 var folder = spCtx.Web.GetFolderByServerRelativeUrl(destinationFolder);
                 spCtx.Load(folder);
-                await spCtx.ExecuteQueryAsync().ConfigureAwait(false);
+                await spCtx.ExecuteQueryAsyncWithThrottleRetries(_logger).ConfigureAwait(false);
 
+                var restoredLength = new FileInfo(tempFile).Length;
                 var addInfo = new FileCreationInformation
                 {
                     ContentStream = fs,
@@ -131,10 +142,27 @@ public sealed class SharePointRestorePipeline : BaseComponent
                     // versions onto the destination (the current content is the latest).
                     Overwrite = envelope.ConflictBehavior == ConflictBehavior.Overwrite || replayedVersions > 0,
                 };
-                var uploaded = folder.Files.Add(addInfo);
-                spCtx.Load(uploaded, f => f.ServerRelativeUrl);
-                await spCtx.ExecuteQueryAsync().ConfigureAwait(false);
-                destinationUrl = uploaded.ServerRelativeUrl;
+                try
+                {
+                    var uploaded = folder.Files.Add(addInfo);
+                    spCtx.Load(uploaded, f => f.ServerRelativeUrl);
+                    await spCtx.ExecuteQueryAsyncWithThrottleRetries(_logger).ConfigureAwait(false);
+                    destinationUrl = uploaded.ServerRelativeUrl;
+                }
+                catch (Exception ex) when (TransientErrorClassifier.IsTransient(ex))
+                {
+                    // The upload request may have reached SharePoint even though the RESPONSE was
+                    // lost to a transient I/O hiccup. If the file is now present at the destination
+                    // with the expected byte length, the upload actually succeeded — continue rather
+                    // than re-uploading (which would hit a conflict on the next retry). Otherwise
+                    // rethrow so the item parks for a clean full retry (the destination is still empty).
+                    var existingLength = await GetFileLengthOrNullAsync(spCtx, destinationUrl, cancellationToken).ConfigureAwait(false);
+                    if (existingLength != restoredLength)
+                    {
+                        throw;
+                    }
+                    _logger.LogWarning(ex, "Upload response for '{Url}' was lost, but the file is present with the expected size ({Len} bytes); treating as uploaded.", destinationUrl, restoredLength);
+                }
             }
 
             await _statusWriter.RecordRestoredAsync(envelope.ItemId, destinationUrl, cancellationToken);
@@ -159,18 +187,19 @@ public sealed class SharePointRestorePipeline : BaseComponent
             try
             {
                 placeholderFile.DeleteObject();
-                await spCtx.ExecuteQueryAsync().ConfigureAwait(false);
+                await spCtx.ExecuteQueryAsyncWithThrottleRetries(_logger).ConfigureAwait(false);
                 await _statusWriter.TransitionAsync(envelope.ItemId, MigrationLifecycleStatus.RestoreCompleted,
                     "Restore completed; placeholder removed.", cancellationToken: cancellationToken);
             }
             catch (Exception ex)
             {
+                // The content is restored and verified; only the placeholder removal failed. Under a
+                // throttle storm that's usually transient — park it for an automatic retry (the resume
+                // path finishes the placeholder removal) instead of leaving a stuck PlaceholderRemoveFailed.
                 _logger.LogWarning(ex, "Restored file but failed to remove placeholder.");
-                await _statusWriter.TransitionAsync(envelope.ItemId, MigrationLifecycleStatus.PlaceholderRemoveFailed,
-                    $"Restored file but could not remove placeholder: {ex.Message}", exception: ex,
-                    level: LogLevel.Warning, cancellationToken: cancellationToken);
-                // Restored content is intact; treat as warning, not failure.
-                return true;
+                await HandleRestoreFailureAsync(envelope.ItemId, ex, MigrationLifecycleStatus.PlaceholderRemoveFailed,
+                    $"Restored the file, but removing the placeholder failed: {ex.Message}", cancellationToken).ConfigureAwait(false);
+                return false;
             }
 
             return true;
@@ -178,8 +207,8 @@ public sealed class SharePointRestorePipeline : BaseComponent
         catch (Exception ex)
         {
             _logger.LogError(ex, "Restore failed for placeholder '{Url}'.", target.PlaceholderServerRelativeUrl);
-            await _statusWriter.TransitionAsync(envelope.ItemId, MigrationLifecycleStatus.RestoreFailed,
-                $"Restore failed: {ex.Message}", exception: ex, level: LogLevel.Error, cancellationToken: cancellationToken);
+            await HandleRestoreFailureAsync(envelope.ItemId, ex, MigrationLifecycleStatus.RestoreFailed,
+                $"Restore failed: {ex.Message}", cancellationToken).ConfigureAwait(false);
             return false;
         }
         finally
@@ -189,6 +218,90 @@ public sealed class SharePointRestorePipeline : BaseComponent
             {
                 try { IOFile.Delete(tempFile); } catch (IOException ex) { _logger.LogDebug(ex, "Temp delete failed."); }
             }
+        }
+    }
+
+    /// <summary>
+    /// Records a restore step failure with the same throttle resilience as the migrate
+    /// pipeline (<c>ColdStorageMigratorPipeline.HandleStepFailureAsync</c>): a <b>transient</b>
+    /// error (throttle/timeout/transient 5xx) still under the attempt ceiling parks the item in
+    /// the non-terminal <see cref="MigrationLifecycleStatus.RetryScheduled"/> status with a
+    /// concrete <c>NextRetryAt</c> (from the SharePoint <c>Retry-After</c> header when present,
+    /// else the exponential backoff). The message processor then schedules the retry directly on
+    /// the bus, so a throttled bulk restore resumes automatically instead of mass-failing. A
+    /// permanent error — or a transient one that has exhausted its attempts — transitions to
+    /// <paramref name="terminalStatus"/>. A restore never deletes the archived blob before the
+    /// upload is verified, so retrying is always safe.
+    /// </summary>
+    private async Task HandleRestoreFailureAsync(
+        Guid itemId,
+        Exception ex,
+        MigrationLifecycleStatus terminalStatus,
+        string terminalMessage,
+        CancellationToken cancellationToken)
+    {
+        if (TransientErrorClassifier.IsTransient(ex))
+        {
+            var attempts = await _statusWriter.IncrementAttemptsAsync(itemId, cancellationToken).ConfigureAwait(false);
+            var maxAttempts = _config.ColdStorageMaxProcessAttempts > 0 ? _config.ColdStorageMaxProcessAttempts : 5;
+            if (attempts < maxAttempts)
+            {
+                var backoffSeconds = ThrottleBackoff.SecondsFor(attempts, _config);
+                var retryAfterSeconds = ThrottleInfo.TryGetRetryAfterSeconds(ex);
+                var waitSeconds = Math.Clamp(Math.Max(backoffSeconds, retryAfterSeconds ?? 0), 1, 3600);
+                var nextRetryUtc = DateTime.UtcNow.AddSeconds(waitSeconds);
+                var reason = retryAfterSeconds is int ra
+                    ? $"SharePoint or Azure is busy and throttled the request (asked to wait {ra}s). It will be retried automatically at {nextRetryUtc:HH:mm:ss} UTC (attempt {attempts + 1} of {maxAttempts})."
+                    : $"Throttled or hit a transient error; it will be retried automatically at {nextRetryUtc:HH:mm:ss} UTC (attempt {attempts + 1} of {maxAttempts}).";
+                await _statusWriter.ScheduleRetryAsync(itemId, nextRetryUtc, retryAfterSeconds, reason, ex, cancellationToken).ConfigureAwait(false);
+                return;
+            }
+            await _statusWriter.TransitionAsync(itemId, terminalStatus,
+                $"Gave up after {attempts} throttled/transient attempts. {terminalMessage}",
+                exception: ex, level: LogLevel.Error, cancellationToken: cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        await _statusWriter.TransitionAsync(itemId, terminalStatus, terminalMessage,
+            exception: ex, level: LogLevel.Error, cancellationToken: cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Resume path for an item whose content was already restored (RestoredAt set) by a prior
+    /// attempt that then hit a transient error before removing the placeholder. Finishes just the
+    /// tail — remove the placeholder and mark completed — rather than re-downloading/re-uploading
+    /// (which would collide with the file we already restored). Throttle-safe: a transient failure
+    /// here parks for another automatic retry.
+    /// </summary>
+    private async Task<bool> ResumeRemovePlaceholderAsync(
+        ColdStorageBusEnvelope envelope,
+        ClientContext spCtx,
+        PlaceholderRestoreTarget target,
+        CancellationToken cancellationToken)
+    {
+        _logger.LogInformation("Item {ItemId}: content already restored by a prior attempt; resuming to remove the placeholder only.", envelope.ItemId);
+        try
+        {
+            var placeholderFile = spCtx.Web.GetFileByServerRelativeUrl(target.PlaceholderServerRelativeUrl);
+            spCtx.Load(placeholderFile, f => f.Exists);
+            await spCtx.ExecuteQueryAsyncWithThrottleRetries(_logger).ConfigureAwait(false);
+            if (placeholderFile.Exists)
+            {
+                await _statusWriter.TransitionAsync(envelope.ItemId, MigrationLifecycleStatus.PlaceholderRemoving,
+                    "Resuming: removing placeholder after a prior successful restore.", cancellationToken: cancellationToken);
+                placeholderFile.DeleteObject();
+                await spCtx.ExecuteQueryAsyncWithThrottleRetries(_logger).ConfigureAwait(false);
+            }
+            await _statusWriter.TransitionAsync(envelope.ItemId, MigrationLifecycleStatus.RestoreCompleted,
+                "Restore completed; placeholder removed (resumed after a transient failure).", cancellationToken: cancellationToken);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Resume: failed to remove placeholder for item {ItemId}.", envelope.ItemId);
+            await HandleRestoreFailureAsync(envelope.ItemId, ex, MigrationLifecycleStatus.PlaceholderRemoveFailed,
+                $"The file is restored, but removing the placeholder failed: {ex.Message}", cancellationToken).ConfigureAwait(false);
+            return false;
         }
     }
 
@@ -240,7 +353,7 @@ public sealed class SharePointRestorePipeline : BaseComponent
             {
                 var folder = spCtx.Web.GetFolderByServerRelativeUrl(destinationFolder);
                 spCtx.Load(folder);
-                await spCtx.ExecuteQueryAsync().ConfigureAwait(false);
+                await spCtx.ExecuteQueryAsyncWithThrottleRetries(_logger).ConfigureAwait(false);
 
                 var addInfo = new FileCreationInformation
                 {
@@ -250,7 +363,7 @@ public sealed class SharePointRestorePipeline : BaseComponent
                 };
                 var uploaded = folder.Files.Add(addInfo);
                 spCtx.Load(uploaded, f => f.ServerRelativeUrl);
-                await spCtx.ExecuteQueryAsync().ConfigureAwait(false);
+                await spCtx.ExecuteQueryAsyncWithThrottleRetries(_logger).ConfigureAwait(false);
                 destinationUrl = uploaded.ServerRelativeUrl;
             }
 
@@ -296,11 +409,11 @@ public sealed class SharePointRestorePipeline : BaseComponent
         {
             var ph = ctx.Web.GetFileByServerRelativeUrl(placeholderServerRelativeUrl);
             ctx.Load(ph, f => f.Exists);
-            await ctx.ExecuteQueryAsync().ConfigureAwait(false);
+            await ctx.ExecuteQueryAsyncWithThrottleRetries(_logger).ConfigureAwait(false);
             if (ph.Exists)
             {
                 ph.DeleteObject();
-                await ctx.ExecuteQueryAsync().ConfigureAwait(false);
+                await ctx.ExecuteQueryAsyncWithThrottleRetries(_logger).ConfigureAwait(false);
             }
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -309,11 +422,11 @@ public sealed class SharePointRestorePipeline : BaseComponent
         }
     }
 
-    private static async Task<string> ReadFileContentAsStringAsync(ClientContext ctx, Microsoft.SharePoint.Client.File spFile, CancellationToken cancellationToken)
+    private async Task<string> ReadFileContentAsStringAsync(ClientContext ctx, Microsoft.SharePoint.Client.File spFile, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
         var streamResult = spFile.OpenBinaryStream();
-        await ctx.ExecuteQueryAsync().ConfigureAwait(false);
+        await ctx.ExecuteQueryAsyncWithThrottleRetries(_logger).ConfigureAwait(false);
         using var ms = new MemoryStream();
         await streamResult.Value.CopyToAsync(ms, cancellationToken).ConfigureAwait(false);
         return Encoding.UTF8.GetString(ms.ToArray());
@@ -384,7 +497,7 @@ public sealed class SharePointRestorePipeline : BaseComponent
         ctx.Load(existing, f => f.Exists);
         try
         {
-            await ctx.ExecuteQueryAsync().ConfigureAwait(false);
+            await ctx.ExecuteQueryAsyncWithThrottleRetries(_logger).ConfigureAwait(false);
         }
         catch (ServerException)
         {
@@ -422,15 +535,36 @@ public sealed class SharePointRestorePipeline : BaseComponent
         return $"{folder}/{name}.restored-{stamp}{ext}";
     }
 
-    private static async Task VerifyRestoredAsync(ClientContext ctx, string serverRelativeUrl, CancellationToken cancellationToken)
+    private async Task VerifyRestoredAsync(ClientContext ctx, string serverRelativeUrl, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
         var file = ctx.Web.GetFileByServerRelativeUrl(serverRelativeUrl);
         ctx.Load(file, f => f.Exists, f => f.Length);
-        await ctx.ExecuteQueryAsync().ConfigureAwait(false);
+        await ctx.ExecuteQueryAsyncWithThrottleRetries(_logger).ConfigureAwait(false);
         if (!file.Exists)
         {
             throw new InvalidOperationException("Restored file not found after upload: " + serverRelativeUrl);
+        }
+    }
+
+    /// <summary>
+    /// Returns the byte length of a SharePoint file, or null if it doesn't exist. Used to detect
+    /// an upload whose response was lost but whose bytes actually landed (same length), so a retry
+    /// doesn't re-upload into a conflict.
+    /// </summary>
+    private async Task<long?> GetFileLengthOrNullAsync(ClientContext ctx, string serverRelativeUrl, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var file = ctx.Web.GetFileByServerRelativeUrl(serverRelativeUrl);
+            ctx.Load(file, f => f.Exists, f => f.Length);
+            await ctx.ExecuteQueryAsyncWithThrottleRetries(_logger).ConfigureAwait(false);
+            return file.Exists ? file.Length : null;
+        }
+        catch (ServerException)
+        {
+            // File-not-found surfaces as a ServerException on some tenants — treat as absent.
+            return null;
         }
     }
 
