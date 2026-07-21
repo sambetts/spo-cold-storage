@@ -3,6 +3,7 @@ import { BaseListViewCommandSet, Command, IListViewCommandSetExecuteEventParamet
 import { AadHttpClient } from '@microsoft/sp-http';
 
 import { ColdStorageApiClient, ColdStorageApiError, IContainerResponse, IStartMigrationItem } from '../../common/ColdStorageApiClient';import { MigrationProgressDialog } from './MigrationProgressDialog';
+import { formatNumber } from '../../common/statusFormat';
 
 export interface IColdStorageCommandSetProperties {
   apiBaseUrl: string;
@@ -120,7 +121,7 @@ export default class ColdStorageCommandSet extends BaseListViewCommandSet<IColdS
 
     const containerName = container.displayName ?? container.name;
     const submit = async (): Promise<void> => {
-      dialog.setStatusMessage(`Submitting migration for ${items.length} item${items.length === 1 ? '' : 's'} to container "${containerName}"…`);
+      dialog.setStatusMessage(`Submitting migration for ${formatNumber(items.length)} item${items.length === 1 ? '' : 's'} to container "${containerName}"…`);
       try {
         const response = await client.startMigration({
           siteUrl, webUrl,
@@ -128,7 +129,7 @@ export default class ColdStorageCommandSet extends BaseListViewCommandSet<IColdS
           recursive: true,
           items,
         });
-        dialog.addAcceptedJob(response.jobId, response, `Migration job (${items.length} item${items.length === 1 ? '' : 's'})`);
+        dialog.addAcceptedJob(response.jobId, response, `Migration job (${formatNumber(items.length)} item${items.length === 1 ? '' : 's'})`);
       } catch (err) {
         dialog.showError(this.describeError(err, 'Failed to submit migration'), () => { void submit(); });
       }
@@ -137,7 +138,7 @@ export default class ColdStorageCommandSet extends BaseListViewCommandSet<IColdS
     // Confirm before submitting — migration replaces the source with a .url shortcut.
     dialog.confirm({
       message: `These items will be migrated to cold-storage container “${containerName}”. Each is copied to cold storage and then replaced with a .url shortcut in place — the original is only removed after the copy is verified. Folders include everything inside them.`,
-      confirmLabel: `Migrate ${items.length} item${items.length === 1 ? '' : 's'}`,
+      confirmLabel: `Migrate ${formatNumber(items.length)} item${items.length === 1 ? '' : 's'}`,
       items: items.map(i => ({ name: ColdStorageCommandSet.basename(i.serverRelativeUrl), kind: i.itemKind })),
     }, () => { void submit(); });
   }
@@ -174,8 +175,8 @@ export default class ColdStorageCommandSet extends BaseListViewCommandSet<IColdS
     const submit = async (): Promise<void> => {
       dialog.setStatusMessage(
         folders.length > 0
-          ? `Submitting bulk restore (${placeholders.length} file${placeholders.length === 1 ? '' : 's'} + ${folders.length} folder${folders.length === 1 ? '' : 's'})…`
-          : `Submitting restore for ${placeholders.length} item${placeholders.length === 1 ? '' : 's'}…`,
+          ? `Submitting bulk restore (${formatNumber(placeholders.length)} file${placeholders.length === 1 ? '' : 's'} + ${formatNumber(folders.length)} folder${folders.length === 1 ? '' : 's'})…`
+          : `Submitting restore for ${formatNumber(placeholders.length)} item${placeholders.length === 1 ? '' : 's'}…`,
       );
       try {
         const response = await client.startBatchRestore({
@@ -185,9 +186,9 @@ export default class ColdStorageCommandSet extends BaseListViewCommandSet<IColdS
           folderServerRelativeUrls: folders,
           conflictBehavior: 'Fail',
         });
-        dialog.addAcceptedJob(response.jobId, response, `Restore (${response.accepted} item${response.accepted === 1 ? '' : 's'})`);
+        dialog.addAcceptedJob(response.jobId, response, `Restore (${formatNumber(response.accepted)} item${response.accepted === 1 ? '' : 's'})`);
         if (response.warnings && response.warnings.length > 0) {
-          dialog.setStatusMessage(`Queued ${response.accepted}; skipped ${response.warnings.length}: ${response.warnings.join('; ')}`);
+          dialog.setStatusMessage(`Queued ${formatNumber(response.accepted)}; skipped ${formatNumber(response.warnings.length)}: ${response.warnings.join('; ')}`);
         } else if (response.accepted === 0) {
           dialog.showError('No restorable items were found in the selection.');
         }
@@ -203,7 +204,7 @@ export default class ColdStorageCommandSet extends BaseListViewCommandSet<IColdS
     ];
     dialog.confirm({
       message: 'These items will be restored from cold storage back into this library. Each archived file is downloaded and its .url placeholder is replaced with the original. Folders restore everything archived beneath them.',
-      confirmLabel: `Restore ${confirmItems.length} item${confirmItems.length === 1 ? '' : 's'}`,
+      confirmLabel: `Restore ${formatNumber(confirmItems.length)} item${confirmItems.length === 1 ? '' : 's'}`,
       items: confirmItems,
     }, () => { void submit(); });
   }

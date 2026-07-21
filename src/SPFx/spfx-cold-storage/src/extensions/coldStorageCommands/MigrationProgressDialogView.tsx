@@ -9,7 +9,7 @@ import {
   IWorkerHealth,
   MigrationLifecycleStatus,
 } from '../../common/ColdStorageApiClient';
-import { colorFor, describeStatus, formatCountdown, formatEta, formatLabel, isTerminal, normalizeStatus } from '../../common/statusFormat';
+import { colorFor, describeStatus, formatCountdown, formatEta, formatLabel, formatNumber, isTerminal, normalizeStatus } from '../../common/statusFormat';
 
 export type DialogPhase = 'submitting' | 'confirm' | 'polling' | 'terminal' | 'expired' | 'error' | 'browse';
 
@@ -187,9 +187,9 @@ function folderRollup(items: IJobItemStatus[]): { label: string; color: string }
     else { inProgress++; }
   }
   const total = items.length;
-  if (inProgress > 0) return { label: `${done}/${total} done`, color: '#0078d4' };
-  if (failed > 0) return { label: `${done}/${total} done · ${failed} issue${failed === 1 ? '' : 's'}`, color: '#a4262c' };
-  return { label: `All ${total} done`, color: '#107c10' };
+  if (inProgress > 0) return { label: `${formatNumber(done)}/${formatNumber(total)} done`, color: '#0078d4' };
+  if (failed > 0) return { label: `${formatNumber(done)}/${formatNumber(total)} done · ${formatNumber(failed)} issue${failed === 1 ? '' : 's'}`, color: '#a4262c' };
+  return { label: `All ${formatNumber(total)} done`, color: '#107c10' };
 }
 
 interface JobCounts { completed: number; failed: number; skipped: number; inprogress: number; throttled: number; total: number; }
@@ -244,7 +244,7 @@ const JobProgress: React.FC<{ job: ITrackedJob; items: IJobItemStatus[]; active:
           {eta && <span>Estimated done <strong style={{ color: '#201f1e' }}>{formatEta(eta)}</strong></span>}
           {throttled > 0 && nextRetry && (
             <span style={{ color: '#835c00' }} title={`Next automatic retry at ${new Date(nextRetry).toLocaleString()}`}>
-              {`\u23F3 ${throttled} throttled — next retry ${formatCountdown(nextRetry)}`}
+              {`\u23F3 ${formatNumber(throttled)} throttled — next retry ${formatCountdown(nextRetry)}`}
             </span>
           )}
         </div>
@@ -349,7 +349,7 @@ const CollapsibleMessageList: React.FC<{ title: string; messages: string[]; colo
         style={{ display: 'flex', alignItems: 'center', gap: '6px', cursor: 'pointer', fontSize: '12px', fontWeight: 600, color }}
       >
         <span style={{ color: '#605e5c' }}>{open ? '▾' : '▸'}</span>
-        <span>{`${title} (${messages.length})`}</span>
+        <span>{`${title} (${formatNumber(messages.length)})`}</span>
       </div>
       {open && (
         <ul style={{ margin: '4px 0 0', paddingLeft: '18px', fontSize: '12px', color: '#323130', maxHeight: '220px', overflow: 'auto' }}>
@@ -429,7 +429,7 @@ const TreeFolderNode: React.FC<{
       >
         <span style={{ color: '#605e5c', flex: '0 0 auto' }}>{expanded ? '▾' : '▸'}</span>
         <span style={{ fontWeight: 600, fontSize: '13px', flex: '1 1 auto', wordBreak: 'break-all' }} title={node.path}>{node.name}</span>
-        <span style={{ fontSize: '12px', color: '#605e5c', background: '#f3f2f1', borderRadius: '10px', padding: '1px 8px', flex: '0 0 auto' }}>{node.descendants.length}</span>
+        <span style={{ fontSize: '12px', color: '#605e5c', background: '#f3f2f1', borderRadius: '10px', padding: '1px 8px', flex: '0 0 auto' }}>{formatNumber(node.descendants.length)}</span>
         <span style={{ fontSize: '11px', color: '#fff', background: rollup.color, borderRadius: '10px', padding: '2px 8px', whiteSpace: 'nowrap', flex: '0 0 auto' }}>{rollup.label}</span>
       </div>
       {expanded && (
@@ -454,7 +454,7 @@ const ItemsByFolder: React.FC<{
   return (
     <div>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '6px 12px', fontSize: '12px', color: '#605e5c', borderBottom: '1px solid #f3f2f1' }}>
-        <span>{`${items.length} file${items.length === 1 ? '' : 's'} in ${folderPaths.length} folder${folderPaths.length === 1 ? '' : 's'}`}</span>
+        <span>{`${formatNumber(items.length)} file${items.length === 1 ? '' : 's'} in ${formatNumber(folderPaths.length)} folder${folderPaths.length === 1 ? '' : 's'}`}</span>
         <button
           type="button"
           onClick={() => onToggleAllFolders(nsKeys, !allExpanded)}
@@ -579,7 +579,7 @@ const WorkerBannerView: React.FC<{ health: IWorkerHealth; jobs: ITrackedJob[] }>
       </Banner>
     );
   }
-  return <Banner kind="info">The background worker is online and processing — queued items will start shortly.</Banner>;
+  return <Banner kind="info">{`The background worker is online and processing${health.workerCount ? ` (${formatNumber(health.workerCount)} active instance${health.workerCount === 1 ? '' : 's'})` : ''} — queued items will start shortly.`}</Banner>;
 };
 
 const ConfirmView: React.FC<{
@@ -600,7 +600,7 @@ const ConfirmView: React.FC<{
     <div>
       <Banner kind={operation === 'Migrate' ? 'warn' : 'info'}>{confirm.message}</Banner>
       <div style={{ fontSize: '12px', fontWeight: 600, color: '#605e5c', margin: '4px 0 6px' }}>
-        {confirm.items.length} item{confirm.items.length === 1 ? '' : 's'} selected
+        {formatNumber(confirm.items.length)} item{confirm.items.length === 1 ? '' : 's'} selected
       </div>
       <div style={{ maxHeight: '38vh', overflow: 'auto', border: '1px solid #edebe9', borderRadius: '2px' }}>
         <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px' }}>

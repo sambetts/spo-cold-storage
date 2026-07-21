@@ -5,6 +5,7 @@ using Microsoft.Identity.Client;
 using Microsoft.SharePoint.Client;
 using Entities.Configuration;
 using Migration.Engine.Utils;
+using System.Collections.Concurrent;
 using System.Security.Cryptography.X509Certificates;
 
 using Microsoft.Extensions.Logging;
@@ -13,6 +14,12 @@ namespace Migration.Engine;
 public class AuthUtils
 {
     private static X509Certificate2? _cachedCert = null;
+
+    // Confidential-client apps cached per (tenant|client|auth) so MSAL's in-memory token
+    // cache is reused across items. Without this, every ClientContext creation rebuilt the
+    // app and re-acquired an app-only token from AAD — needless latency and an extra throttle
+    // surface on a large migration. One shared app => one token fetch per ~1h, auto-refreshed.
+    private static readonly ConcurrentDictionary<string, Lazy<Task<IConfidentialClientApplication>>> _appCache = new();
     
     /// <summary>
     /// Retrieves a certificate from Azure Key Vault.
@@ -40,7 +47,7 @@ public class AuthUtils
         return await GetClientContext(siteUrl, tenantId, clientId, clientSecret, keyVaultUrl, baseServerAddress, logger, authResultDelegate, true, "AzureAutomationSPOAccess");
     }
 
-    public async static Task<ClientContext> GetClientContext(string siteUrl, string tenantId, string clientId, string clientSecret, string keyVaultUrl, string baseServerAddress, ILogger logger, Action<AuthenticationResult>? authResultDelegate, bool useCertificateAuth, string certificateName)
+    public async static Task<ClientContext> GetClientContext(string siteUrl, string tenantId, string clientId, string clientSecret, string keyVaultUrl, string baseServerAddress, ILogger logger, Action<AuthenticationResult>? authResultDelegate, bool useCertificateAuth, string certificateName, bool warmUpWeb = true)
     {
         if (string.IsNullOrEmpty(siteUrl))
         {
@@ -85,8 +92,15 @@ public class AuthUtils
             e.WebRequestExecutor.RequestHeaders["Authorization"] = "Bearer " + result.AccessToken;
         };
 
-        ctx.Load(ctx.Web);
-        await ctx.ExecuteQueryAsyncWithThrottleRetries(logger);
+        // Optional warm-up. It costs a SharePoint round-trip per context, so the migrate/restore
+        // hot path skips it (warmUpWeb: false) to reduce SP calls + throttling — the callers there
+        // query the file/folder directly (GetFileByServerRelativeUrl) and never read a pre-loaded
+        // Web property. Keep it on by default for callers that expect ctx.Web to be populated.
+        if (warmUpWeb)
+        {
+            ctx.Load(ctx.Web);
+            await ctx.ExecuteQueryAsyncWithThrottleRetries(logger);
+        }
 
         return ctx;
     }
@@ -116,11 +130,29 @@ public class AuthUtils
     }
 
     /// <summary>
-    /// Creates a confidential client application with either certificate or client secret authentication.
+    /// Creates (or returns a cached) confidential client application with either certificate or
+    /// client secret authentication. Cached per (tenant|client|auth) so MSAL reuses its token cache.
     /// </summary>
     /// <param name="useCertificateAuth">If true, uses certificate from Key Vault; if false, uses client secret directly</param>
     /// <param name="certificateName">Name of certificate in Key Vault (only used if useCertificateAuth is true)</param>
     public static async Task<IConfidentialClientApplication> GetNewClientApp(string tenantId, string clientId, string clientSecret, string keyVaultUrl, bool useCertificateAuth, string certificateName)
+    {
+        var key = $"{tenantId}|{clientId}|{useCertificateAuth}|{certificateName}";
+        var lazy = _appCache.GetOrAdd(key, _ => new Lazy<Task<IConfidentialClientApplication>>(
+            () => BuildClientAppAsync(tenantId, clientId, clientSecret, keyVaultUrl, useCertificateAuth, certificateName)));
+        try
+        {
+            return await lazy.Value.ConfigureAwait(false);
+        }
+        catch
+        {
+            // Don't cache a transient build failure (e.g. Key Vault blip) forever.
+            _appCache.TryRemove(key, out _);
+            throw;
+        }
+    }
+
+    private static async Task<IConfidentialClientApplication> BuildClientAppAsync(string tenantId, string clientId, string clientSecret, string keyVaultUrl, bool useCertificateAuth, string certificateName)
     {
         var builder = ConfidentialClientApplicationBuilder.Create(clientId)
                                               .WithAuthority($"https://login.microsoftonline.com/{tenantId}");
@@ -140,11 +172,11 @@ public class AuthUtils
         return builder.Build();
     }
 
-    public static async Task<ClientContext> GetClientContext(Config config, string siteUrl, ILogger logger, Action<AuthenticationResult>? authResultDelegate)
+    public static async Task<ClientContext> GetClientContext(Config config, string siteUrl, ILogger logger, Action<AuthenticationResult>? authResultDelegate, bool warmUpWeb = true)
     {
         return await GetClientContext(siteUrl, config.AzureAdConfig.TenantId!, config.AzureAdConfig.ClientID!,
             config.AzureAdConfig.Secret!, config.KeyVaultUrl, config.BaseServerAddress, logger, authResultDelegate,
-            config.AzureAdConfig.UseCertificateAuth, config.AzureAdConfig.CertificateName);
+            config.AzureAdConfig.UseCertificateAuth, config.AzureAdConfig.CertificateName, warmUpWeb);
     }
 
     public static async Task<IConfidentialClientApplication> GetNewClientApp(Config config)

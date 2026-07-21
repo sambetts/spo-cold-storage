@@ -2,10 +2,16 @@ import { useEffect, useState } from "react";
 import { Spinner } from "@fluentui/react-components";
 import { ApiError, useApi } from "../../api/client";
 import { SavingsReport } from "../../api/types";
+import { formatNumber } from "../../utils/format";
 
 function money(value: number, currency: string): string {
-  const fixed = value.toFixed(2);
-  return currency === "USD" ? `$${fixed}` : `${fixed} ${currency}`;
+  // Culture-aware currency: "$1,234.56" (en-US), "1.234,56 €" (es-ES), etc.
+  try {
+    return new Intl.NumberFormat(undefined, { style: "currency", currency }).format(value);
+  } catch {
+    // Unknown/invalid currency code — fall back to a localised number + the code.
+    return `${formatNumber(value, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ${currency}`;
+  }
 }
 
 function Kpi({ label, value, accent }: { label: string; value: string; accent?: string }) {
@@ -69,8 +75,8 @@ export function SavingsDashboard() {
       {report && !loading && !error && (
         <>
           <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
-            <Kpi label="Files archived" value={report.archivedItemCount.toLocaleString()} />
-            <Kpi label="Storage reclaimed" value={`${report.reclaimedGb.toLocaleString()} GB`} />
+            <Kpi label="Files archived" value={formatNumber(report.archivedItemCount)} />
+            <Kpi label="Storage reclaimed" value={`${formatNumber(report.reclaimedGb, { maximumFractionDigits: 2 })} GB`} />
             <Kpi
               label="Net saving / month"
               value={money(report.estimatedNetSavingsPerMonth, report.currency)}

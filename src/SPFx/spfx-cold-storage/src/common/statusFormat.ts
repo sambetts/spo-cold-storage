@@ -150,6 +150,16 @@ export function formatEta(value: string | null | undefined): string {
   return `~${clock} (${formatCountdown(value)})`;
 }
 
+/**
+ * Culture-aware number formatting with grouping separators, using the user's locale:
+ * 1000 -> "1,000" (en-US/GB), "1.000" (es-ES). Values under 1000 are unchanged.
+ * Null/undefined/NaN -> "0".
+ */
+export function formatNumber(value: number | null | undefined, options?: Intl.NumberFormatOptions): string {
+  if (value === null || value === undefined || isNaN(value)) return '0';
+  return value.toLocaleString(undefined, options);
+}
+
 const DESCRIPTIONS: Partial<Record<MigrationLifecycleStatus, string>> = {
   [MigrationLifecycleStatus.Queued]: 'Waiting for a background worker to pick this up.',
   [MigrationLifecycleStatus.Validating]: 'Checking the item is eligible and reading its details.',

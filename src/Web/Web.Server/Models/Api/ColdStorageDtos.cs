@@ -206,7 +206,11 @@ public class WorkerHealthResponse
     public string? WorkerVersion { get; set; }
     public DateTime? StartedAtUtc { get; set; }
 
-    /// <summary>Number of worker instances that have ever reported a heartbeat.</summary>
+    /// <summary>
+    /// Number of worker instances currently active — i.e. that sent a heartbeat within
+    /// <see cref="OnlineWindowSeconds"/>. On auto-scaling hosts this rises under load and
+    /// falls to a baseline when idle; it is NOT a lifetime total. 0 when offline.
+    /// </summary>
     public int WorkerCount { get; set; }
 }
 

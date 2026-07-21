@@ -1,11 +1,11 @@
 import { CSSProperties, MouseEvent as ReactMouseEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import { Badge, Button, Checkbox, Input, Select, Spinner } from "@fluentui/react-components";
-import { ArrowClockwise20Regular, ArrowLeft20Regular, ArrowSync20Regular } from "@fluentui/react-icons";
+import { Badge, Button, Checkbox, Input, Select, Spinner, Tooltip } from "@fluentui/react-components";
+import { ArrowClockwise20Regular, ArrowLeft20Regular, ArrowSync20Regular, Info16Regular } from "@fluentui/react-icons";
 import { ApiError, useApi } from "../../api/client";
 import { JobItemStatus, JobLogEntry, JobStatus, JobSummary, MigrationOperationKind, WorkerHealth } from "../../api/types";
 import { describeLogLevel, describeOperation, describeStatus, isErrorLevel, isFailedStatus, isInProgressStatus, isWarnLevel, StatusCategory, statusCategory } from "../../api/status";
-import { fileName, formatCountdown, formatDateTime, formatEta, formatRelative } from "../../utils/format";
+import { fileName, formatCountdown, formatDateTime, formatEta, formatNumber, formatRelative } from "../../utils/format";
 
 const REFRESH_MS = 10000;
 
@@ -119,6 +119,15 @@ function WorkerBanner() {
   if (failed || !health) return null;
 
   const online = health.isOnline;
+  const windowSecs = health.onlineWindowSeconds || 100;
+  const explanation =
+    `The background worker is the service that actually moves files: it archives them to ` +
+    `(and restores them from) Azure cold storage by processing the transfer queue. It runs ` +
+    `serverless and auto-scales, so the number of active instances rises while a large ` +
+    `migration is running and drops back to a small baseline when things are idle — a higher ` +
+    `number just means more parallel throughput, not a problem. "Online" means at least one ` +
+    `instance reported a heartbeat within the last ${windowSecs} seconds. If it shows offline, ` +
+    `queued transfers pause until the worker wakes (it starts automatically when new items are queued).`;
   return (
     <div
       style={{
@@ -137,11 +146,21 @@ function WorkerBanner() {
       <span style={{ fontWeight: 600 }}>{online ? "● Worker online" : "○ Worker offline"}</span>
       <span style={{ color: "#605e5c" }}>
         {online
-          ? `${health.workerCount} instance${health.workerCount === 1 ? "" : "s"}, last beat ${formatRelative(
+          ? `${formatNumber(health.workerCount)} active instance${health.workerCount === 1 ? "" : "s"} · last beat ${formatRelative(
               health.lastSeenUtc,
             )}`
-          : "No recent heartbeat — queued transfers may not progress until it wakes."}
+          : `No heartbeat in the last ${windowSecs}s — queued transfers won't progress until the worker wakes (it starts automatically when new items are queued).`}
       </span>
+      <Tooltip content={explanation} relationship="description" withArrow>
+        <span
+          tabIndex={0}
+          role="img"
+          aria-label="What is the background worker?"
+          style={{ display: "inline-flex", alignItems: "center", color: "#605e5c", cursor: "help" }}
+        >
+          <Info16Regular />
+        </span>
+      </Tooltip>
     </div>
   );
 }
@@ -232,10 +251,10 @@ function TransfersList() {
         { status: "AllFailed", max: 5000 },
       );
       setRecoverMsg(
-        `Recovered ${res.requeued}` +
-          (res.recovered ? `, ${res.recovered} already archived (fixed)` : "") +
-          (res.skipped ? `, skipped ${res.skipped}` : "") +
-          (res.publishFailed ? `, ${res.publishFailed} failed to publish` : "") +
+        `Recovered ${formatNumber(res.requeued)}` +
+          (res.recovered ? `, ${formatNumber(res.recovered)} already archived (fixed)` : "") +
+          (res.skipped ? `, skipped ${formatNumber(res.skipped)}` : "") +
+          (res.publishFailed ? `, ${formatNumber(res.publishFailed)} failed to publish` : "") +
           ".",
       );
       await load();
@@ -271,7 +290,7 @@ function TransfersList() {
       );
       setRecoverMsg(
         res.requeued > 0
-          ? `Re-published ${res.requeued} stuck item(s).`
+          ? `Re-published ${formatNumber(res.requeued)} stuck item(s).`
           : "No stuck queued items found (older than 15 minutes).",
       );
       await load();
@@ -327,7 +346,7 @@ function TransfersList() {
             disabled={recovering}
             onClick={() => void recoverAllFailed()}
           >
-            {recovering ? "Recovering…" : `Recover ${totalFailed} failed`}
+            {recovering ? "Recovering…" : `Recover ${formatNumber(totalFailed)} failed`}
           </Button>
         )}
         <Button icon={<ArrowSync20Regular />} appearance="subtle" disabled={recovering} onClick={() => void recoverStuckQueued()}>
@@ -382,11 +401,11 @@ function TransfersList() {
                   </td>
                   <td style={td}>{job.requestedByUpn}</td>
                   <td style={td}>
-                    <span title="total">{job.itemCount}</span>
-                    {job.completedCount > 0 && <span style={{ color: "#107c10" }}> · {job.completedCount}✓</span>}
-                    {job.inProgressCount > 0 && <span style={{ color: "#0f6cbd" }}> · {job.inProgressCount}⋯</span>}
-                    {(job.throttledCount ?? 0) > 0 && <span style={{ color: "#835c00" }}> · {job.throttledCount}⏳</span>}
-                    {job.failedCount > 0 && <span style={{ color: "#a4262c" }}> · {job.failedCount}✕</span>}
+                    <span title="total">{formatNumber(job.itemCount)}</span>
+                    {job.completedCount > 0 && <span style={{ color: "#107c10" }}> · {formatNumber(job.completedCount)}✓</span>}
+                    {job.inProgressCount > 0 && <span style={{ color: "#0f6cbd" }}> · {formatNumber(job.inProgressCount)}⋯</span>}
+                    {(job.throttledCount ?? 0) > 0 && <span style={{ color: "#835c00" }}> · {formatNumber(job.throttledCount)}⏳</span>}
+                    {job.failedCount > 0 && <span style={{ color: "#a4262c" }}> · {formatNumber(job.failedCount)}✕</span>}
                     {job.inProgressCount > 0 && job.estimatedCompletionUtc && (
                       <div style={{ fontSize: 11, color: "#605e5c" }} title={`Estimated done ${formatEta(job.estimatedCompletionUtc)}`}>
                         ETA {formatCountdown(job.estimatedCompletionUtc)}
@@ -494,7 +513,7 @@ function FolderDisclosure({
         <span style={{ fontWeight: 600, flex: "1 1 auto", wordBreak: "break-all" }} title={folder}>
           {shortFolder(folder)}
         </span>
-        <span style={{ fontSize: 12, color: "#605e5c", background: "#f3f2f1", borderRadius: 10, padding: "1px 8px" }}>{count}</span>
+        <span style={{ fontSize: 12, color: "#605e5c", background: "#f3f2f1", borderRadius: 10, padding: "1px 8px" }}>{formatNumber(count)}</span>
         {rollup && (
           <span style={{ fontSize: 11, color: "#fff", background: rollup.color, borderRadius: 10, padding: "2px 8px", whiteSpace: "nowrap" }}>
             {rollup.label}
@@ -615,7 +634,7 @@ function TreeFolderNode({
         <span style={{ fontWeight: 600, flex: "1 1 auto", wordBreak: "break-all" }} title={node.path}>
           {node.name}
         </span>
-        <span style={{ fontSize: 12, color: "#605e5c", background: "#f3f2f1", borderRadius: 10, padding: "1px 8px" }}>{node.descendants.length}</span>
+        <span style={{ fontSize: 12, color: "#605e5c", background: "#f3f2f1", borderRadius: 10, padding: "1px 8px" }}>{formatNumber(node.descendants.length)}</span>
         <span style={{ fontSize: 11, color: "#fff", background: rollup.color, borderRadius: 10, padding: "2px 8px", whiteSpace: "nowrap" }}>
           {rollup.label}
         </span>
@@ -702,12 +721,12 @@ function TransferProgress({
     <div style={{ marginBottom: 16 }}>
       <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, color: "#605e5c", marginBottom: 4, gap: 12, flexWrap: "wrap" }}>
         <span>
-          <strong style={{ color: "#201f1e" }}>{completed}</strong> of {total} done
-          {failed > 0 ? ` · ${failed} failed` : ""}
-          {skipped > 0 ? ` · ${skipped} skipped` : ""}
-          {throttledCount > 0 ? ` · ${throttledCount} throttled` : ""}
+          <strong style={{ color: "#201f1e" }}>{formatNumber(completed)}</strong> of {formatNumber(total)} done
+          {failed > 0 ? ` · ${formatNumber(failed)} failed` : ""}
+          {skipped > 0 ? ` · ${formatNumber(skipped)} skipped` : ""}
+          {throttledCount > 0 ? ` · ${formatNumber(throttledCount)} throttled` : ""}
         </span>
-        <span>{inProgress ? `${inprogress} in progress · auto-refreshing…` : "Finished"}</span>
+        <span>{inProgress ? `${formatNumber(inprogress)} in progress · auto-refreshing…` : "Finished"}</span>
       </div>
       <div style={{ display: "flex", height: 10, borderRadius: 6, overflow: "hidden", background: "#edebe9" }}>
         {completed > 0 && <div style={{ width: pct(completed), background: "#107c10" }} />}
@@ -724,7 +743,7 @@ function TransferProgress({
           )}
           {throttledCount > 0 && nextRetry && (
             <span style={{ color: "#835c00" }} title={`Next automatic retry at ${formatDateTime(nextRetry)}`}>
-              ⏳ {throttledCount} throttled — next retry {formatCountdown(nextRetry)}
+              ⏳ {formatNumber(throttledCount)} throttled — next retry {formatCountdown(nextRetry)}
             </span>
           )}
         </div>
@@ -835,7 +854,7 @@ function TransferDetail({ jobId }: { jobId: string }) {
     if (!job) return;
     if (
       !window.confirm(
-        `Requeue ${failedCount} failed file(s) for re-processing? They are re-copied and re-validated from scratch; ` +
+        `Requeue ${formatNumber(failedCount)} failed file(s) for re-processing? They are re-copied and re-validated from scratch; ` +
           `a source file is never deleted without a confirmed good copy.`,
       )
     ) {
@@ -849,10 +868,10 @@ function TransferDetail({ jobId }: { jobId: string }) {
         { jobId: job.jobId },
       );
       setRequeueMsg(
-        `Requeued ${res.requeued}` +
-          (res.recovered ? `, ${res.recovered} already archived (fixed)` : "") +
-          (res.skipped ? `, skipped ${res.skipped}` : "") +
-          (res.publishFailed ? `, ${res.publishFailed} failed to publish` : "") +
+        `Requeued ${formatNumber(res.requeued)}` +
+          (res.recovered ? `, ${formatNumber(res.recovered)} already archived (fixed)` : "") +
+          (res.skipped ? `, skipped ${formatNumber(res.skipped)}` : "") +
+          (res.publishFailed ? `, ${formatNumber(res.publishFailed)} failed to publish` : "") +
           ".",
       );
       await refresh();
@@ -886,7 +905,7 @@ function TransferDetail({ jobId }: { jobId: string }) {
             disabled={requeueing}
             onClick={() => void requeue()}
           >
-            {requeueing ? "Requeuing…" : `Requeue ${failedCount} failed`}
+            {requeueing ? "Requeuing…" : `Requeue ${formatNumber(failedCount)} failed`}
           </Button>
         )}
         {requeueMsg && <span style={{ fontSize: 13, color: "#605e5c" }}>{requeueMsg}</span>}
@@ -933,7 +952,7 @@ function TransferDetail({ jobId }: { jobId: string }) {
               <button type="button" onClick={() => setWarningsOpen((v) => !v)} aria-expanded={warningsOpen} style={disclosureHeaderStyle}>
                 <span style={{ color: "#605e5c" }}>{warningsOpen ? "▾" : "▸"}</span>
                 <span style={{ fontWeight: 600, color: "#835c00" }}>
-                  ⚠ {job.warnings.length} warning{job.warnings.length === 1 ? "" : "s"}
+                  ⚠ {formatNumber(job.warnings.length)} warning{job.warnings.length === 1 ? "" : "s"}
                 </span>
                 <span style={{ color: "#605e5c" }}>· grouped by folder</span>
               </button>
@@ -962,17 +981,17 @@ function TransferDetail({ jobId }: { jobId: string }) {
           )}
 
           <div style={{ display: "flex", alignItems: "center", gap: 12, margin: "4px 0 8px", flexWrap: "wrap" }}>
-            <h3 style={{ margin: 0, fontSize: 15 }}>Files ({job.items.length})</h3>
+            <h3 style={{ margin: 0, fontSize: 15 }}>Files ({formatNumber(job.items.length)})</h3>
             <Select
               value={statusFilter}
               onChange={(_, d) => setStatusFilter(d.value as "" | StatusCategory)}
               aria-label="Filter files by status"
             >
               <option value="">All statuses</option>
-              <option value="inprogress">In progress ({counts.inprogress})</option>
-              <option value="completed">Completed ({counts.completed})</option>
-              <option value="failed">Failed ({counts.failed})</option>
-              <option value="skipped">Skipped ({counts.skipped})</option>
+              <option value="inprogress">In progress ({formatNumber(counts.inprogress)})</option>
+              <option value="completed">Completed ({formatNumber(counts.completed)})</option>
+              <option value="failed">Failed ({formatNumber(counts.failed)})</option>
+              <option value="skipped">Skipped ({formatNumber(counts.skipped)})</option>
             </Select>
             <span style={{ flex: 1 }} />
             <Button size="small" appearance="subtle" onClick={() => setExpandedFolders(new Set(allFolderPaths(fileTree)))}>

@@ -44,6 +44,15 @@ public class WorkerHealthController(SPOColdStorageDbContext db) : ControllerBase
 
         var newest = beats[0];
         var secondsSince = (DateTime.UtcNow - newest.LastSeenUtc).TotalSeconds;
+
+        // "Active" = instances whose heartbeat is within the online window. On Flex
+        // Consumption the worker scales out to many short-lived instances (each with a
+        // unique machine name / row), so counting every row that ever beat would report
+        // hundreds. Count only the currently-live ones so the number means "how many
+        // worker instances are processing right now".
+        var activeCutoff = DateTime.UtcNow - WorkerHeartbeatService.OnlineWindow;
+        var activeCount = beats.Count(b => b.LastSeenUtc >= activeCutoff);
+
         return new WorkerHealthResponse
         {
             IsOnline = secondsSince <= WorkerHeartbeatService.OnlineWindow.TotalSeconds,
@@ -54,7 +63,7 @@ public class WorkerHealthController(SPOColdStorageDbContext db) : ControllerBase
             MachineName = newest.MachineName,
             WorkerVersion = newest.WorkerVersion,
             StartedAtUtc = newest.StartedAtUtc,
-            WorkerCount = beats.Count,
+            WorkerCount = activeCount,
         };
     }
 }
