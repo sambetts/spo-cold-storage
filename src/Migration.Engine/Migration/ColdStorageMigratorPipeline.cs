@@ -154,30 +154,31 @@ public sealed class ColdStorageMigratorPipeline : BaseComponent
 
             // Conflict-by-date: if this file is already in cold storage, compare the live
             // source's last-modified against the source-modified recorded on the existing
-            // archive. Older archive -> overwrite; same version -> skip the (throttle-heavy)
-            // re-copy but still place the placeholder; newer archive -> refuse (an anomaly:
-            // never overwrite a newer archive and never delete the source).
+            // archive. Absent/older archive -> (over)write with the current bytes. Same-version
+            // OR "archive appears newer" -> skip the (throttle-heavy) re-copy and keep the
+            // existing validated blob, then place the placeholder.
+            //
+            // We deliberately do NOT hard-fail on "archive newer than source": legacy blob
+            // metadata can carry a timezone-shifted source-modified time (observed exact 8h
+            // offsets) that would false-positive and block recovery of already-archived files.
+            // Skipping never overwrites the existing archive, so it's safe either way — and a
+            // genuine content difference is still caught downstream by the delete-safety length
+            // check (which refuses to delete a source whose length no longer matches the copy).
             var conflict = await ResolveBlobConflictAsync(containerClient, blobPath, file.LastModified, cancellationToken).ConfigureAwait(false);
-            if (conflict.Decision == BlobConflictDecision.DestinationNewer)
+            if (conflict.Decision == BlobConflictDecision.SkipSameVersion
+                || conflict.Decision == BlobConflictDecision.DestinationNewer)
             {
-                _logger.LogError("Refusing to migrate '{Url}': the cold-storage copy (source-modified {Archived:o}) is newer than the source ({Source:o}).",
-                    file.FullSharePointUrl, conflict.ArchivedSourceLastModified, file.LastModified);
-                await _statusWriter.TransitionAsync(envelope.ItemId, MigrationLifecycleStatus.CopyToColdStorageFailed,
-                    $"The existing cold-storage copy is newer than the source, so it was not overwritten and the source was left in place. Archived version {conflict.ArchivedSourceLastModified:u}, source {file.LastModified.ToUniversalTime():u}.",
-                    level: LogLevel.Error, cancellationToken: cancellationToken);
-                return false;
-            }
-
-            if (conflict.Decision == BlobConflictDecision.SkipSameVersion)
-            {
-                // Already archived this exact version — skip the copy but still replace the
-                // source with a placeholder, using the existing blob's size/hash for the
-                // delete-safety length check and the placeholder metadata.
+                // Already archived — skip the copy but still replace the source with a
+                // placeholder, using the existing blob's size/hash for the delete-safety length
+                // check and the placeholder metadata.
                 size = conflict.ExistingSize;
                 md5Base64 = conflict.ExistingMd5 ?? string.Empty;
                 copySkipped = true;
+                var why = conflict.Decision == BlobConflictDecision.DestinationNewer
+                    ? $"Already in cold storage (archive source-modified {conflict.ArchivedSourceLastModified:u} vs source {file.LastModified.ToUniversalTime():u}); keeping the existing archive and placing a placeholder rather than overwriting."
+                    : "Already in cold storage with the same version; skipping the copy and replacing the source with a placeholder.";
                 await _statusWriter.LogAsync(envelope.JobId, envelope.ItemId, MigrationLifecycleStatus.MigrationInProgress, LogLevel.Information,
-                    "Already in cold storage with the same version; skipping the copy and replacing the source with a placeholder.", cancellationToken: cancellationToken);
+                    why, cancellationToken: cancellationToken);
             }
             else
             {
