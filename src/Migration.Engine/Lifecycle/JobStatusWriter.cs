@@ -295,7 +295,11 @@ public sealed class JobStatusWriter(SPOColdStorageDbContext db, ILogger logger) 
         {
             item.CompletedAt = DateTime.UtcNow;
         }
-        _logger.LogDebug("Item {ItemId}: {PrevStatus} -> {NewStatus} ({Message})", item.ItemId, previous, newStatus, message);
+        // Log every lifecycle transition at Information with structured properties so an item's
+        // full journey is traceable in App Insights (the diagnosability that was missing):
+        //   traces | where message startswith "ColdStorage item" | where message has "<itemId>"
+        _logger.LogInformation("ColdStorage item {ItemId} (job {JobId}) {PrevStatus} -> {NewStatus}: {Message}",
+            item.ItemId, item.JobId, previous, newStatus, message);
     }
 
     private async Task WriteLogAsync(
