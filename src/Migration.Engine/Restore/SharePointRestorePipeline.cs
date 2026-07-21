@@ -133,6 +133,7 @@ public sealed class SharePointRestorePipeline : BaseComponent
                 spCtx.Load(folder);
                 await spCtx.ExecuteQueryAsyncWithThrottleRetries(_logger).ConfigureAwait(false);
 
+                var restoredLength = new FileInfo(tempFile).Length;
                 var addInfo = new FileCreationInformation
                 {
                     ContentStream = fs,
@@ -141,10 +142,27 @@ public sealed class SharePointRestorePipeline : BaseComponent
                     // versions onto the destination (the current content is the latest).
                     Overwrite = envelope.ConflictBehavior == ConflictBehavior.Overwrite || replayedVersions > 0,
                 };
-                var uploaded = folder.Files.Add(addInfo);
-                spCtx.Load(uploaded, f => f.ServerRelativeUrl);
-                await spCtx.ExecuteQueryAsyncWithThrottleRetries(_logger).ConfigureAwait(false);
-                destinationUrl = uploaded.ServerRelativeUrl;
+                try
+                {
+                    var uploaded = folder.Files.Add(addInfo);
+                    spCtx.Load(uploaded, f => f.ServerRelativeUrl);
+                    await spCtx.ExecuteQueryAsyncWithThrottleRetries(_logger).ConfigureAwait(false);
+                    destinationUrl = uploaded.ServerRelativeUrl;
+                }
+                catch (Exception ex) when (TransientErrorClassifier.IsTransient(ex))
+                {
+                    // The upload request may have reached SharePoint even though the RESPONSE was
+                    // lost to a transient I/O hiccup. If the file is now present at the destination
+                    // with the expected byte length, the upload actually succeeded — continue rather
+                    // than re-uploading (which would hit a conflict on the next retry). Otherwise
+                    // rethrow so the item parks for a clean full retry (the destination is still empty).
+                    var existingLength = await GetFileLengthOrNullAsync(spCtx, destinationUrl, cancellationToken).ConfigureAwait(false);
+                    if (existingLength != restoredLength)
+                    {
+                        throw;
+                    }
+                    _logger.LogWarning(ex, "Upload response for '{Url}' was lost, but the file is present with the expected size ({Len} bytes); treating as uploaded.", destinationUrl, restoredLength);
+                }
             }
 
             await _statusWriter.RecordRestoredAsync(envelope.ItemId, destinationUrl, cancellationToken);
@@ -526,6 +544,27 @@ public sealed class SharePointRestorePipeline : BaseComponent
         if (!file.Exists)
         {
             throw new InvalidOperationException("Restored file not found after upload: " + serverRelativeUrl);
+        }
+    }
+
+    /// <summary>
+    /// Returns the byte length of a SharePoint file, or null if it doesn't exist. Used to detect
+    /// an upload whose response was lost but whose bytes actually landed (same length), so a retry
+    /// doesn't re-upload into a conflict.
+    /// </summary>
+    private async Task<long?> GetFileLengthOrNullAsync(ClientContext ctx, string serverRelativeUrl, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var file = ctx.Web.GetFileByServerRelativeUrl(serverRelativeUrl);
+            ctx.Load(file, f => f.Exists, f => f.Length);
+            await ctx.ExecuteQueryAsyncWithThrottleRetries(_logger).ConfigureAwait(false);
+            return file.Exists ? file.Length : null;
+        }
+        catch (ServerException)
+        {
+            // File-not-found surfaces as a ServerException on some tenants — treat as absent.
+            return null;
         }
     }
 

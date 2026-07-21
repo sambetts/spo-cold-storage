@@ -25,6 +25,10 @@ public class TransientErrorClassifierTests
     // its retries. Both MUST classify transient so the restore pipeline parks them for retry.
     [InlineData("The remote server returned an error: (429) .")]
     [InlineData("Got throttled by SPO executing CSOM request. Maximum retry attempts 10 has been attempted.")]
+    // "I/O error occurred" is a transient SharePoint CSOM hiccup under load (seen on the bulk
+    // restore's uploads); it must retry, not fail terminally.
+    [InlineData("Microsoft.SharePoint.Client.ServerException: I/O error occurred.")]
+    [InlineData("I/O error occurred.")]
     public void TransientMessages_AreTransient(string message)
         => Assert.True(TransientErrorClassifier.IsTransient(message));
 

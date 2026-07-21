@@ -27,6 +27,11 @@ public static class TransientErrorClassifier
         "operation was canceled", "operation was cancelled", "taskcanceled", "task was canceled",
         "service unavailable", "bad gateway", "gateway timeout",
         "temporarily unavailable", "connection reset", "an existing connection was forcibly closed",
+        // Transient SharePoint CSOM hiccup under load: an "I/O error occurred" while reading the
+        // response stream of an upload/query. The operation may even have succeeded server-side;
+        // either way it should be retried (the migrate/restore pipelines are idempotent on retry —
+        // overwriting uploads, skip-if-already-present guards) rather than failing terminally.
+        "i/o error",
     ];
 
     private static readonly HttpStatusCode[] TransientStatusCodes =
