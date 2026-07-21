@@ -35,6 +35,11 @@ public class ColdStorageQueueFunction(ColdStorageMessageProcessor processor, ILo
             message.MessageId, message.Subject, message.DeliveryCount);
 
         var outcome = await _processor.ProcessMessageAsync(body, cancellationToken).ConfigureAwait(false);
+        // Per-message outcome so throughput and throttle/dead-letter rates are queryable in AI:
+        //   traces | where message startswith "ColdStorage message" | summarize count() by outcome
+        _logger.LogInformation(
+            "ColdStorage message id={MessageId} subject={Subject} deliveryCount={DeliveryCount} outcome={Outcome}.",
+            message.MessageId, message.Subject, message.DeliveryCount, outcome);
 
         switch (outcome)
         {

@@ -57,12 +57,12 @@ public sealed class DispatchReconcilerService(Config config, ILoggerFactory logg
                 try
                 {
                     var summary = await reconciler.RunAsync(stoppingToken).ConfigureAwait(false);
-                    if (summary.HasWork)
-                    {
-                        _logger.LogInformation(
-                            "Dispatch reconciler: re-drove {ReDriven}, throttle-retried {Throttle}, failed-gave-up {GaveUp}, failed-stalled {Stalled}, closed {EmptyJobs} empty job(s), finalized {Finalized} completed job(s).",
-                            summary.ReDriven, summary.ThrottleRetried, summary.FailedGaveUp, summary.FailedStalled, summary.EmptyJobsClosed, summary.JobsFinalized);
-                    }
+                    // Log EVERY pass (even no-work) at Information so the reconciler's liveness is
+                    // visible in App Insights — its silence is exactly what hid the earlier freeze.
+                    // A pass is cheap and runs on the dispatch interval, so this is low volume.
+                    _logger.LogInformation(
+                        "ColdStorage reconciler pass: hasWork={HasWork} reDriven={ReDriven} throttleRetried={ThrottleRetried} failedGaveUp={FailedGaveUp} failedStalled={FailedStalled} emptyJobsClosed={EmptyJobsClosed} jobsFinalized={JobsFinalized}.",
+                        summary.HasWork, summary.ReDriven, summary.ThrottleRetried, summary.FailedGaveUp, summary.FailedStalled, summary.EmptyJobsClosed, summary.JobsFinalized);
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {

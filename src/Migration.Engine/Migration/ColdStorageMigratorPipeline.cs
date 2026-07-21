@@ -300,25 +300,24 @@ public sealed class ColdStorageMigratorPipeline : BaseComponent
                 }
 
                 spFile.DeleteObject();
-                try
-                {
-                    await spCtx.ExecuteQueryAsyncWithThrottleRetries(_logger).ConfigureAwait(false);
-                }
-                catch (Exception delEx) when (IsSourceAlreadyGone(delEx))
-                {
-                    // Race/duplicate: the source was already deleted (a prior or concurrent
-                    // attempt on another worker instance, or an external delete) between the
-                    // Exists check above and this delete. We only reach here after a successful
-                    // copy + post-copy validation, so we already hold a validated cold-storage
-                    // copy and the archival goal (remove the source) is met — treat this as a
-                    // successful delete and continue to the placeholder step. Failing here
-                    // instead made already-archived items bounce back to "failed" on every
-                    // "Recover failed", which is why the failed count oscillated. The
-                    // never-delete-source-without-a-confirmed-copy invariant is unaffected: we
-                    // are not deleting anything new, the file is simply already gone.
-                    _logger.LogWarning("Source '{Url}' was already gone at delete (File Not Found); treating as already deleted.", file.FullSharePointUrl);
-                }
+                await spCtx.ExecuteQueryAsyncWithThrottleRetries(_logger).ConfigureAwait(false);
             }
+            await _statusWriter.RecordSourceMetadataAsync(envelope.ItemId, originalCreatedBy, originalModifiedBy, originalCreated, originalModified, cancellationToken);
+            await _statusWriter.RecordSourceDeletedAsync(envelope.ItemId, cancellationToken);
+        }
+        catch (Exception ex) when (IsSourceAlreadyGone(ex))
+        {
+            // The source is already gone — a prior/concurrent attempt on another worker instance
+            // (or an external delete) removed it. Note this can surface at the metadata Load above
+            // (requesting Length/ListItem of a missing file throws "File Not Found") as well as at
+            // the delete itself. We only reach the delete step after a successful copy + post-copy
+            // validation, so we already hold a validated cold-storage copy and the archival goal
+            // (remove the source) is met. Treat this as a successful delete and continue to the
+            // placeholder step rather than failing — failing here is what made already-archived
+            // items bounce back to "failed" on every "Recover failed" (the oscillating count). The
+            // never-delete-without-a-confirmed-copy invariant is unaffected: nothing new is
+            // deleted; the file is simply already gone.
+            _logger.LogWarning("Source '{Url}' already gone (File Not Found) at the delete step; treating as already deleted.", file.FullSharePointUrl);
             await _statusWriter.RecordSourceMetadataAsync(envelope.ItemId, originalCreatedBy, originalModifiedBy, originalCreated, originalModified, cancellationToken);
             await _statusWriter.RecordSourceDeletedAsync(envelope.ItemId, cancellationToken);
         }
