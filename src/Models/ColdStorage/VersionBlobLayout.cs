@@ -32,6 +32,17 @@ public static class VersionBlobLayout
         return $"{baseKey}.versions.json";
     }
 
+    /// <summary>
+    /// True when a blob key is a version-history sidecar — a prior-version content blob under the
+    /// <c>.versions/</c> virtual folder, or the <c>.versions.json</c> manifest — rather than a
+    /// current-version file blob. Blob-driven restore skips these so version sidecars are never
+    /// pushed back into SharePoint as junk files.
+    /// </summary>
+    public static bool IsVersionArtifact(string blobKey)
+        => !string.IsNullOrEmpty(blobKey)
+           && (blobKey.EndsWith(".versions.json", StringComparison.Ordinal)
+               || blobKey.Contains(".versions/", StringComparison.Ordinal));
+
     private static string Sanitize(string versionId)
         => versionId.Replace('\\', '_').Replace('/', '_').Trim();
 }

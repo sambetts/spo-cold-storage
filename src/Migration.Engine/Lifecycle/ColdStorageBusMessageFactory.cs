@@ -124,6 +124,10 @@ public static class ColdStorageBusMessageFactory
                 WebUrl = webUrl,
                 PlaceholderServerRelativeUrl = item.PlaceholderServerRelativeUrl ?? string.Empty,
                 OriginalServerRelativeUrl = item.SpServerRelativeUrl,
+                // Preserve the blob key so a reconciler re-drive stays blob-driven; without this an
+                // orphaned archive (no surviving placeholder) would fall back to the placeholder path
+                // and terminally fail as ValidationFailed on any redelivery.
+                BlobPath = item.BlobPath,
             };
         }
 
