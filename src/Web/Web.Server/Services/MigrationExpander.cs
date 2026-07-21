@@ -30,6 +30,23 @@ public sealed class MigrationSubmissionItem
     public DateTime? LastModified { get; set; }
 }
 
+/// <summary>
+/// Persisted submission payload for an async bulk <b>restore</b> (issue #9 + the submit-timeout
+/// fix). Serialized onto <see cref="MigrationJob.SubmissionRequestJson"/> by
+/// <c>RestoresController.StartBatchAsync</c> and read back by <see cref="MigrationExpander"/> so the
+/// folder→placeholder resolution + per-item creation + enqueue happen off the HTTP request thread
+/// (a large-folder restore previously blocked the request until it timed out with "Failed to fetch").
+/// The container ACL is evaluated on the request thread and captured as
+/// <see cref="AllowedContainerIds"/>, so the background expansion needs no <c>ClaimsPrincipal</c>.
+/// </summary>
+public sealed class RestoreSubmission
+{
+    public List<string> Placeholders { get; set; } = [];
+    public List<string> FolderServerRelativeUrls { get; set; } = [];
+    /// <summary>Container IDs the caller was authorised to restore from, evaluated at submit time.</summary>
+    public List<int> AllowedContainerIds { get; set; } = [];
+}
+
 public interface IMigrationExpander
 {
     /// <summary>
@@ -67,6 +84,12 @@ public sealed class MigrationExpander(
         if (job is null || job.ExpansionCompletedAt is not null || string.IsNullOrEmpty(job.SubmissionRequestJson))
         {
             return; // nothing to do / already expanded
+        }
+
+        if (job.Operation == MigrationOperationKind.Restore)
+        {
+            await ExpandRestoreAsync(job, cancellationToken).ConfigureAwait(false);
+            return;
         }
 
         MigrationSubmission? submission = null;
@@ -302,6 +325,217 @@ public sealed class MigrationExpander(
         }
 
         _logger.LogInformation("Job {JobId} expanded and enqueued {Count} item(s).", job.JobId, queueWork.Count);
+    }
+
+    /// <summary>
+    /// Restore counterpart of the migrate expansion: resolves the selected folders into their
+    /// archived placeholders, creates a restore item + bus envelope for each (honouring the
+    /// container ACL captured at submit time and an in-flight guard), and batch-publishes them —
+    /// all off the HTTP request thread so a large-folder restore returns immediately instead of
+    /// timing out. Idempotent + re-drivable like the migrate path.
+    /// </summary>
+    private async Task ExpandRestoreAsync(MigrationJob job, CancellationToken cancellationToken)
+    {
+        RestoreSubmission? submission = null;
+        try
+        {
+            submission = JsonSerializer.Deserialize<RestoreSubmission>(job.SubmissionRequestJson!);
+        }
+        catch (JsonException ex)
+        {
+            _logger.LogError(ex, "Restore job {JobId}: submission request could not be parsed.", job.JobId);
+        }
+        if (submission is null)
+        {
+            await FinishEmptyAsync(job, "The restore submission request could not be read; nothing was queued.", cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        var upn = job.RequestedByUpn;
+        var siteUrl = job.SiteUrl;
+        var webUrl = job.WebUrl;
+        var allowedContainers = submission.AllowedContainerIds.ToHashSet();
+
+        // Resolve target placeholders: explicit ones + everything archived under each folder.
+        var placeholders = new HashSet<string>(
+            submission.Placeholders.Where(p => !string.IsNullOrWhiteSpace(p)), StringComparer.OrdinalIgnoreCase);
+        foreach (var folder in submission.FolderServerRelativeUrls.Where(f => !string.IsNullOrWhiteSpace(f)))
+        {
+            var prefix = folder.TrimEnd('/') + "/";
+            var found = await _db.MigrationJobItems
+                .Where(i => i.Status == MigrationLifecycleStatus.ColdStorageMigrationCompleted
+                            && i.PlaceholderServerRelativeUrl != null
+                            && i.PlaceholderServerRelativeUrl.StartsWith(prefix))
+                .Select(i => i.PlaceholderServerRelativeUrl!)
+                .Distinct()
+                .ToListAsync(cancellationToken)
+                .ConfigureAwait(false);
+            foreach (var p in found)
+            {
+                placeholders.Add(p);
+            }
+        }
+
+        var cap = _config.ColdStorageMaxFilesPerRequest > 0 ? _config.ColdStorageMaxFilesPerRequest : 5000;
+        var warnings = new List<string>();
+        var queueWork = new List<ColdStorageBusEnvelope>();
+        var containerCache = new Dictionary<int, ColdStorageContainer?>();
+        var skipped = 0;
+        var skipSamples = new List<string>();
+        void Skip(string reason)
+        {
+            skipped++;
+            if (skipSamples.Count < 5) { skipSamples.Add(reason); }
+        }
+
+        var processed = 0;
+        foreach (var placeholder in placeholders)
+        {
+            if (processed >= cap)
+            {
+                warnings.Add($"This restore hit the {cap:N0}-item limit; not all files were queued. Restore the remaining subfolders separately, or raise ColdStorageMaxFilesPerRequest.");
+                break;
+            }
+            processed++;
+
+            var migrateItem = await _db.MigrationJobItems
+                .Where(i => i.PlaceholderServerRelativeUrl == placeholder)
+                .OrderByDescending(i => i.CreatedAt)
+                .FirstOrDefaultAsync(cancellationToken)
+                .ConfigureAwait(false);
+            if (migrateItem is null || string.IsNullOrEmpty(migrateItem.BlobContainerName) || migrateItem.ContainerId is null)
+            {
+                Skip($"'{placeholder}': no restorable migration record found.");
+                continue;
+            }
+
+            // In-flight guard: don't re-queue a placeholder already being restored.
+            var inFlight = await _db.MigrationJobItems
+                .Where(i => i.PlaceholderServerRelativeUrl == placeholder && i.Job.Operation == MigrationOperationKind.Restore)
+                .OrderByDescending(i => i.CreatedAt)
+                .FirstOrDefaultAsync(cancellationToken)
+                .ConfigureAwait(false);
+            if (inFlight is not null && !inFlight.Status.IsTerminal())
+            {
+                Skip($"'{placeholder}': restore already in progress (status {inFlight.Status}).");
+                continue;
+            }
+
+            // Container ACL was evaluated on the request thread; enforce it here without a principal.
+            if (!allowedContainers.Contains(migrateItem.ContainerId.Value))
+            {
+                Skip($"'{placeholder}': no restore permission on its container.");
+                continue;
+            }
+            if (!containerCache.TryGetValue(migrateItem.ContainerId.Value, out var container))
+            {
+                container = await _db.ColdStorageContainers
+                    .FirstOrDefaultAsync(c => c.ID == migrateItem.ContainerId, cancellationToken)
+                    .ConfigureAwait(false);
+                containerCache[migrateItem.ContainerId.Value] = container;
+            }
+            if (container is null)
+            {
+                Skip($"'{placeholder}': cold-storage container no longer configured.");
+                continue;
+            }
+
+            var item = new MigrationJobItem
+            {
+                ItemId = Guid.NewGuid(),
+                JobId = job.JobId,
+                SpSiteUrl = siteUrl,
+                SpWebUrl = webUrl,
+                SpServerRelativeUrl = migrateItem.SpServerRelativeUrl,
+                PlaceholderServerRelativeUrl = placeholder,
+                ContainerId = container.ID,
+                BlobContainerName = migrateItem.BlobContainerName,
+                BlobPath = migrateItem.BlobPath,
+                BlobUrl = migrateItem.BlobUrl,
+                Status = MigrationLifecycleStatus.Queued,
+                CreatedAt = DateTime.UtcNow,
+                UpdatedAt = DateTime.UtcNow,
+            };
+            await _db.MigrationJobItems.AddAsync(item, cancellationToken).ConfigureAwait(false);
+            await _db.MigrationJobLogs.AddAsync(new MigrationJobLog
+            {
+                JobId = job.JobId,
+                ItemId = item.ItemId,
+                Status = MigrationLifecycleStatus.Queued,
+                Level = (int)LogLevel.Information,
+                Message = $"Queued for bulk restore from '{container.Name}'.",
+                ActorUpn = upn,
+                Action = "Restore",
+            }, cancellationToken).ConfigureAwait(false);
+
+            queueWork.Add(new ColdStorageBusEnvelope
+            {
+                JobId = job.JobId,
+                ItemId = item.ItemId,
+                Operation = MigrationOperationKind.Restore,
+                ContainerName = migrateItem.BlobContainerName!,
+                RequestedByUpn = upn,
+                ConflictBehavior = job.ConflictBehavior,
+                RestoreTarget = new PlaceholderRestoreTarget
+                {
+                    SiteUrl = siteUrl,
+                    WebUrl = string.IsNullOrEmpty(webUrl) ? siteUrl : webUrl,
+                    PlaceholderServerRelativeUrl = placeholder,
+                    OriginalServerRelativeUrl = migrateItem.SpServerRelativeUrl,
+                },
+            });
+        }
+
+        if (skipped > 0)
+        {
+            warnings.Add($"{skipped} item(s) skipped.");
+            warnings.AddRange(skipSamples.Select(s => "  • " + s));
+        }
+        foreach (var w in warnings)
+        {
+            _db.MigrationJobLogs.Add(new MigrationJobLog
+            {
+                JobId = job.JobId,
+                Status = MigrationLifecycleStatus.Queued,
+                Level = (int)LogLevel.Warning,
+                Message = w,
+            });
+        }
+
+        if (queueWork.Count == 0)
+        {
+            job.Status = MigrationLifecycleStatus.CompletedWithWarning;
+            var summary = warnings.Count > 0 ? string.Join(" | ", warnings) : "No restorable items.";
+            job.Summary = summary.Length > 1000 ? summary[..1000] : summary;
+            job.CompletedAt = DateTime.UtcNow;
+        }
+
+        job.ExpansionCompletedAt = DateTime.UtcNow;
+        job.SubmissionRequestJson = null;
+        job.UpdatedAt = DateTime.UtcNow;
+        await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+
+        if (queueWork.Count == 0)
+        {
+            _logger.LogInformation("Restore job {JobId} expanded to no queueable items.", job.JobId);
+            return;
+        }
+
+        DateTime? enqueuedAt = DateTime.UtcNow;
+        try
+        {
+            await _publisher.PublishManyAsync(queueWork, CancellationToken.None).ConfigureAwait(false);
+            await _db.MigrationJobItems
+                .Where(i => i.JobId == job.JobId && i.Status == MigrationLifecycleStatus.Queued)
+                .ExecuteUpdateAsync(s => s.SetProperty(i => i.LastEnqueuedAt, enqueuedAt), CancellationToken.None)
+                .ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Batch publish for restore job {JobId} failed; {Count} item(s) will be re-driven by the dispatch reconciler.", job.JobId, queueWork.Count);
+        }
+
+        _logger.LogInformation("Restore job {JobId} expanded and enqueued {Count} item(s).", job.JobId, queueWork.Count);
     }
 
     private async Task FinishEmptyAsync(MigrationJob job, string message, CancellationToken cancellationToken)
