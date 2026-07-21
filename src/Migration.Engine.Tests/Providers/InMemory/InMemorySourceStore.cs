@@ -49,6 +49,9 @@ public sealed class InMemorySourceStore : ISourceStore
         return item;
     }
 
+    /// <summary>Test helper: seed a placeholder pointer (as archival would have left behind).</summary>
+    public void SeedPointer(string path, PlaceholderFileMetadata metadata) => _pointers[path] = metadata;
+
     /// <summary>Test helper: does a live item exist at <paramref name="path"/>?</summary>
     public bool Exists(string path) => _items.ContainsKey(path);
 

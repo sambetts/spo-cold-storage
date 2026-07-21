@@ -1,4 +1,3 @@
-using Entities.Configuration;
 using Microsoft.Extensions.Logging;
 using Migration.Engine.Lifecycle;
 using Migration.Engine.Migration;
@@ -20,7 +19,7 @@ namespace Migration.Engine.Providers;
 /// </summary>
 public sealed class MigratePipeline
 {
-    private readonly Config _config;
+    private readonly TransferPipelineOptions _options;
     private readonly ILogger _logger;
     private readonly IJobStatusWriter _statusWriter;
     private readonly ISourceStore _source;
@@ -29,20 +28,20 @@ public sealed class MigratePipeline
     private readonly StepFailureHandler _failures;
 
     public MigratePipeline(
-        Config config,
+        TransferPipelineOptions options,
         ILogger logger,
         IJobStatusWriter statusWriter,
         ISourceStore source,
         IColdStore cold,
         IArchiveEligibilityEvaluator eligibility)
     {
-        _config = config ?? throw new ArgumentNullException(nameof(config));
+        _options = options ?? throw new ArgumentNullException(nameof(options));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
         _statusWriter = statusWriter ?? throw new ArgumentNullException(nameof(statusWriter));
         _source = source ?? throw new ArgumentNullException(nameof(source));
         _cold = cold ?? throw new ArgumentNullException(nameof(cold));
         _eligibility = eligibility ?? throw new ArgumentNullException(nameof(eligibility));
-        _failures = new StepFailureHandler(config, logger, statusWriter);
+        _failures = new StepFailureHandler(options, logger, statusWriter);
     }
 
     /// <summary>
@@ -343,7 +342,7 @@ public sealed class MigratePipeline
         };
 
     private string? BuildUserFacingUrl(Guid itemId)
-        => string.IsNullOrWhiteSpace(_config.AppBaseUrl)
+        => string.IsNullOrWhiteSpace(_options.AppBaseUrl)
             ? null
-            : $"{_config.AppBaseUrl.TrimEnd('/')}/cold-storage/download/{itemId}";
+            : $"{_options.AppBaseUrl.TrimEnd('/')}/cold-storage/download/{itemId}";
 }

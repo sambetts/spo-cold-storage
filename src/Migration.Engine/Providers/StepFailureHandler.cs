@@ -1,4 +1,3 @@
-using Entities.Configuration;
 using Microsoft.Extensions.Logging;
 using Migration.Engine.Lifecycle;
 using Models.ColdStorage;
@@ -18,9 +17,9 @@ namespace Migration.Engine.Providers;
 /// schedules an automatic bus retry. A permanent failure — or a transient one that has exhausted
 /// its attempts — transitions to the caller's terminal status.
 /// </summary>
-public sealed class StepFailureHandler(Config config, ILogger logger, IJobStatusWriter statusWriter)
+public sealed class StepFailureHandler(TransferPipelineOptions options, ILogger logger, IJobStatusWriter statusWriter)
 {
-    private readonly Config _config = config ?? throw new ArgumentNullException(nameof(config));
+    private readonly TransferPipelineOptions _options = options ?? throw new ArgumentNullException(nameof(options));
     private readonly ILogger _logger = logger ?? throw new ArgumentNullException(nameof(logger));
     private readonly IJobStatusWriter _statusWriter = statusWriter ?? throw new ArgumentNullException(nameof(statusWriter));
 
@@ -34,10 +33,10 @@ public sealed class StepFailureHandler(Config config, ILogger logger, IJobStatus
         if (TransientErrorClassifier.IsTransient(ex))
         {
             var attempts = await _statusWriter.IncrementAttemptsAsync(itemId, cancellationToken).ConfigureAwait(false);
-            var maxAttempts = _config.ColdStorageMaxProcessAttempts > 0 ? _config.ColdStorageMaxProcessAttempts : 5;
+            var maxAttempts = _options.MaxProcessAttempts;
             if (attempts < maxAttempts)
             {
-                var backoffSeconds = ThrottleBackoff.SecondsFor(attempts, _config);
+                var backoffSeconds = ThrottleBackoff.SecondsFor(attempts, _options.ThrottleBackoffBaseSeconds, _options.ThrottleBackoffMaxSeconds);
                 var retryAfterSeconds = ThrottleInfo.TryGetRetryAfterSeconds(ex);
                 var waitSeconds = Math.Clamp(Math.Max(backoffSeconds, retryAfterSeconds ?? 0), 1, 3600);
                 var nextRetryUtc = DateTime.UtcNow.AddSeconds(waitSeconds);
