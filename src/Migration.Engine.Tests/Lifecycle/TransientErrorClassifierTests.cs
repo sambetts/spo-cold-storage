@@ -20,6 +20,11 @@ public class TransientErrorClassifierTests
     [InlineData("503 Service Unavailable")]
     [InlineData("504 Gateway Timeout")]
     [InlineData("An existing connection was forcibly closed by the remote host")]
+    // Exact strings from the bulk-restore throttle incident (job 8d0a36dc): the raw CSOM 429
+    // WebException, and the exception thrown once ExecuteQueryAsyncWithThrottleRetries exhausts
+    // its retries. Both MUST classify transient so the restore pipeline parks them for retry.
+    [InlineData("The remote server returned an error: (429) .")]
+    [InlineData("Got throttled by SPO executing CSOM request. Maximum retry attempts 10 has been attempted.")]
     public void TransientMessages_AreTransient(string message)
         => Assert.True(TransientErrorClassifier.IsTransient(message));
 
