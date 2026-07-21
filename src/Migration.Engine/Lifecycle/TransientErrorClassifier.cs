@@ -48,6 +48,12 @@ public static class TransientErrorClassifier
     {
         for (var ex = exception; ex is not null; ex = ex.InnerException)
         {
+            // A storage adaptor that has already classified its own failure wins outright — it
+            // knows its provider's semantics better than any text heuristic below.
+            if (ex is Providers.TransferProviderException typed)
+            {
+                return typed.IsTransient;
+            }
             if (ex is TimeoutException or SocketException)
             {
                 return true;
