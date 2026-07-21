@@ -186,12 +186,14 @@ export default class ColdStorageCommandSet extends BaseListViewCommandSet<IColdS
           folderServerRelativeUrls: folders,
           conflictBehavior: 'Fail',
         });
-        dialog.addAcceptedJob(response.jobId, response, `Restore (${formatNumber(response.accepted)} item${response.accepted === 1 ? '' : 's'})`);
-        if (response.warnings && response.warnings.length > 0) {
-          dialog.setStatusMessage(`Queued ${formatNumber(response.accepted)}; skipped ${formatNumber(response.warnings.length)}: ${response.warnings.join('; ')}`);
-        } else if (response.accepted === 0) {
-          dialog.showError('No restorable items were found in the selection.');
-        }
+        // Submit is async: the server returns immediately and resolves the folder(s) + queues the
+        // per-file items in the background (a large folder previously blocked the request until it
+        // timed out with "Failed to fetch"). Track the job by id — its progress column fills in as
+        // expansion completes — and don't treat the (not-yet-known) count of 0 as "no items".
+        const restoreLabel = folders.length > 0
+          ? `Bulk restore (${formatNumber(folders.length)} folder${folders.length === 1 ? '' : 's'}${placeholders.length > 0 ? ` + ${formatNumber(placeholders.length)} file${placeholders.length === 1 ? '' : 's'}` : ''})`
+          : `Restore (${formatNumber(placeholders.length)} item${placeholders.length === 1 ? '' : 's'})`;
+        dialog.addAcceptedJob(response.jobId, response, restoreLabel);
       } catch (err) {
         dialog.showError(this.describeError(err, 'Failed to submit bulk restore'), () => { void submit(); });
       }
