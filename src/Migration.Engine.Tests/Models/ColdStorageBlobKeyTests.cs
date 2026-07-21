@@ -42,4 +42,17 @@ public class ColdStorageBlobKeyTests
     {
         Assert.Equal(string.Empty, ColdStorageBlobKey.ReverseServerRelativeUrl(blobKey));
     }
+
+    [Theory]
+    [InlineData("host/sites/x/Shared Documents/a.docx.versions.json", true)]   // manifest sidecar
+    [InlineData("host/sites/x/Shared Documents/a.docx.versions/1.0", true)]    // prior-version content
+    [InlineData("host/sites/x/Shared Documents/a.docx.versions/2.0", true)]
+    [InlineData("host/sites/x/Shared Documents/a.docx", false)]                // real current-version file
+    [InlineData("host/sites/x/Shared Documents/notes.json", false)]           // a real .json file
+    [InlineData("host/sites/x/Shared Documents/report.versionsly.txt", false)] // false-friend name
+    [InlineData("", false)]
+    public void IsVersionArtifact_FlagsOnlyVersionSidecars(string blobKey, bool expected)
+    {
+        Assert.Equal(expected, VersionBlobLayout.IsVersionArtifact(blobKey));
+    }
 }

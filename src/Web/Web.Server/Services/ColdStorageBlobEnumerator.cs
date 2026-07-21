@@ -56,6 +56,13 @@ public sealed class ColdStorageBlobEnumerator(Config config) : IColdStorageBlobE
         var client = ContainerClient(container);
         await foreach (var blob in client.GetBlobsAsync(BlobTraits.Metadata, BlobStates.None, prefix, cancellationToken).ConfigureAwait(false))
         {
+            // Skip archived version-history sidecars (".versions/<id>" content + ".versions.json"
+            // manifest): they live under the same prefix as real files but are not restorable files
+            // — restoring them would create junk (a ".versions.json") or target a non-existent folder.
+            if (VersionBlobLayout.IsVersionArtifact(blob.Name))
+            {
+                continue;
+            }
             var archived = ToArchivedBlob(blob.Name, blob.Metadata, blob.Properties?.ContentLength ?? 0);
             if (archived is not null)
             {
