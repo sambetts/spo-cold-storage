@@ -200,7 +200,7 @@ public class QueueController(
         // gate below allows Queued (not just *Failed) in this mode only.
         var staleQueuedMode = false;
 
-        IQueryable<MigrationJobItem> query = _db.MigrationJobItems.Include(i => i.Job);
+        IQueryable<MigrationJobItem> query = _db.MigrationJobItems.Include(i => i.Job).ThenInclude(j => j.Container);
         if (request?.ItemIds is { Count: > 0 } itemIds)
         {
             var ids = itemIds.ToHashSet();
@@ -376,7 +376,14 @@ public class QueueController(
     {
         if (item.Job.Operation == MigrationOperationKind.Migrate)
         {
-            if (string.IsNullOrEmpty(item.BlobContainerName))
+            // Fall back to the job's target container when the item never recorded one — an item
+            // that failed BEFORE a successful copy (validation, or copy before the container was
+            // stamped) has no BlobContainerName, and without this fallback it could never be
+            // recovered by "Recover failed" (BuildEnvelope returned null → skipped → stuck failed).
+            var containerName = !string.IsNullOrEmpty(item.BlobContainerName)
+                ? item.BlobContainerName
+                : item.Job.Container?.Name;
+            if (string.IsNullOrEmpty(containerName))
             {
                 return null;
             }
@@ -385,7 +392,7 @@ public class QueueController(
                 JobId = item.JobId,
                 ItemId = item.ItemId,
                 Operation = MigrationOperationKind.Migrate,
-                ContainerName = item.BlobContainerName,
+                ContainerName = containerName,
                 RequestedByUpn = upn ?? item.Job.RequestedByUpn,
                 Recursive = item.Recursive,
                 File = new BaseSharePointFileInfo
