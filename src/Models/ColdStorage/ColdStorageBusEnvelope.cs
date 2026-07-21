@@ -75,6 +75,12 @@ public class PlaceholderRestoreTarget
 {
     public string SiteUrl { get; set; } = string.Empty;
     public string WebUrl { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Server-relative URL of the <c>.url</c> placeholder. For a blob-driven restore this is the
+    /// placeholder to remove AFTER a verified restore, and may be empty when the archive has no
+    /// surviving placeholder — an orphaned archive is still restorable directly from its blob.
+    /// </summary>
     public string PlaceholderServerRelativeUrl { get; set; } = string.Empty;
 
     /// <summary>
@@ -84,9 +90,23 @@ public class PlaceholderRestoreTarget
     /// </summary>
     public string? OriginalServerRelativeUrl { get; set; }
 
+    /// <summary>
+    /// Cold-storage blob key for the archived file. When set, the restore is BLOB-DRIVEN: the
+    /// blob is the source of truth, so the worker restores straight from it (its metadata carries
+    /// the authoritative original location) and only uses the placeholder — if one still exists —
+    /// as post-restore cleanup. This is what lets an archive be restored even when its SharePoint
+    /// placeholder and/or database record are missing. Empty for legacy placeholder-driven messages.
+    /// </summary>
+    public string? BlobPath { get; set; }
+
+    /// <summary>True when this target carries a blob key + destination, so it can be restored
+    /// straight from cold storage without reading a placeholder.</summary>
+    [JsonIgnore]
+    public bool IsBlobDriven =>
+        !string.IsNullOrEmpty(BlobPath) && !string.IsNullOrEmpty(OriginalServerRelativeUrl);
+
     [JsonIgnore]
     public bool IsValid =>
         !string.IsNullOrEmpty(SiteUrl) &&
-        !string.IsNullOrEmpty(WebUrl) &&
-        !string.IsNullOrEmpty(PlaceholderServerRelativeUrl);
+        (IsBlobDriven || !string.IsNullOrEmpty(PlaceholderServerRelativeUrl));
 }

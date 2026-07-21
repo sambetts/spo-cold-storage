@@ -69,7 +69,8 @@ public sealed class MigrationExpander(
     ILogger<MigrationExpander> logger,
     IArchiveEligibilityEvaluator eligibility,
     ISharePointFolderExpansionService folderExpansion,
-    IColdStorageBusPublisher publisher) : IMigrationExpander
+    IColdStorageBusPublisher publisher,
+    IColdStorageBlobEnumerator blobEnumerator) : IMigrationExpander
 {
     private readonly SPOColdStorageDbContext _db = db ?? throw new ArgumentNullException(nameof(db));
     private readonly Config _config = config ?? throw new ArgumentNullException(nameof(config));
@@ -77,6 +78,7 @@ public sealed class MigrationExpander(
     private readonly IArchiveEligibilityEvaluator _eligibility = eligibility ?? throw new ArgumentNullException(nameof(eligibility));
     private readonly ISharePointFolderExpansionService _folderExpansion = folderExpansion ?? throw new ArgumentNullException(nameof(folderExpansion));
     private readonly IColdStorageBusPublisher _publisher = publisher ?? throw new ArgumentNullException(nameof(publisher));
+    private readonly IColdStorageBlobEnumerator _blobEnumerator = blobEnumerator ?? throw new ArgumentNullException(nameof(blobEnumerator));
 
     public async Task ExpandAsync(Guid jobId, CancellationToken cancellationToken = default)
     {
@@ -354,104 +356,80 @@ public sealed class MigrationExpander(
         var upn = job.RequestedByUpn;
         var siteUrl = job.SiteUrl;
         var webUrl = job.WebUrl;
-        var allowedContainers = submission.AllowedContainerIds.ToHashSet();
+        var allowedContainerIds = submission.AllowedContainerIds.ToHashSet();
 
-        // Resolve target placeholders: explicit ones + everything archived under each folder.
-        var placeholders = new HashSet<string>(
-            submission.Placeholders.Where(p => !string.IsNullOrWhiteSpace(p)), StringComparer.OrdinalIgnoreCase);
-        foreach (var folder in submission.FolderServerRelativeUrls.Where(f => !string.IsNullOrWhiteSpace(f)))
+        // Blob-driven restore: cold storage is the source of truth. We enumerate the archived blobs
+        // under the selected scope (and resolve explicit placeholders to their blob) and restore each
+        // straight from its blob — so an archive is restorable even when its SharePoint placeholder or
+        // its migration_job_items row is missing. The database is treated as an audit log, not the
+        // authority for "what should be restored".
+        var containers = await _db.ColdStorageContainers
+            .Where(c => allowedContainerIds.Contains(c.ID))
+            .ToListAsync(cancellationToken)
+            .ConfigureAwait(false);
+        if (containers.Count == 0)
         {
-            var prefix = folder.TrimEnd('/') + "/";
-            var found = await _db.MigrationJobItems
-                .Where(i => i.Status == MigrationLifecycleStatus.ColdStorageMigrationCompleted
-                            && i.PlaceholderServerRelativeUrl != null
-                            && i.PlaceholderServerRelativeUrl.StartsWith(prefix))
-                .Select(i => i.PlaceholderServerRelativeUrl!)
-                .Distinct()
-                .ToListAsync(cancellationToken)
-                .ConfigureAwait(false);
-            foreach (var p in found)
-            {
-                placeholders.Add(p);
-            }
+            await FinishEmptyAsync(job, "You don't have restore permission on any cold-storage container; nothing was queued.", cancellationToken).ConfigureAwait(false);
+            return;
         }
 
         var cap = _config.ColdStorageMaxFilesPerRequest > 0 ? _config.ColdStorageMaxFilesPerRequest : 5000;
         var warnings = new List<string>();
         var queueWork = new List<ColdStorageBusEnvelope>();
-        var containerCache = new Dictionary<int, ColdStorageContainer?>();
         var skipped = 0;
         var skipSamples = new List<string>();
+        var seenBlobs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var hitCap = false;
         void Skip(string reason)
         {
             skipped++;
             if (skipSamples.Count < 5) { skipSamples.Add(reason); }
         }
 
-        var processed = 0;
-        foreach (var placeholder in placeholders)
+        // Creates a queued restore item + blob-driven envelope for one archived blob. Returns false
+        // when the per-request cap is reached (the caller stops enumerating).
+        async Task<bool> ConsiderBlobAsync(ColdStorageContainer container, ArchivedBlob blob)
         {
-            if (processed >= cap)
+            if (queueWork.Count >= cap)
             {
-                warnings.Add($"This restore hit the {cap:N0}-item limit; not all files were queued. Restore the remaining subfolders separately, or raise ColdStorageMaxFilesPerRequest.");
-                break;
+                return false;
             }
-            processed++;
-
-            var migrateItem = await _db.MigrationJobItems
-                .Where(i => i.PlaceholderServerRelativeUrl == placeholder)
-                .OrderByDescending(i => i.CreatedAt)
-                .FirstOrDefaultAsync(cancellationToken)
-                .ConfigureAwait(false);
-            if (migrateItem is null || string.IsNullOrEmpty(migrateItem.BlobContainerName) || migrateItem.ContainerId is null)
+            if (!seenBlobs.Add(container.BlobContainerName + "|" + blob.BlobPath))
             {
-                Skip($"'{placeholder}': no restorable migration record found.");
-                continue;
+                return true; // already queued in this pass
             }
 
-            // In-flight guard: don't re-queue a placeholder already being restored.
+            var destination = blob.OriginalServerRelativeUrl;
+            var site = string.IsNullOrEmpty(blob.OriginalSiteUrl) ? siteUrl : blob.OriginalSiteUrl;
+            var web = string.IsNullOrEmpty(blob.OriginalWebUrl)
+                ? (string.IsNullOrEmpty(webUrl) ? site : webUrl)
+                : blob.OriginalWebUrl;
+            var placeholder = destination + ".url";
+
+            // Idempotency: skip if a restore for this destination is already in flight (non-terminal).
             var inFlight = await _db.MigrationJobItems
-                .Where(i => i.PlaceholderServerRelativeUrl == placeholder && i.Job.Operation == MigrationOperationKind.Restore)
+                .Where(i => i.SpServerRelativeUrl == destination && i.Job.Operation == MigrationOperationKind.Restore)
                 .OrderByDescending(i => i.CreatedAt)
                 .FirstOrDefaultAsync(cancellationToken)
                 .ConfigureAwait(false);
             if (inFlight is not null && !inFlight.Status.IsTerminal())
             {
-                Skip($"'{placeholder}': restore already in progress (status {inFlight.Status}).");
-                continue;
-            }
-
-            // Container ACL was evaluated on the request thread; enforce it here without a principal.
-            if (!allowedContainers.Contains(migrateItem.ContainerId.Value))
-            {
-                Skip($"'{placeholder}': no restore permission on its container.");
-                continue;
-            }
-            if (!containerCache.TryGetValue(migrateItem.ContainerId.Value, out var container))
-            {
-                container = await _db.ColdStorageContainers
-                    .FirstOrDefaultAsync(c => c.ID == migrateItem.ContainerId, cancellationToken)
-                    .ConfigureAwait(false);
-                containerCache[migrateItem.ContainerId.Value] = container;
-            }
-            if (container is null)
-            {
-                Skip($"'{placeholder}': cold-storage container no longer configured.");
-                continue;
+                Skip($"'{destination}': restore already in progress (status {inFlight.Status}).");
+                return true;
             }
 
             var item = new MigrationJobItem
             {
                 ItemId = Guid.NewGuid(),
                 JobId = job.JobId,
-                SpSiteUrl = siteUrl,
-                SpWebUrl = webUrl,
-                SpServerRelativeUrl = migrateItem.SpServerRelativeUrl,
+                SpSiteUrl = site,
+                SpWebUrl = web,
+                SpServerRelativeUrl = destination,
                 PlaceholderServerRelativeUrl = placeholder,
                 ContainerId = container.ID,
-                BlobContainerName = migrateItem.BlobContainerName,
-                BlobPath = migrateItem.BlobPath,
-                BlobUrl = migrateItem.BlobUrl,
+                BlobContainerName = container.BlobContainerName,
+                BlobPath = blob.BlobPath,
+                FileSize = blob.Length,
                 Status = MigrationLifecycleStatus.Queued,
                 CreatedAt = DateTime.UtcNow,
                 UpdatedAt = DateTime.UtcNow,
@@ -463,7 +441,7 @@ public sealed class MigrationExpander(
                 ItemId = item.ItemId,
                 Status = MigrationLifecycleStatus.Queued,
                 Level = (int)LogLevel.Information,
-                Message = $"Queued for bulk restore from '{container.Name}'.",
+                Message = $"Queued for restore from cold storage '{container.Name}' ({container.BlobContainerName}/{blob.BlobPath}).",
                 ActorUpn = upn,
                 Action = "Restore",
             }, cancellationToken).ConfigureAwait(false);
@@ -473,17 +451,67 @@ public sealed class MigrationExpander(
                 JobId = job.JobId,
                 ItemId = item.ItemId,
                 Operation = MigrationOperationKind.Restore,
-                ContainerName = migrateItem.BlobContainerName!,
+                ContainerName = container.BlobContainerName,
                 RequestedByUpn = upn,
                 ConflictBehavior = job.ConflictBehavior,
                 RestoreTarget = new PlaceholderRestoreTarget
                 {
-                    SiteUrl = siteUrl,
-                    WebUrl = string.IsNullOrEmpty(webUrl) ? siteUrl : webUrl,
+                    SiteUrl = site,
+                    WebUrl = web,
                     PlaceholderServerRelativeUrl = placeholder,
-                    OriginalServerRelativeUrl = migrateItem.SpServerRelativeUrl,
+                    OriginalServerRelativeUrl = destination,
+                    BlobPath = blob.BlobPath,
                 },
             });
+            return queueWork.Count < cap;
+        }
+
+        // (1) Folders -> enumerate every archived blob under the folder's blob prefix in each container.
+        foreach (var folder in submission.FolderServerRelativeUrls.Where(f => !string.IsNullOrWhiteSpace(f)))
+        {
+            if (hitCap) { break; }
+            var prefix = ColdStorageBlobKey.Build(siteUrl, folder.TrimEnd('/')) + "/";
+            foreach (var container in containers)
+            {
+                if (hitCap) { break; }
+                await foreach (var blob in _blobEnumerator.EnumerateAsync(container, prefix, cancellationToken).ConfigureAwait(false))
+                {
+                    if (!await ConsiderBlobAsync(container, blob).ConfigureAwait(false))
+                    {
+                        hitCap = true;
+                        break;
+                    }
+                }
+            }
+        }
+
+        // (2) Explicit placeholders -> resolve each to its archived blob and restore it.
+        foreach (var ph in submission.Placeholders.Where(p => !string.IsNullOrWhiteSpace(p)))
+        {
+            if (hitCap) { break; }
+            var destination = ph.EndsWith(".url", StringComparison.OrdinalIgnoreCase) ? ph[..^4] : ph;
+            var blobKey = ColdStorageBlobKey.Build(siteUrl, destination);
+            ArchivedBlob? resolved = null;
+            ColdStorageContainer? resolvedContainer = null;
+            foreach (var container in containers)
+            {
+                resolved = await _blobEnumerator.GetAsync(container, blobKey, cancellationToken).ConfigureAwait(false);
+                if (resolved is not null) { resolvedContainer = container; break; }
+            }
+            if (resolved is null)
+            {
+                Skip($"'{ph}': no archived blob found in cold storage.");
+                continue;
+            }
+            if (!await ConsiderBlobAsync(resolvedContainer!, resolved).ConfigureAwait(false))
+            {
+                hitCap = true;
+            }
+        }
+
+        if (hitCap)
+        {
+            warnings.Add($"This restore hit the {cap:N0}-item limit; not all files were queued. Restore the remaining subfolders separately, or raise ColdStorageMaxFilesPerRequest.");
         }
 
         if (skipped > 0)

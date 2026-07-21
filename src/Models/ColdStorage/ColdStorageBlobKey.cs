@@ -43,6 +43,22 @@ public static class ColdStorageBlobKey
     }
 
     /// <summary>
+    /// Reverses <see cref="Build"/>: given a blob key ("{host}/{server-relative path without leading
+    /// slash}"), returns the file's SharePoint server-relative URL ("/sites/.../file"). Used by a
+    /// blob-driven restore to recover the destination path when a blob is missing its metadata.
+    /// Returns empty when the key has no path segment after the host.
+    /// </summary>
+    public static string ReverseServerRelativeUrl(string blobKey)
+    {
+        if (string.IsNullOrEmpty(blobKey))
+        {
+            return string.Empty;
+        }
+        var slash = blobKey.IndexOf('/');
+        return slash < 0 || slash == blobKey.Length - 1 ? string.Empty : "/" + blobKey[(slash + 1)..];
+    }
+
+    /// <summary>
     /// Lower-cased DNS host of the site, used as the tenant discriminator. DNS
     /// hosts are case-insensitive, so lower-casing keeps a single tenant from
     /// producing two keys for the same file. Returns empty when the URL cannot

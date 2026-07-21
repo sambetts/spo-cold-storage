@@ -112,6 +112,7 @@ public class Program
         // MigrationJob.SubmissionRequestJson (re-driven on startup).
         builder.Services.AddSingleton<IMigrationSubmissionQueue, MigrationSubmissionQueue>();
         builder.Services.AddScoped<IMigrationExpander, MigrationExpander>();
+        builder.Services.AddSingleton<IColdStorageBlobEnumerator, ColdStorageBlobEnumerator>();
         builder.Services.AddHostedService<MigrationExpansionBackgroundService>();
 
         var app = builder.Build();
