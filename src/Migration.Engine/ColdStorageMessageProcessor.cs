@@ -98,6 +98,13 @@ public sealed class ColdStorageMessageProcessor(Config config, ILogger logger, I
                 _logger.LogInformation("Item {ItemId} is already {Status} (e.g. admin-cancelled); skipping.", envelope.ItemId, current.Status);
                 success = true;
             }
+            else if (_config.ColdStorageUseProviderPipelines > 0)
+            {
+                // Provider-abstraction path (feature-flagged foundation): identical behaviour + guards
+                // via ISourceStore/IColdStore, proven by the in-memory unit tests. Legacy inline
+                // pipelines remain the default until this is validated in a non-prod environment.
+                success = await ProcessViaProviderPipelinesAsync(envelope, writer, cancellationToken).ConfigureAwait(false);
+            }
             else if (envelope.Operation == MigrationOperationKind.Migrate)
             {
                 var pipeline = new ColdStorageMigratorPipeline(_config, _logger, writer);
@@ -211,6 +218,60 @@ public sealed class ColdStorageMessageProcessor(Config config, ILogger logger, I
         catch (JsonException)
         {
             return null;
+        }
+    }
+
+    /// <summary>
+    /// Feature-flagged provider-abstraction dispatch: runs the same migrate/restore logic through the
+    /// provider-neutral pipelines over the SharePoint + Azure Blob adaptors. Maps the bus envelope to
+    /// the neutral request records; the pipelines + adaptors carry every guard the legacy path did.
+    /// </summary>
+    private async Task<bool> ProcessViaProviderPipelinesAsync(ColdStorageBusEnvelope envelope, JobStatusWriter writer, CancellationToken cancellationToken)
+    {
+        var options = Providers.TransferPipelineOptions.FromConfig(_config);
+        var source = new Providers.SharePoint.SharePointSourceStore(_config, _logger);
+        var cold = new Providers.AzureBlob.AzureBlobColdStore(_config, _logger);
+
+        if (envelope.Operation == MigrationOperationKind.Migrate)
+        {
+            var file = envelope.File!;
+            var eligibility = new ArchiveEligibilityEvaluator(
+                _config,
+                new DbArchiveExclusionSource(_config, _logger),
+                new DbFileReadActivitySource(_config, _logger),
+                new DbArchiveExtensionPolicySource(_config, _logger));
+            var pipeline = new Providers.MigratePipeline(options, _logger, writer, source, cold, eligibility);
+            var request = new Providers.MigrateRequest
+            {
+                JobId = envelope.JobId,
+                ItemId = envelope.ItemId,
+                Source = new Providers.SourceItemRef(file.SiteUrl, file.WebUrl, file.ServerRelativeFilePath),
+                Cold = new Providers.ColdStorageKey(envelope.ContainerName, ColdStorageBlobKey.Build(file.SiteUrl, file.ServerRelativeFilePath)),
+                SourceLastModifiedUtc = file.LastModified,
+                SourceCreatedUtc = file.CreatedDate,
+                SourceSizeHint = file.FileSize,
+                RequestedByUpn = envelope.RequestedByUpn,
+                DriveId = file.DriveId,
+                GraphItemId = file.GraphItemId,
+            };
+            return await pipeline.ProcessAsync(request, cancellationToken).ConfigureAwait(false);
+        }
+        else
+        {
+            var target = envelope.RestoreTarget!;
+            var pipeline = new Providers.RestorePipeline(options, _logger, writer, source, cold);
+            var request = new Providers.RestoreRequest
+            {
+                JobId = envelope.JobId,
+                ItemId = envelope.ItemId,
+                Pointer = new Providers.SourceItemRef(target.SiteUrl, target.WebUrl, target.PlaceholderServerRelativeUrl),
+                Destination = string.IsNullOrEmpty(target.OriginalServerRelativeUrl)
+                    ? null
+                    : new Providers.SourceItemRef(target.SiteUrl, target.WebUrl, target.OriginalServerRelativeUrl),
+                ConflictBehavior = envelope.ConflictBehavior,
+                DeleteColdAfterRestore = _config.ColdStorageDeleteBlobAfterRestore > 0,
+            };
+            return await pipeline.ProcessAsync(request, cancellationToken).ConfigureAwait(false);
         }
     }
 }

@@ -166,6 +166,16 @@ public class Config(Microsoft.Extensions.Configuration.IConfiguration config) : 
     public int ColdStorageMaxProcessAttempts { get; set; } = 5;
 
     /// <summary>
+    /// Feature flag (0 = off, default): when &gt; 0, the worker processes migrate/restore through
+    /// the provider-neutral <c>MigratePipeline</c>/<c>RestorePipeline</c> over the SharePoint +
+    /// Azure Blob adaptors, instead of the legacy inline pipelines. Same behaviour and guards
+    /// (proven by the in-memory unit tests); the flag lets it be validated in a non-prod
+    /// environment before it becomes the default.
+    /// </summary>
+    [ConfigValue(true)]
+    public int ColdStorageUseProviderPipelines { get; set; }
+
+    /// <summary>
     /// Base delay (seconds) for the exponential backoff applied to a transient/throttle
     /// retry. The first retry waits this long; each subsequent attempt doubles it, capped
     /// by <see cref="ColdStorageThrottleBackoffMaxSeconds"/>. While waiting, the item sits

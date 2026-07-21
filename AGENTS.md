@@ -59,6 +59,7 @@ src/
 │   ├── Lifecycle/                 ← IJobStatusWriter (single point of writes for status + audit)
 │   ├── Migration/                 ← ColdStorageMigratorPipeline + SharePointPlaceholderWriter
 │   ├── Restore/                   ← SharePointRestorePipeline
+│   ├── Providers/                 ← provider abstraction (ISourceStore/IColdStore + neutral Migrate/RestorePipeline + SharePoint/AzureBlob adaptors) — feature-flagged, see §5b
 │   └── Reconciliation/            ← orphan-blob + dispatch (re-drive/stall) reconcilers
 │
 ├── Migration.Functions/           ← queue-triggered Azure Function = the worker (hosts the processor + dispatch reconciler)
@@ -166,6 +167,18 @@ Queued
 Any failure before `DeletePending` puts the item in `CopyToColdStorageFailed` / `ValidationFailed` — both terminal, both keep the source intact. See `MigrationLifecycleStatusTests.SourceDelete_NeverAllowed_FromAnyFailureState`.
 
 **Source-delete-aware failure classification + already-archived reconcile (`ArchivedItemReconcile`):** the corollary of §1 — because the source is only ever deleted *after* a confirmed good copy, an item with `SourceDeletedAt != null` **must never** be reported as `CopyToColdStorageFailed` ("copy failed, source untouched"), which is both wrong and unsafe to act on. Two guards enforce this: (1) the `MigrationDispatchReconciler` give-up + stall sweeps route a source-deleted item to `PlaceholderFailed` (needs its placeholder recreated from the existing blob), never copy-failed; (2) a **pass-0** in every reconciler pass (`JobStatusWriter.CompleteAlreadyArchivedAsync`) *corrects* any row whose timestamps prove it is already fully archived (copied + source deleted + **placeholder created**) but which was left non-completed — flipping it to `ColdStorageMigrationCompleted` and recomputing the job rollup. The `RequeueAsync` ("Recover failed") path does the same short-circuit (`RequeueResultResponse.Recovered`), completing already-archived rows directly instead of re-driving them into the pipeline (whose source is legitimately gone). This is what killed the multi-job-same-folder incident: hundreds of fully-archived files sat in `CopyToColdStorageFailed` because their final `-> Completed` write was lost, then a requeue reset them to `Queued` while keeping the original `CreatedAt`, so the 24h give-up re-failed them instantly on every "Recover failed". **Don't** reintroduce an unconditional `CopyToColdStorageFailed` in the give-up/stall paths, and **don't** re-drive a source-deleted item through a full copy.
+
+## 5b. Provider abstraction (feature-flagged foundation)
+
+`Migration.Engine/Providers/` is a provider-neutral rewrite of the migrate + restore logic so the engine can be **unit-tested with in-memory adaptors** and so new source/cold-store backends (beyond SharePoint + Azure Blob) can be added later. It is **off by default** — the config flag `ColdStorageUseProviderPipelines` (int, `0` = legacy inline pipelines, `>0` = new path) gates it in `ColdStorageMessageProcessor`. Merging is safe; **do not flip the flag in prod until the real adaptors are integration-tested in a non-prod env** (the neutral pipelines are unit-proven, the SharePoint/Azure adaptors are not yet).
+
+Two roles, both in `Migration.Engine.Providers`:
+- **`ISourceStore`** (the live store, e.g. SharePoint): get item metadata + hold status, read/write content (restore upload is response-lost-but-landed safe), delete (idempotent — not-found = success), and the placeholder read/write/remove. Impl: `Providers/SharePoint/SharePointSourceStore.cs` (reuses the existing downloader / placeholder-writer / hold-detector).
+- **`IColdStore`** (the archive, e.g. Azure Blob): get info (length/md5/metadata incl. `OriginalLastModifiedUtc` for conflict-by-date), idempotent overwrite write (+ md5 header + metadata), verify (length + md5), open-read/download, delete-if-exists. Impl: `Providers/AzureBlob/AzureBlobColdStore.cs` (translates 429/5xx → transient `TransferProviderException`).
+- **`ITransferContent`** is the hand-off between them (Length + `ContentMd5Base64` computed once + `OpenReadAsync`); `TempFileTransferContent` (SP, streams + hashes + truncation-checks) and `InMemoryTransferContent` (tests).
+- **`TransferProviderException(bool IsTransient, int? RetryAfterSeconds)`** — adaptors translate provider throttle/transient signals (429/timeout/5xx/"I/O error") into this; `TransientErrorClassifier` + `ThrottleInfo` recognise it; the in-memory adaptor throws it to simulate throttling.
+
+The neutral `MigratePipeline` / `RestorePipeline` (over these interfaces, config via `TransferPipelineOptions.FromConfig`) preserve **every** guard the legacy pipelines have — the §1 delete-safety invariant + strict step order, verify-before-delete, idempotent retries, throttle-parking (`StepFailureHandler` → `RetryScheduled` + `Retry-After`), and the resume paths. Proven by **29 in-memory tests** in `Migration.Engine.Tests/Providers/` (fault injection covers throttling, transient vs permanent, idempotency, resume, conflict). Best-effort features **not yet** ported: version-history capture + permissions restore (follow-up).
 
 ## 6. Message format (greenfield — no legacy)
 
