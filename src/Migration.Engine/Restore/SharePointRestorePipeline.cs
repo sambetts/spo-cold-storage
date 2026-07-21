@@ -46,6 +46,15 @@ public sealed class SharePointRestorePipeline : BaseComponent
 
         var target = envelope.RestoreTarget;
 
+        // Blob-driven restore: the cold-storage blob is the source of truth, so restore straight
+        // from it — the SharePoint placeholder and the database row are both optional. This is what
+        // lets an archive be restored even when its placeholder or migration record is missing
+        // (an "orphaned" archive), and keeps the DB an audit log rather than the authority.
+        if (target.IsBlobDriven)
+        {
+            return await ProcessBlobDrivenAsync(envelope, target, cancellationToken).ConfigureAwait(false);
+        }
+
         await _statusWriter.TransitionAsync(envelope.ItemId, MigrationLifecycleStatus.Validating,
             $"Validating placeholder '{target.PlaceholderServerRelativeUrl}'.", cancellationToken: cancellationToken);
 
@@ -222,6 +231,203 @@ public sealed class SharePointRestorePipeline : BaseComponent
     }
 
     /// <summary>
+    /// Blob-driven restore: pushes a cold-storage blob back to its original SharePoint location
+    /// using the blob as the source of truth. Unlike the legacy path it does NOT read a placeholder
+    /// to discover the pointer (the envelope already carries the blob key + destination) and the
+    /// placeholder is only cleaned up afterwards <b>if it still exists</b> — so an orphaned archive
+    /// (blob present, placeholder and/or DB row missing) is fully restorable. Same download →
+    /// conflict-resolve → upload → verify → (optional blob delete) → complete steps, with the same
+    /// throttle parking + resume-tail safety as the placeholder-driven path.
+    /// </summary>
+    private async Task<bool> ProcessBlobDrivenAsync(
+        ColdStorageBusEnvelope envelope,
+        PlaceholderRestoreTarget target,
+        CancellationToken cancellationToken)
+    {
+        var destinationUrl = target.OriginalServerRelativeUrl!;
+
+        await _statusWriter.TransitionAsync(envelope.ItemId, MigrationLifecycleStatus.Validating,
+            $"Validating archive '{envelope.ContainerName}/{target.BlobPath}' for restore to '{destinationUrl}'.",
+            cancellationToken: cancellationToken);
+
+        ClientContext? spCtx = null;
+        string? tempFile = null;
+        try
+        {
+            spCtx = await AuthUtils.GetClientContext(_config, target.SiteUrl, _logger, null).ConfigureAwait(false);
+
+            // Resume tail: a prior attempt already restored + recorded the content but hit a
+            // transient error before removing the placeholder. Finish the tail only.
+            var prior = await _statusWriter.FindItemAsync(envelope.ItemId, cancellationToken).ConfigureAwait(false);
+            if (prior?.RestoredAt is not null && !prior.Status.IsTerminal())
+            {
+                return await ResumeRemovePlaceholderAsync(envelope, spCtx, target, cancellationToken).ConfigureAwait(false);
+            }
+
+            // Idempotent lift-and-shift: if the destination already holds a file of the archived size,
+            // it was already restored (the blob is retained by default), so re-restoring the same
+            // folder is a no-op rather than a conflict failure. Skip the copy, clean up any leftover
+            // placeholder, and mark the item Skipped.
+            var alreadyPresentLength = await GetFileLengthOrNullAsync(spCtx, destinationUrl, cancellationToken).ConfigureAwait(false);
+            if (alreadyPresentLength is long present
+                && present == await GetBlobLengthAsync(envelope.ContainerName, target.BlobPath!, cancellationToken).ConfigureAwait(false))
+            {
+                _logger.LogInformation("Item {ItemId}: '{Dest}' already present at the archived size ({Len} bytes); skipping the copy (already restored).", envelope.ItemId, destinationUrl, present);
+                return await SkipAlreadyRestoredAsync(envelope, spCtx, target, cancellationToken).ConfigureAwait(false);
+            }
+
+            await _statusWriter.TransitionAsync(envelope.ItemId, MigrationLifecycleStatus.RestoreInProgress,
+                $"Downloading blob '{envelope.ContainerName}/{target.BlobPath}'.", cancellationToken: cancellationToken);
+
+            tempFile = Path.Combine(Path.GetTempPath(), "SpoColdStorageRestore", Guid.NewGuid().ToString("N") + ".bin");
+            Directory.CreateDirectory(Path.GetDirectoryName(tempFile)!);
+            await DownloadBlobToTempAsync(envelope.ContainerName, target.BlobPath!, tempFile, cancellationToken).ConfigureAwait(false);
+
+            var resolvedDestination = await ResolveConflictAsync(spCtx, destinationUrl, envelope.ConflictBehavior, envelope.JobId, envelope.ItemId, cancellationToken).ConfigureAwait(false);
+            if (resolvedDestination is null)
+            {
+                return false; // conflict + Fail: ResolveConflictAsync already transitioned to RestoreFailed
+            }
+            destinationUrl = resolvedDestination;
+
+            var destinationFolder = GetParentFolder(destinationUrl);
+            var restoredLength = new FileInfo(tempFile).Length;
+            using (var fs = IOFile.OpenRead(tempFile))
+            {
+                var folder = spCtx.Web.GetFolderByServerRelativeUrl(destinationFolder);
+                spCtx.Load(folder);
+                await spCtx.ExecuteQueryAsyncWithThrottleRetries(_logger).ConfigureAwait(false);
+
+                var addInfo = new FileCreationInformation
+                {
+                    ContentStream = fs,
+                    Url = Path.GetFileName(destinationUrl),
+                    Overwrite = envelope.ConflictBehavior == ConflictBehavior.Overwrite,
+                };
+                try
+                {
+                    var uploaded = folder.Files.Add(addInfo);
+                    spCtx.Load(uploaded, f => f.ServerRelativeUrl);
+                    await spCtx.ExecuteQueryAsyncWithThrottleRetries(_logger).ConfigureAwait(false);
+                    destinationUrl = uploaded.ServerRelativeUrl;
+                }
+                catch (Exception ex) when (TransientErrorClassifier.IsTransient(ex))
+                {
+                    // Response-lost-but-landed: if the file is now present with the expected length
+                    // the upload succeeded despite the lost response — continue rather than re-uploading.
+                    var existingLength = await GetFileLengthOrNullAsync(spCtx, destinationUrl, cancellationToken).ConfigureAwait(false);
+                    if (existingLength != restoredLength)
+                    {
+                        throw;
+                    }
+                    _logger.LogWarning(ex, "Upload response for '{Url}' was lost, but the file is present with the expected size ({Len} bytes); treating as uploaded.", destinationUrl, restoredLength);
+                }
+            }
+
+            await _statusWriter.RecordRestoredAsync(envelope.ItemId, destinationUrl, cancellationToken);
+
+            await _statusWriter.TransitionAsync(envelope.ItemId, MigrationLifecycleStatus.PostRestoreValidation,
+                "Verifying restored file in SharePoint.", cancellationToken: cancellationToken);
+            await VerifyRestoredAsync(spCtx, destinationUrl, cancellationToken).ConfigureAwait(false);
+
+            // Only after the restored file is verified do we optionally delete the archive blob.
+            if (_deleteBlobAfterRestore)
+            {
+                await TryDeleteBlobAsync(envelope.JobId, envelope.ItemId, envelope.ContainerName, target.BlobPath!, cancellationToken).ConfigureAwait(false);
+            }
+
+            // Remove the placeholder — but only if one still exists (an orphaned archive has none).
+            await _statusWriter.TransitionAsync(envelope.ItemId, MigrationLifecycleStatus.PlaceholderRemoving,
+                "Removing placeholder if present.", cancellationToken: cancellationToken);
+            try
+            {
+                if (!string.IsNullOrEmpty(target.PlaceholderServerRelativeUrl))
+                {
+                    await RemovePlaceholderIfPresentAsync(spCtx, target.PlaceholderServerRelativeUrl, cancellationToken).ConfigureAwait(false);
+                }
+                await _statusWriter.TransitionAsync(envelope.ItemId, MigrationLifecycleStatus.RestoreCompleted,
+                    "Restore completed from cold storage.", cancellationToken: cancellationToken);
+            }
+            catch (Exception ex)
+            {
+                // File is restored + verified; only placeholder removal failed. Park for the resume tail.
+                _logger.LogWarning(ex, "Restored file but failed to remove placeholder '{Url}'.", target.PlaceholderServerRelativeUrl);
+                await HandleRestoreFailureAsync(envelope.ItemId, ex, MigrationLifecycleStatus.PlaceholderRemoveFailed,
+                    $"Restored the file, but removing the placeholder failed: {ex.Message}", cancellationToken).ConfigureAwait(false);
+                return false;
+            }
+
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Blob-driven restore failed for '{Container}/{Blob}'.", envelope.ContainerName, target.BlobPath);
+            await HandleRestoreFailureAsync(envelope.ItemId, ex, MigrationLifecycleStatus.RestoreFailed,
+                $"Restore failed: {ex.Message}", cancellationToken).ConfigureAwait(false);
+            return false;
+        }
+        finally
+        {
+            spCtx?.Dispose();
+            if (tempFile is not null)
+            {
+                try { IOFile.Delete(tempFile); } catch (IOException ex) { _logger.LogDebug(ex, "Temp delete failed."); }
+            }
+        }
+    }
+
+    /// <summary>
+    /// The destination already holds the archived file (same size), so this restore is a no-op: remove
+    /// any leftover placeholder and mark the item Skipped. A transient placeholder-removal failure parks
+    /// for an automatic retry (which re-detects the already-restored state and retries the cleanup).
+    /// </summary>
+    private async Task<bool> SkipAlreadyRestoredAsync(ColdStorageBusEnvelope envelope, ClientContext spCtx, PlaceholderRestoreTarget target, CancellationToken cancellationToken)
+    {
+        try
+        {
+            if (!string.IsNullOrEmpty(target.PlaceholderServerRelativeUrl))
+            {
+                await _statusWriter.TransitionAsync(envelope.ItemId, MigrationLifecycleStatus.PlaceholderRemoving,
+                    "Already restored; removing leftover placeholder if present.", cancellationToken: cancellationToken);
+                await RemovePlaceholderIfPresentAsync(spCtx, target.PlaceholderServerRelativeUrl, cancellationToken).ConfigureAwait(false);
+            }
+            await _statusWriter.TransitionAsync(envelope.ItemId, MigrationLifecycleStatus.Skipped,
+                "Already restored — a file of the archived size is already in SharePoint; skipped the copy.", cancellationToken: cancellationToken);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Already-restored item {ItemId}: leftover placeholder removal failed.", envelope.ItemId);
+            await HandleRestoreFailureAsync(envelope.ItemId, ex, MigrationLifecycleStatus.PlaceholderRemoveFailed,
+                $"The file is already restored, but removing the leftover placeholder failed: {ex.Message}", cancellationToken).ConfigureAwait(false);
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Removes a placeholder when it exists; a missing placeholder is a no-op (an orphaned archive
+    /// may have none). Transient failures propagate so the caller can park the item for a retry.
+    /// </summary>
+    private async Task RemovePlaceholderIfPresentAsync(ClientContext ctx, string placeholderServerRelativeUrl, CancellationToken cancellationToken)
+    {
+        var ph = ctx.Web.GetFileByServerRelativeUrl(placeholderServerRelativeUrl);
+        ctx.Load(ph, f => f.Exists);
+        try
+        {
+            await ctx.ExecuteQueryAsyncWithThrottleRetries(_logger).ConfigureAwait(false);
+        }
+        catch (ServerException)
+        {
+            return; // file-not-found surfaces as ServerException on some tenants — nothing to remove
+        }
+        if (ph.Exists)
+        {
+            ph.DeleteObject();
+            await ctx.ExecuteQueryAsyncWithThrottleRetries(_logger).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
     /// Records a restore step failure with the same throttle resilience as the migrate
     /// pipeline (<c>ColdStorageMigratorPipeline.HandleStepFailureAsync</c>): a <b>transient</b>
     /// error (throttle/timeout/transient 5xx) still under the attempt ceiling parks the item in
@@ -282,6 +488,13 @@ public sealed class SharePointRestorePipeline : BaseComponent
         _logger.LogInformation("Item {ItemId}: content already restored by a prior attempt; resuming to remove the placeholder only.", envelope.ItemId);
         try
         {
+            if (string.IsNullOrEmpty(target.PlaceholderServerRelativeUrl))
+            {
+                // Blob-driven orphan: nothing to remove, the file is already restored.
+                await _statusWriter.TransitionAsync(envelope.ItemId, MigrationLifecycleStatus.RestoreCompleted,
+                    "Restore completed (no placeholder to remove).", cancellationToken: cancellationToken);
+                return true;
+            }
             var placeholderFile = spCtx.Web.GetFileByServerRelativeUrl(target.PlaceholderServerRelativeUrl);
             spCtx.Load(placeholderFile, f => f.Exists);
             await spCtx.ExecuteQueryAsyncWithThrottleRetries(_logger).ConfigureAwait(false);
@@ -445,6 +658,26 @@ public sealed class SharePointRestorePipeline : BaseComponent
         {
             throw new InvalidOperationException(
                 $"Cold-storage blob '{containerName}/{blobPath}' not found.", ex);
+        }
+    }
+
+    /// <summary>
+    /// Returns the archived blob's content length, or null when the blob is missing. Used by the
+    /// blob-driven path to detect a file that is already restored (destination present at the same
+    /// size) so a re-run of a folder restore skips it instead of failing on a conflict.
+    /// </summary>
+    private async Task<long?> GetBlobLengthAsync(string containerName, string blobPath, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var serviceClient = BlobServiceClientFactory.Create(_config.ConnectionStrings.Storage, _config);
+            var blob = serviceClient.GetBlobContainerClient(containerName).GetBlobClient(blobPath);
+            var props = await blob.GetPropertiesAsync(cancellationToken: cancellationToken).ConfigureAwait(false);
+            return props.Value.ContentLength;
+        }
+        catch (RequestFailedException ex) when (ex.Status == 404)
+        {
+            return null;
         }
     }
 
