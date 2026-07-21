@@ -4,6 +4,7 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
+using Migration.Engine.Lifecycle;
 using Migration.Engine.Migration;
 using Models;
 using Models.ColdStorage;
@@ -251,9 +252,41 @@ public class QueueController(
 
         var result = new RequeueResultResponse();
         var toPublish = new List<ColdStorageBusEnvelope>();
+        var recoveredJobIds = new HashSet<Guid>();
+        var recoveredNow = DateTime.UtcNow;
 
         foreach (var item in candidates)
         {
+            // Already fully archived (copied + source deleted + placeholder created) but showing
+            // as failed? The file IS in cold storage — the source is gone, so re-driving it into
+            // the pipeline would only try (and fail) to re-download a deleted source. Correct the
+            // record straight to completed instead. This is what makes "Recover failed" actually
+            // clear these rows instead of bouncing them back to failed via the give-up reaper.
+            if (ArchivedItemReconcile.IsFullyArchivedButNotCompleted(item.Status, item.SourceDeletedAt, item.PlaceholderCreatedAt))
+            {
+                var was = item.Status;
+                item.Status = MigrationLifecycleStatus.ColdStorageMigrationCompleted;
+                item.CompletedAt = recoveredNow;
+                item.UpdatedAt = recoveredNow;
+                item.LastError = null;
+                item.LastErrorDetail = null;
+                item.NextRetryAt = null;
+                item.LastRetryAfterSeconds = null;
+                recoveredJobIds.Add(item.JobId);
+                _db.MigrationJobLogs.Add(new MigrationJobLog
+                {
+                    JobId = item.JobId,
+                    ItemId = item.ItemId,
+                    Status = MigrationLifecycleStatus.ColdStorageMigrationCompleted,
+                    Level = (int)LogLevel.Information,
+                    Message = $"Corrected to completed by {upn}: file was already archived (copied + source deleted + placeholder created); was {was}.",
+                    ActorUpn = upn,
+                    Action = "Requeue-Complete",
+                });
+                result.Recovered++;
+                continue;
+            }
+
             var eligible = staleQueuedMode ? item.Status == MigrationLifecycleStatus.Queued : IsRequeueable(item.Status);
             if (!eligible)
             {
@@ -305,6 +338,17 @@ public class QueueController(
         // a message for an item whose row still reads as failed/terminal.
         await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
 
+        // Recompute rollups for jobs whose archived items we just corrected, so a job that is
+        // now fully complete flips out of "Completed with warning" back to completed.
+        if (recoveredJobIds.Count > 0)
+        {
+            var rollupWriter = new JobStatusWriter(_db, _logger);
+            foreach (var jobId in recoveredJobIds)
+            {
+                await rollupWriter.RecomputeJobRollupAsync(jobId, cancellationToken).ConfigureAwait(false);
+            }
+        }
+
         var publishFailures = new List<(Guid ItemId, string Error)>();
         foreach (var envelope in toPublish)
         {
@@ -352,8 +396,8 @@ public class QueueController(
             result.PublishFailed = publishFailures.Count;
         }
 
-        _logger.LogInformation("Requeue by {Upn}: {Requeued} requeued, {Skipped} skipped, {Failed} publish-failed.",
-            upn, result.Requeued, result.Skipped, result.PublishFailed);
+        _logger.LogInformation("Requeue by {Upn}: {Requeued} requeued, {Recovered} recovered (already archived), {Skipped} skipped, {Failed} publish-failed.",
+            upn, result.Requeued, result.Recovered, result.Skipped, result.PublishFailed);
         return result;
     }
 

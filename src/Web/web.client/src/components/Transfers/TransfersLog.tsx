@@ -227,12 +227,13 @@ function TransfersList() {
     setRecovering(true);
     setRecoverMsg(null);
     try {
-      const res = await api.post<{ requeued: number; skipped: number; publishFailed: number }>(
+      const res = await api.post<{ requeued: number; recovered?: number; skipped: number; publishFailed: number }>(
         "/api/admin/queue/requeue",
         { status: "AllFailed", max: 5000 },
       );
       setRecoverMsg(
         `Recovered ${res.requeued}` +
+          (res.recovered ? `, ${res.recovered} already archived (fixed)` : "") +
           (res.skipped ? `, skipped ${res.skipped}` : "") +
           (res.publishFailed ? `, ${res.publishFailed} failed to publish` : "") +
           ".",
@@ -843,12 +844,13 @@ function TransferDetail({ jobId }: { jobId: string }) {
     setRequeueing(true);
     setRequeueMsg(null);
     try {
-      const res = await api.post<{ requeued: number; skipped: number; publishFailed: number }>(
+      const res = await api.post<{ requeued: number; recovered?: number; skipped: number; publishFailed: number }>(
         "/api/admin/queue/requeue",
         { jobId: job.jobId },
       );
       setRequeueMsg(
         `Requeued ${res.requeued}` +
+          (res.recovered ? `, ${res.recovered} already archived (fixed)` : "") +
           (res.skipped ? `, skipped ${res.skipped}` : "") +
           (res.publishFailed ? `, ${res.publishFailed} failed to publish` : "") +
           ".",

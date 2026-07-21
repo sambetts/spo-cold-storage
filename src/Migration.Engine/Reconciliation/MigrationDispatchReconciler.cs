@@ -25,9 +25,9 @@ public enum DispatchAction
 public readonly record struct DispatchThresholds(int EnqueueGraceSeconds, int MaxQueuedMinutes, int StallMinutes);
 
 /// <summary>Result of one reconciler pass, for logging.</summary>
-public readonly record struct DispatchReconcileSummary(int ReDriven, int FailedGaveUp, int FailedStalled, int EmptyJobsClosed, int JobsFinalized, int ThrottleRetried)
+public readonly record struct DispatchReconcileSummary(int ReDriven, int FailedGaveUp, int FailedStalled, int EmptyJobsClosed, int JobsFinalized, int ThrottleRetried, int Reconciled)
 {
-    public bool HasWork => ReDriven > 0 || FailedGaveUp > 0 || FailedStalled > 0 || EmptyJobsClosed > 0 || JobsFinalized > 0 || ThrottleRetried > 0;
+    public bool HasWork => ReDriven > 0 || FailedGaveUp > 0 || FailedStalled > 0 || EmptyJobsClosed > 0 || JobsFinalized > 0 || ThrottleRetried > 0 || Reconciled > 0;
 }
 
 /// <summary>
@@ -136,6 +136,15 @@ public sealed class MigrationDispatchReconciler : BaseComponent
         var emptyJobs = 0;
         var jobsFinalized = 0;
         var throttleRetried = 0;
+        var reconciled = 0;
+
+        // 0) Correct "false failure" rows first: items whose timestamps prove they are already
+        //    fully archived (copied + source deleted + placeholder created) but that were left
+        //    non-completed by an interrupted run or a requeue. Completing these before the
+        //    give-up/stall sweeps runs stops them being re-failed, and heals items that are
+        //    already terminal-but-wrong (e.g. CopyToColdStorageFailed on a file whose source is
+        //    actually gone) which the sweeps below never revisit.
+        reconciled = await writer.CompleteAlreadyArchivedAsync(MaxItemsPerPass, cancellationToken).ConfigureAwait(false);
 
         // 1) Queued items whose message was never sent or is stale.
         var enqueueCutoff = now.AddSeconds(-thresholds.EnqueueGraceSeconds);
@@ -157,6 +166,29 @@ public sealed class MigrationDispatchReconciler : BaseComponent
             var action = Decide(item.Status, item.CreatedAt, item.UpdatedAt, item.LastEnqueuedAt, now, thresholds);
             if (action == DispatchAction.FailGaveUp)
             {
+                // Honour the item's own progress before failing it. A requeue resets status to
+                // Queued but keeps the original CreatedAt, so an item that already archived days
+                // ago trips the 24h give-up instantly. Never label a file whose source is gone
+                // "copy failed / source untouched" — that is wrong and unsafe to act on.
+                var failStatus = ArchivedItemReconcile.ResolveFailureStatus(
+                    item.SourceDeletedAt, item.PlaceholderCreatedAt,
+                    MigrationLifecycleStatus.CopyToColdStorageFailed);
+                if (failStatus is null)
+                {
+                    // Fully archived — pass 0 (this run or the next) completes it. Don't fail.
+                    continue;
+                }
+                if (failStatus == MigrationLifecycleStatus.PlaceholderFailed)
+                {
+                    await writer.TransitionAsync(
+                        item.ItemId,
+                        MigrationLifecycleStatus.PlaceholderFailed,
+                        "Source already archived (copied + deleted) but the placeholder was never created; requeue to recreate it from the existing blob. The source is NOT in SharePoint.",
+                        level: LogLevel.Error,
+                        cancellationToken: cancellationToken).ConfigureAwait(false);
+                    gaveUp++;
+                    continue;
+                }
                 await writer.TransitionAsync(
                     item.ItemId,
                     MigrationLifecycleStatus.CopyToColdStorageFailed,
@@ -272,9 +304,19 @@ public sealed class MigrationDispatchReconciler : BaseComponent
             .ConfigureAwait(false);
         foreach (var item in stalledItems)
         {
+            // Same guard as give-up: an item whose source is already gone must never be marked
+            // "copy failed". Fully-archived rows are left for the pass-0 completion; source-gone
+            // rows with no placeholder become PlaceholderFailed (needs a placeholder, not a copy).
+            var failStatus = ArchivedItemReconcile.ResolveFailureStatus(
+                item.SourceDeletedAt, item.PlaceholderCreatedAt,
+                StalledFailureStatus(item.Status));
+            if (failStatus is null)
+            {
+                continue;
+            }
             await writer.TransitionAsync(
                 item.ItemId,
-                StalledFailureStatus(item.Status),
+                failStatus.Value,
                 $"No progress for over {thresholds.StallMinutes} min (worker stalled or crashed mid-operation). Marked failed so the job can complete; re-queue to retry.",
                 level: LogLevel.Error,
                 cancellationToken: cancellationToken).ConfigureAwait(false);
@@ -325,7 +367,7 @@ public sealed class MigrationDispatchReconciler : BaseComponent
             jobsFinalized++;
         }
 
-        return new DispatchReconcileSummary(reDriven, gaveUp, stalled, emptyJobs, jobsFinalized, throttleRetried);
+        return new DispatchReconcileSummary(reDriven, gaveUp, stalled, emptyJobs, jobsFinalized, throttleRetried, reconciled);
     }
 
     private static MigrationLifecycleStatus StalledFailureStatus(MigrationLifecycleStatus status) => status switch

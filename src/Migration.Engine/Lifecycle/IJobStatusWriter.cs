@@ -76,6 +76,18 @@ public interface IJobStatusWriter
     Task RecordSourceDeletedAsync(Guid itemId, CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// Corrects "false failure" rows: items whose timestamps prove the file is already
+    /// fully archived (copied to blob, source deleted, and .url placeholder created) but
+    /// whose status was left at something other than completed by an interrupted run or a
+    /// requeue. Flips them to <see cref="MigrationLifecycleStatus.ColdStorageMigrationCompleted"/>,
+    /// clears the stale error, and recomputes the affected jobs' rollups so a job that is
+    /// really finished stops showing failures. Touches only the database — never SharePoint
+    /// or blob storage. Returns the number of items corrected (capped at
+    /// <paramref name="maxItems"/>).
+    /// </summary>
+    Task<int> CompleteAlreadyArchivedAsync(int maxItems, CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Persists the original author/editor/timestamps captured from the source
     /// SharePoint item at migration time, so they survive the source delete and
     /// can be surfaced on the placeholder and after a restore.
