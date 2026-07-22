@@ -98,15 +98,17 @@ public class Config(Microsoft.Extensions.Configuration.IConfiguration config) : 
     public int ColdStorageSkipRetentionLabeled { get; set; }
 
     /// <summary>
-    /// When &gt; 0, the cold-storage blob is deleted after a restore has been
-    /// verified (the restored file confirmed present in SharePoint), so a file
-    /// doesn't end up living in both places (issue #4). 0 (default) keeps the
-    /// blob. Deletion mirrors the migrate-side invariant: it only happens AFTER
-    /// post-restore validation succeeds, and a delete failure never fails the
-    /// restore.
+    /// Controls whether the cold-storage blob is deleted after a restore has been verified
+    /// (the restored file confirmed present in SharePoint), so a file never ends up living in
+    /// both places. <b>Default 1 (delete)</b>: once a file is confirmed moved back to SharePoint
+    /// the redundant archive is removed — the only remnant left in SharePoint is the (also removed)
+    /// <c>.url</c> placeholder. Set to 0 to keep the blob as an extra copy. Deletion mirrors the
+    /// migrate-side invariant: it only happens AFTER post-restore validation succeeds (or, for an
+    /// already-restored file, after the destination is confirmed present), and a delete failure
+    /// never fails the restore.
     /// </summary>
     [ConfigValue(true)]
-    public int ColdStorageDeleteBlobAfterRestore { get; set; }
+    public int ColdStorageDeleteBlobAfterRestore { get; set; } = 1;
 
     /// <summary>
     /// What to do with a cold-storage blob whose placeholder/site no longer

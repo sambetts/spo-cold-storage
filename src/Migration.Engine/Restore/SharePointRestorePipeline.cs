@@ -378,8 +378,10 @@ public sealed class SharePointRestorePipeline : BaseComponent
 
     /// <summary>
     /// The destination already holds the archived file (same size), so this restore is a no-op: remove
-    /// any leftover placeholder and mark the item Skipped. A transient placeholder-removal failure parks
-    /// for an automatic retry (which re-detects the already-restored state and retries the cleanup).
+    /// any leftover placeholder, delete the now-redundant blob (so the file isn't duplicated across
+    /// SharePoint + cold storage), and mark the item Skipped. A transient placeholder-removal failure
+    /// parks for an automatic retry (which re-detects the already-restored state — with the blob still
+    /// present, since the blob is only deleted after the placeholder is gone — and retries the cleanup).
     /// </summary>
     private async Task<bool> SkipAlreadyRestoredAsync(ColdStorageBusEnvelope envelope, ClientContext spCtx, PlaceholderRestoreTarget target, CancellationToken cancellationToken)
     {
@@ -390,6 +392,12 @@ public sealed class SharePointRestorePipeline : BaseComponent
                 await _statusWriter.TransitionAsync(envelope.ItemId, MigrationLifecycleStatus.PlaceholderRemoving,
                     "Already restored; removing leftover placeholder if present.", cancellationToken: cancellationToken);
                 await RemovePlaceholderIfPresentAsync(spCtx, target.PlaceholderServerRelativeUrl, cancellationToken).ConfigureAwait(false);
+            }
+            // The file is confirmed present in SharePoint, so the archive blob is redundant — remove it
+            // (best-effort). Done only AFTER placeholder removal so a retry can still re-detect the state.
+            if (_deleteBlobAfterRestore && !string.IsNullOrEmpty(target.BlobPath))
+            {
+                await TryDeleteBlobAsync(envelope.JobId, envelope.ItemId, envelope.ContainerName, target.BlobPath, cancellationToken).ConfigureAwait(false);
             }
             await _statusWriter.TransitionAsync(envelope.ItemId, MigrationLifecycleStatus.Skipped,
                 "Already restored — a file of the archived size is already in SharePoint; skipped the copy.", cancellationToken: cancellationToken);

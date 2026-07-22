@@ -178,18 +178,19 @@ function allTreeFolderPaths(node: FileTreeNode, out: string[] = []): string[] {
 }
 
 function folderRollup(items: IJobItemStatus[]): { label: string; color: string } {
-  let done = 0, failed = 0, inProgress = 0;
-  for (const it of items) {
-    const completed = it.status === MigrationLifecycleStatus.ColdStorageMigrationCompleted
-      || it.status === MigrationLifecycleStatus.RestoreCompleted;
-    if (completed) { done++; }
-    else if (isTerminal(it.status)) { failed++; }
-    else { inProgress++; }
+  const c = jobCounts(items);
+  if (c.inprogress > 0) {
+    return { label: `${formatNumber(c.completed)}/${formatNumber(c.total)} done`, color: '#0078d4' };
   }
-  const total = items.length;
-  if (inProgress > 0) return { label: `${formatNumber(done)}/${formatNumber(total)} done`, color: '#0078d4' };
-  if (failed > 0) return { label: `${formatNumber(done)}/${formatNumber(total)} done · ${formatNumber(failed)} issue${failed === 1 ? '' : 's'}`, color: '#a4262c' };
-  return { label: `All ${formatNumber(total)} done`, color: '#107c10' };
+  const parts: string[] = [];
+  if (c.failed > 0) { parts.push(`${formatNumber(c.failed)} issue${c.failed === 1 ? '' : 's'}`); }
+  if (c.skipped > 0) { parts.push(`${formatNumber(c.skipped)} skipped`); }
+  if (parts.length === 0) {
+    return { label: `All ${formatNumber(c.total)} done`, color: '#107c10' };
+  }
+  // Genuine failures are an error (red); skips are a neutral warning (grey), not an error.
+  const color = c.failed > 0 ? '#a4262c' : '#797775';
+  return { label: `${formatNumber(c.completed)}/${formatNumber(c.total)} done · ${parts.join(' · ')}`, color };
 }
 
 interface JobCounts { completed: number; failed: number; skipped: number; inprogress: number; throttled: number; total: number; }

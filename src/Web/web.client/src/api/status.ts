@@ -31,7 +31,7 @@ const STATUS_MAP: Record<MigrationLifecycleStatus, StatusDescriptor> = {
   CompletedWithWarning: { label: "Completed with warning", tone: "warning" },
   RetryScheduled: { label: "Waiting to retry", tone: "warning" },
   Cancelled: { label: "Cancelled", tone: "subtle" },
-  Skipped: { label: "Skipped (not eligible)", tone: "subtle" },
+  Skipped: { label: "Skipped", tone: "subtle" },
 };
 
 export function describeStatus(status: MigrationLifecycleStatus): StatusDescriptor {
