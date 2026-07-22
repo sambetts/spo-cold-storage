@@ -359,6 +359,17 @@ public sealed class JobStatusWriter(SPOColdStorageDbContext db, ILogger logger) 
         {
             item.CompletedAt = DateTime.UtcNow;
         }
+        // Forward progress past a transient error — any non-failure status other than a scheduled
+        // retry — makes the previous error + retry schedule stale. Clear them so a file that
+        // ultimately succeeds (or is actively being retried) doesn't keep showing an "error" it has
+        // recovered from. Failures re-set LastError after this call; RetryScheduled keeps its reason.
+        if (!IsFailure(newStatus) && newStatus != MigrationLifecycleStatus.RetryScheduled)
+        {
+            item.LastError = null;
+            item.LastErrorDetail = null;
+            item.NextRetryAt = null;
+            item.LastRetryAfterSeconds = null;
+        }
         // Log every lifecycle transition at Information with structured properties so an item's
         // full journey is traceable in App Insights (the diagnosability that was missing):
         //   traces | where message startswith "ColdStorage item" | where message has "<itemId>"
@@ -399,7 +410,22 @@ public sealed class JobStatusWriter(SPOColdStorageDbContext db, ILogger logger) 
         {
             return;
         }
-        var items = await _db.MigrationJobItems.Where(i => i.JobId == jobId).Select(i => i.Status).ToListAsync(cancellationToken);
+        // The item-status query hits the DATABASE, so the transition that triggered this rollup —
+        // still only an in-memory tracked change saved AFTER this method — would be missed, leaving
+        // the LAST item to finish computing the rollup without counting itself (the "all items done
+        // but the job still shows Retry Scheduled / in-progress" bug). Overlay any unsaved item-status
+        // changes tracked in THIS DbContext so the current transition is counted.
+        var dbStatuses = await _db.MigrationJobItems
+            .Where(i => i.JobId == jobId)
+            .Select(i => new { i.ItemId, i.Status })
+            .ToListAsync(cancellationToken);
+        var pending = _db.ChangeTracker.Entries<MigrationJobItem>()
+            .Where(e => e.Entity.JobId == jobId && (e.State == EntityState.Modified || e.State == EntityState.Added))
+            .ToDictionary(e => e.Entity.ItemId, e => e.Entity.Status);
+        var statusById = new Dictionary<Guid, MigrationLifecycleStatus>();
+        foreach (var s in dbStatuses) { statusById[s.ItemId] = s.Status; }
+        foreach (var p in pending) { statusById[p.Key] = p.Value; }
+        var items = statusById.Values.ToList();
         if (items.Count == 0)
         {
             return;

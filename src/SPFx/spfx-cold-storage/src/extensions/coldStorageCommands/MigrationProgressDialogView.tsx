@@ -9,7 +9,7 @@ import {
   IWorkerHealth,
   MigrationLifecycleStatus,
 } from '../../common/ColdStorageApiClient';
-import { colorFor, describeStatus, formatCountdown, formatEta, formatLabel, formatNumber, isTerminal, normalizeStatus } from '../../common/statusFormat';
+import { colorFor, describeStatus, effectiveJobStatus, formatCountdown, formatEta, formatLabel, formatNumber, isTerminal, normalizeStatus } from '../../common/statusFormat';
 
 export type DialogPhase = 'submitting' | 'confirm' | 'polling' | 'terminal' | 'expired' | 'error' | 'browse';
 
@@ -495,10 +495,12 @@ const JobBlock: React.FC<{
   job: ITrackedJob; expandedFolders: ReadonlySet<string>;
   onToggleFolder: (nsKey: string) => void; onToggleAllFolders: (nsKeys: string[], expand: boolean) => void;
 }> = ({ job, expandedFolders, onToggleFolder, onToggleAllFolders }) => {
-  const overallStatus = job.lastResponse?.status ?? job.acceptResponse?.status;
   const items = job.lastResponse?.items ?? [];
+  const rawStatus = job.lastResponse?.status ?? job.acceptResponse?.status;
+  // Never show an in-progress badge on a job whose items are all finished (the server rollup can lag).
+  const overallStatus = effectiveJobStatus(rawStatus, items);
   const warnings = mergedWarnings(job);
-  const jobTerminal = job.lastResponse ? isTerminal(job.lastResponse.status) : false;
+  const jobTerminal = items.length > 0 ? items.every(it => isTerminal(it.status)) : (job.lastResponse ? isTerminal(job.lastResponse.status) : false);
   const active = !jobTerminal;
 
   // Completed migrations collapse to a 1–2 line summary that expands on demand, so a big

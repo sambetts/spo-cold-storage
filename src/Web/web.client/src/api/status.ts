@@ -72,6 +72,33 @@ export function isInProgressStatus(status: MigrationLifecycleStatus): boolean {
   return statusCategory(status) === "inprogress";
 }
 
+/**
+ * The status to display for a JOB. The server's job.status is a rollup that can briefly lag the
+ * items under load (a concurrent-completion race can leave it on an in-progress status such as
+ * RetryScheduled even after every item finished). When every item is terminal we never show an
+ * in-progress badge: derive the outcome from the items (any failure/skip → CompletedWithWarning,
+ * else the completed status matching the items). Falls back to the server status while work is live.
+ */
+export function effectiveJobStatus(
+  serverStatus: MigrationLifecycleStatus,
+  items: ReadonlyArray<{ status: MigrationLifecycleStatus }>,
+): MigrationLifecycleStatus {
+  if (items.length === 0) return serverStatus;
+  if (!items.every((it) => statusCategory(it.status) !== "inprogress")) return serverStatus;
+  if (statusCategory(serverStatus) !== "inprogress") return serverStatus; // already finalized correctly
+  let anyAttention = false;
+  let sawRestore = false;
+  let sawMigrate = false;
+  for (const it of items) {
+    const cat = statusCategory(it.status);
+    if (cat === "failed" || cat === "skipped") anyAttention = true;
+    else if (it.status === "RestoreCompleted") sawRestore = true;
+    else if (it.status === "ColdStorageMigrationCompleted") sawMigrate = true;
+  }
+  if (anyAttention) return "CompletedWithWarning";
+  return sawRestore ? "RestoreCompleted" : sawMigrate ? "ColdStorageMigrationCompleted" : "CompletedWithWarning";
+}
+
 const LOG_LEVEL_NAMES: Record<number, string> = {
   0: "Trace",
   1: "Debug",
