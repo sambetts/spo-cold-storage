@@ -4,7 +4,7 @@ import { Badge, Button, Checkbox, Input, Select, Spinner, Tooltip } from "@fluen
 import { ArrowClockwise20Regular, ArrowLeft20Regular, ArrowSync20Regular, Info16Regular } from "@fluentui/react-icons";
 import { ApiError, useApi } from "../../api/client";
 import { JobItemStatus, JobLogEntry, JobStatus, JobSummary, MigrationOperationKind, WorkerHealth } from "../../api/types";
-import { describeLogLevel, describeOperation, describeStatus, isErrorLevel, isFailedStatus, isInProgressStatus, isWarnLevel, StatusCategory, statusCategory } from "../../api/status";
+import { describeLogLevel, describeOperation, describeStatus, effectiveJobStatus, isErrorLevel, isFailedStatus, isInProgressStatus, isWarnLevel, StatusCategory, statusCategory } from "../../api/status";
 import { fileName, formatCountdown, formatDateTime, formatEta, formatNumber, formatRelative } from "../../utils/format";
 
 const REFRESH_MS = 10000;
@@ -928,7 +928,7 @@ function TransferDetail({ jobId }: { jobId: string }) {
       {job && (
         <>
           <h2 style={{ margin: "0 0 4px 0" }}>
-            {describeOperation(job.operation)} — <StatusBadge status={job.status} />
+            {describeOperation(job.operation)} — <StatusBadge status={effectiveJobStatus(job.status, items)} />
           </h2>
           <div style={{ color: "#605e5c", fontSize: 13, marginBottom: 4 }}>{job.siteUrl}</div>
           <div style={{ color: "#605e5c", fontSize: 12, marginBottom: 16 }}>

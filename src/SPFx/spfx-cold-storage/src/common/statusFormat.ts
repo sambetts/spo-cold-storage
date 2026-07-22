@@ -124,6 +124,38 @@ export function isTerminal(value: StatusLike): boolean {
 }
 
 /**
+ * The status to actually display for a JOB. The server's job.status is a rollup that can briefly
+ * lag the items under load (a concurrent-completion race can leave it on an in-progress status such
+ * as RetryScheduled even though every item has finished). When every item is terminal we never want
+ * to show an in-progress badge, so derive the real outcome from the items: any failure/skip →
+ * CompletedWithWarning, otherwise the completed status matching the operation (inferred from which
+ * kind of "completed" the items reached). Falls back to the server status while work is ongoing.
+ */
+export function effectiveJobStatus(
+  serverStatus: MigrationLifecycleStatus | string | undefined,
+  items: ReadonlyArray<{ status: StatusLike }>,
+): MigrationLifecycleStatus | string | undefined {
+  if (!items || items.length === 0) return serverStatus;
+  if (!items.every(it => isTerminal(it.status))) return serverStatus;
+  const server = normalizeStatus(serverStatus);
+  if (server && isTerminal(server)) return serverStatus; // server already finalized correctly
+
+  let anyAttention = false;
+  let sawRestoreDone = false;
+  let sawMigrateDone = false;
+  for (const it of items) {
+    const s = normalizeStatus(it.status);
+    if (s === MigrationLifecycleStatus.RestoreCompleted) sawRestoreDone = true;
+    else if (s === MigrationLifecycleStatus.ColdStorageMigrationCompleted) sawMigrateDone = true;
+    else anyAttention = true; // a failure / skip / cancel
+  }
+  if (anyAttention) return MigrationLifecycleStatus.CompletedWithWarning;
+  if (sawRestoreDone) return MigrationLifecycleStatus.RestoreCompleted;
+  if (sawMigrateDone) return MigrationLifecycleStatus.ColdStorageMigrationCompleted;
+  return MigrationLifecycleStatus.CompletedWithWarning;
+}
+
+/**
  * Compact "time from now" for a future instant, e.g. "in 45s", "in 12m", "in 3h",
  * or "now" when due/overdue. Returns "" for missing/invalid values.
  */

@@ -91,6 +91,14 @@ public class JobsController(
         {
             if (!string.IsNullOrEmpty(i.LastError))
             {
+                // A recovered/succeeded item must never surface a stale transient error (it worked
+                // out in the end). Belt-and-suspenders alongside clearing LastError on success.
+                if (i.Status is global::Models.ColdStorage.MigrationLifecycleStatus.ColdStorageMigrationCompleted
+                             or global::Models.ColdStorage.MigrationLifecycleStatus.RestoreCompleted
+                             or global::Models.ColdStorage.MigrationLifecycleStatus.RestoredToSharePoint)
+                {
+                    continue;
+                }
                 if (i.Status is global::Models.ColdStorage.MigrationLifecycleStatus.CompletedWithWarning
                              or global::Models.ColdStorage.MigrationLifecycleStatus.PlaceholderRemoveFailed
                              or global::Models.ColdStorage.MigrationLifecycleStatus.Skipped
