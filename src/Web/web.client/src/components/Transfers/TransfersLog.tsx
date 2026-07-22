@@ -465,17 +465,24 @@ function groupByFolder<T>(items: readonly T[], pathOf: (t: T) => string): { fold
 function folderRollup(items: JobItemStatus[]): { label: string; color: string } {
   let done = 0;
   let failed = 0;
+  let skipped = 0;
   let inprog = 0;
   for (const it of items) {
     const c = statusCategory(it.status);
     if (c === "completed") done++;
     else if (c === "failed") failed++;
+    else if (c === "skipped") skipped++;
     else if (c === "inprogress") inprog++;
   }
   const total = items.length;
   if (inprog > 0) return { label: `${done}/${total} done`, color: "#0f6cbd" };
-  if (failed > 0) return { label: `${done}/${total} · ${failed} failed`, color: "#a4262c" };
-  return { label: `all ${total} done`, color: "#107c10" };
+  const parts: string[] = [];
+  if (failed > 0) parts.push(`${failed} failed`);
+  if (skipped > 0) parts.push(`${skipped} skipped`);
+  if (parts.length === 0) return { label: `all ${total} done`, color: "#107c10" };
+  // Genuine failures are an error (red); skips alone are a neutral warning (grey).
+  const color = failed > 0 ? "#a4262c" : "#797775";
+  return { label: `${done}/${total} · ${parts.join(" · ")}`, color };
 }
 
 const disclosureHeaderStyle: CSSProperties = {

@@ -183,7 +183,7 @@ const DESCRIPTIONS: Partial<Record<MigrationLifecycleStatus, string>> = {
   [MigrationLifecycleStatus.CompletedWithWarning]: 'Finished, but one or more items need attention.',
   [MigrationLifecycleStatus.RetryScheduled]: 'Throttled or hit a transient error \u2014 waiting, then retrying automatically.',
   [MigrationLifecycleStatus.Cancelled]: 'The operation was cancelled.',
-  [MigrationLifecycleStatus.Skipped]: 'Deliberately not archived (ineligible or excluded); the original is untouched.',
+  [MigrationLifecycleStatus.Skipped]: 'Skipped \u2014 nothing to do (already in the desired state, or not eligible). See the item\u2019s note for the reason.',
 };
 
 /**
