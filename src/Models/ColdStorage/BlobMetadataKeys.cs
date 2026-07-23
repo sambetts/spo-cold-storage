@@ -15,6 +15,17 @@ public static class BlobMetadataKeys
     public const string OriginalFileName = "spOriginalFileName";
     public const string OriginalLastModifiedUtc = "spOriginalLastModifiedUtc";
 
+    /// <summary>
+    /// Original authorship of the source file, captured at migration time and
+    /// stored on the blob so the metadata is preserved in cold storage (and
+    /// restorable) even when the placeholder is left as just a <c>.url</c> file
+    /// with no "Original *" library columns.
+    /// </summary>
+    public const string OriginalCreatedBy = "spOriginalCreatedBy";
+
+    public const string OriginalModifiedBy = "spOriginalModifiedBy";
+    public const string OriginalCreatedUtc = "spOriginalCreatedUtc";
+
     /// <summary>Job that produced this blob.</summary>
     public const string MigrationJobId = "spJobId";
 

@@ -120,18 +120,19 @@ export default class ColdStorageCommandSet extends BaseListViewCommandSet<IColdS
     }));
 
     const containerName = container.displayName ?? container.name;
-    const submit = async (): Promise<void> => {
+    const submit = async (copyMetadataColumns: boolean): Promise<void> => {
       dialog.setStatusMessage(`Submitting migration for ${formatNumber(items.length)} item${items.length === 1 ? '' : 's'} to container "${containerName}"…`);
       try {
         const response = await client.startMigration({
           siteUrl, webUrl,
           containerName: container.name,
           recursive: true,
+          copyMetadataColumns,
           items,
         });
         dialog.addAcceptedJob(response.jobId, response, `Migration job (${formatNumber(items.length)} item${items.length === 1 ? '' : 's'})`);
       } catch (err) {
-        dialog.showError(this.describeError(err, 'Failed to submit migration'), () => { void submit(); });
+        dialog.showError(this.describeError(err, 'Failed to submit migration'), () => { void submit(copyMetadataColumns); });
       }
     };
 
@@ -140,7 +141,12 @@ export default class ColdStorageCommandSet extends BaseListViewCommandSet<IColdS
       message: `These items will be migrated to cold-storage container “${containerName}”. Each is copied to cold storage and then replaced with a .url shortcut in place — the original is only removed after the copy is verified. Folders include everything inside them.`,
       confirmLabel: `Migrate ${formatNumber(items.length)} item${items.length === 1 ? '' : 's'}`,
       items: items.map(i => ({ name: ColdStorageCommandSet.basename(i.serverRelativeUrl), kind: i.itemKind })),
-    }, () => { void submit(); });
+      metadataOption: {
+        label: 'Keep a copy of the original metadata as columns',
+        note: 'Adds separate “Original Author”, “Original Editor” and “Original Modified” columns to this library and copies the source values into them — it can’t back-date the placeholder’s own Author/Modified fields (those show the migration app). Leave unchecked to keep just the .url shortcut. Either way the original metadata is preserved in cold storage and restored with the file.',
+        defaultChecked: false,
+      },
+    }, (result) => { void submit(result.copyMetadataColumns); });
   }
 
   // ---- Restore ----

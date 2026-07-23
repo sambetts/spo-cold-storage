@@ -103,6 +103,7 @@ public static class ColdStorageBusMessageFactory
             ContainerName = item.BlobContainerName ?? string.Empty,
             RequestedByUpn = job.RequestedByUpn,
             Recursive = item.Recursive,
+            CopyMetadataColumns = item.CopyMetadataColumns,
         };
 
         if (job.Operation == MigrationOperationKind.Migrate)

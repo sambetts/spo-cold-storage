@@ -30,13 +30,13 @@ namespace Web.Controllers;
 public class MigrationsController(
     SPOColdStorageDbContext db,
     ILogger<MigrationsController> logger,
-    ISiteOwnerAuthorizationService siteOwners,
+    ISiteContributorAuthorizationService siteContributors,
     IContainerAccessService containerAccess,
     IMigrationSubmissionQueue submissionQueue) : ControllerBase
 {
     private readonly SPOColdStorageDbContext _db = db ?? throw new ArgumentNullException(nameof(db));
     private readonly ILogger<MigrationsController> _logger = logger ?? throw new ArgumentNullException(nameof(logger));
-    private readonly ISiteOwnerAuthorizationService _siteOwners = siteOwners ?? throw new ArgumentNullException(nameof(siteOwners));
+    private readonly ISiteContributorAuthorizationService _siteContributors = siteContributors ?? throw new ArgumentNullException(nameof(siteContributors));
     private readonly IContainerAccessService _containerAccess = containerAccess ?? throw new ArgumentNullException(nameof(containerAccess));
     private readonly IMigrationSubmissionQueue _submissionQueue = submissionQueue ?? throw new ArgumentNullException(nameof(submissionQueue));
 
@@ -57,7 +57,7 @@ public class MigrationsController(
             return Unauthorized("Caller has no UPN claim.");
         }
 
-        if (!await _siteOwners.IsCallerSiteOwnerAsync(User, request.SiteUrl, cancellationToken).ConfigureAwait(false))
+        if (!await _siteContributors.IsCallerSiteContributorAsync(User, request.SiteUrl, cancellationToken).ConfigureAwait(false))
         {
             return Forbid();
         }
@@ -90,6 +90,7 @@ public class MigrationsController(
         var submission = new MigrationSubmission
         {
             Recursive = request.Recursive,
+            CopyMetadataColumns = request.CopyMetadataColumns,
             Priority = request.Priority,
             Items = request.Items.Select(i => new MigrationSubmissionItem
             {

@@ -28,7 +28,7 @@ public class RestoresController(
     SPOColdStorageDbContext db,
     Config config,
     ILogger<RestoresController> logger,
-    ISiteOwnerAuthorizationService siteOwners,
+    ISiteContributorAuthorizationService siteContributors,
     IContainerAccessService containerAccess,
     IColdStorageAdminAuthorizationService admin,
     IColdStorageBusPublisher publisher,
@@ -37,7 +37,7 @@ public class RestoresController(
     private readonly SPOColdStorageDbContext _db = db ?? throw new ArgumentNullException(nameof(db));
     private readonly Config _config = config ?? throw new ArgumentNullException(nameof(config));
     private readonly ILogger<RestoresController> _logger = logger ?? throw new ArgumentNullException(nameof(logger));
-    private readonly ISiteOwnerAuthorizationService _siteOwners = siteOwners ?? throw new ArgumentNullException(nameof(siteOwners));
+    private readonly ISiteContributorAuthorizationService _siteContributors = siteContributors ?? throw new ArgumentNullException(nameof(siteContributors));
     private readonly IContainerAccessService _containerAccess = containerAccess ?? throw new ArgumentNullException(nameof(containerAccess));
     private readonly IColdStorageAdminAuthorizationService _admin = admin ?? throw new ArgumentNullException(nameof(admin));
     private readonly IColdStorageBusPublisher _publisher = publisher ?? throw new ArgumentNullException(nameof(publisher));
@@ -59,7 +59,7 @@ public class RestoresController(
             return Unauthorized("Caller has no UPN claim.");
         }
 
-        if (!await _siteOwners.IsCallerSiteOwnerAsync(User, request.SiteUrl, cancellationToken).ConfigureAwait(false))
+        if (!await _siteContributors.IsCallerSiteContributorAsync(User, request.SiteUrl, cancellationToken).ConfigureAwait(false))
         {
             return Forbid();
         }
@@ -312,7 +312,7 @@ public class RestoresController(
         {
             return Unauthorized("Caller has no UPN claim.");
         }
-        if (!await _siteOwners.IsCallerSiteOwnerAsync(User, request.SiteUrl, cancellationToken).ConfigureAwait(false))
+        if (!await _siteContributors.IsCallerSiteContributorAsync(User, request.SiteUrl, cancellationToken).ConfigureAwait(false))
         {
             return Forbid();
         }

@@ -35,7 +35,7 @@ public class MigratePipelineTests
         return new Harness(pipeline, source, cold, writer, itemId, jobId);
     }
 
-    private static MigrateRequest Req(Harness h, DateTime? lastModifiedUtc = null) => new()
+    private static MigrateRequest Req(Harness h, DateTime? lastModifiedUtc = null, bool copyMetadataColumns = false) => new()
     {
         JobId = h.JobId,
         ItemId = h.ItemId,
@@ -44,6 +44,7 @@ public class MigratePipelineTests
         SourceLastModifiedUtc = lastModifiedUtc ?? BaseTime,
         SourceSizeHint = 5,
         RequestedByUpn = "user@contoso.com",
+        CopyMetadataColumns = copyMetadataColumns,
     };
 
     private static byte[] Bytes(string s = "hello") => Encoding.UTF8.GetBytes(s);
@@ -67,6 +68,33 @@ public class MigratePipelineTests
         Assert.NotNull(item.CopiedAt);
         Assert.NotNull(item.SourceDeletedAt);
         Assert.NotNull(item.PlaceholderCreatedAt);
+    }
+
+    // ---- Placeholder metadata columns are opt-in -------------------------
+
+    [Fact]
+    public async Task Migrate_ByDefault_WritesPlaceholderWithoutStampingMetadataColumns()
+    {
+        var h = Build();
+        h.Source.Seed(Path, Bytes(), BaseTime);
+
+        var ok = await h.Pipeline.ProcessAsync(Req(h), CancellationToken.None);
+
+        Assert.True(ok);
+        Assert.True(h.Source.HasPointer(Path + ".url"));    // placeholder is written...
+        Assert.False(h.Source.LastPointerStampedColumns);   // ...but the "Original *" columns are not
+    }
+
+    [Fact]
+    public async Task Migrate_WhenCopyMetadataColumnsRequested_StampsMetadataColumns()
+    {
+        var h = Build();
+        h.Source.Seed(Path, Bytes(), BaseTime);
+
+        var ok = await h.Pipeline.ProcessAsync(Req(h, copyMetadataColumns: true), CancellationToken.None);
+
+        Assert.True(ok);
+        Assert.True(h.Source.LastPointerStampedColumns);
     }
 
     // ---- #1 invariant: source is never deleted on a copy/verify failure ---

@@ -56,6 +56,8 @@ export interface IStartMigrationRequest {
   webUrl?: string;
   containerName: string;
   recursive: boolean;
+  /** When true, copy the original author/editor/dates onto extra "Original *" library columns on each placeholder. */
+  copyMetadataColumns?: boolean;
   items: IStartMigrationItem[];
 }
 

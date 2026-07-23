@@ -162,11 +162,14 @@ public sealed class SharePointSourceStore(Config config, ILogger logger) : ISour
         }
     }
 
-    public async Task<string> WritePointerAsync(SourceItemRef item, PlaceholderFileMetadata pointer, string? userFacingUrl = null, CancellationToken cancellationToken = default)
+    public async Task<string> WritePointerAsync(SourceItemRef item, PlaceholderFileMetadata pointer, string? userFacingUrl = null, bool stampMetadataColumns = false, CancellationToken cancellationToken = default)
     {
         using var ctx = await ContextAsync(item.StoreUrl).ConfigureAwait(false);
         var placeholderUrl = await _placeholderWriter.WritePlaceholderAsync(ctx, item.ItemPath, pointer, cancellationToken, userFacingUrl).ConfigureAwait(false);
-        await _placeholderWriter.StampOriginalMetadataAsync(ctx, placeholderUrl, pointer, cancellationToken).ConfigureAwait(false);
+        if (stampMetadataColumns)
+        {
+            await _placeholderWriter.StampOriginalMetadataAsync(ctx, placeholderUrl, pointer, cancellationToken).ConfigureAwait(false);
+        }
         return placeholderUrl;
     }
 

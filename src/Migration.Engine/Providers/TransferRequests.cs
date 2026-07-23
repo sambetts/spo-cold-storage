@@ -27,6 +27,13 @@ public sealed record MigrateRequest
 
     public string RequestedByUpn { get; init; } = string.Empty;
 
+    /// <summary>
+    /// When true, copy the captured original authorship onto visible "Original *" columns on
+    /// the placeholder's library. Default false: leave the placeholder as just the pointer
+    /// file. The metadata is preserved on the cold object either way.
+    /// </summary>
+    public bool CopyMetadataColumns { get; init; }
+
     /// <summary>Optional provider hints passed through to the eligibility evaluator (e.g. Graph drive/item id).</summary>
     public string? DriveId { get; init; }
     public string? GraphItemId { get; init; }

@@ -19,6 +19,7 @@ public sealed class MigrationSubmission
 {
     public List<MigrationSubmissionItem> Items { get; set; } = [];
     public bool Recursive { get; set; }
+    public bool CopyMetadataColumns { get; set; }
     public int Priority { get; set; }
 }
 
@@ -227,6 +228,7 @@ public sealed class MigrationExpander(
                 JobId = job.JobId,
                 ItemKind = dto.ItemKind,
                 Recursive = submission.Recursive,
+                CopyMetadataColumns = submission.CopyMetadataColumns,
                 SpSiteUrl = siteUrl,
                 SpWebUrl = webUrl,
                 SpServerRelativeUrl = dto.ServerRelativeUrl,
@@ -249,6 +251,7 @@ public sealed class MigrationExpander(
                 ContainerName = container.BlobContainerName,
                 RequestedByUpn = upn,
                 Recursive = submission.Recursive,
+                CopyMetadataColumns = submission.CopyMetadataColumns,
                 File = new BaseSharePointFileInfo
                 {
                     SiteUrl = siteUrl,

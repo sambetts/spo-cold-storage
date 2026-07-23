@@ -145,13 +145,17 @@ public sealed class InMemorySourceStore : ISourceStore
         return targetPath;
     }
 
-    public Task<string> WritePointerAsync(SourceItemRef item, PlaceholderFileMetadata pointer, string? userFacingUrl = null, CancellationToken cancellationToken = default)
+    public Task<string> WritePointerAsync(SourceItemRef item, PlaceholderFileMetadata pointer, string? userFacingUrl = null, bool stampMetadataColumns = false, CancellationToken cancellationToken = default)
     {
         Faults.MaybeThrow("WritePointer");
         var pointerPath = item.ItemPath + ".url";
         _pointers[pointerPath] = pointer;
+        LastPointerStampedColumns = stampMetadataColumns;
         return Task.FromResult(pointerPath);
     }
+
+    /// <summary>Records the <c>stampMetadataColumns</c> flag from the most recent pointer write, for test assertions.</summary>
+    public bool LastPointerStampedColumns { get; private set; }
 
     public Task<PlaceholderFileMetadata?> ReadPointerAsync(SourceItemRef pointer, CancellationToken cancellationToken = default)
     {

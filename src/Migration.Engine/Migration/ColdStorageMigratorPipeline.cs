@@ -269,6 +269,12 @@ public sealed class ColdStorageMigratorPipeline : BaseComponent
 
                 CaptureSourceAuthorship(spFile, ref originalCreatedBy, ref originalModifiedBy, ref originalCreated, ref originalModified);
 
+                // Preserve the captured authorship on the archive blob so the original
+                // metadata is kept in cold storage (and restorable) regardless of whether
+                // the placeholder is given the visible "Original *" columns. Best-effort.
+                await TryStampArchiveAuthorMetadataAsync(
+                    blobContainerName, blobPath, originalCreatedBy, originalModifiedBy, originalCreated, cancellationToken).ConfigureAwait(false);
+
                 // Capture prior version history to cold storage BEFORE the source
                 // is deleted (issue #18). Best-effort; never fails the migration.
                 if (_versionArchiver is not null)
@@ -362,9 +368,16 @@ public sealed class ColdStorageMigratorPipeline : BaseComponent
                 // even when storage public network access is locked down by policy.
                 userFacingUrl: BuildPlaceholderUserFacingUrl(envelope.ItemId)).ConfigureAwait(false);
 
-            // Best-effort: stamp the original authorship onto visible placeholder
-            // columns so the audit trail isn't lost (issue #1). Never fails the migration.
-            await _placeholderWriter.StampOriginalMetadataAsync(spCtx!, placeholderUrl, metadata, cancellationToken).ConfigureAwait(false);
+            // Best-effort: when the submitter opted in, copy the captured authorship onto
+            // visible "Original *" placeholder columns (issue #1). Off by default — the
+            // original metadata is already preserved on the archive blob + in the .url file,
+            // so the placeholder is otherwise left as just the .url shortcut. These are
+            // additive copy columns; SharePoint won't let the placeholder's own
+            // Author/Modified be back-dated to the source values. Never fails the migration.
+            if (envelope.CopyMetadataColumns)
+            {
+                await _placeholderWriter.StampOriginalMetadataAsync(spCtx!, placeholderUrl, metadata, cancellationToken).ConfigureAwait(false);
+            }
 
             await _statusWriter.RecordPlaceholderCreatedAsync(envelope.ItemId, placeholderUrl, cancellationToken);
             return true;
@@ -498,7 +511,10 @@ public sealed class ColdStorageMigratorPipeline : BaseComponent
             var placeholderUrl = await _placeholderWriter.WritePlaceholderAsync(
                 spCtx, file.ServerRelativeFilePath, metadata, cancellationToken,
                 userFacingUrl: BuildPlaceholderUserFacingUrl(envelope.ItemId)).ConfigureAwait(false);
-            await _placeholderWriter.StampOriginalMetadataAsync(spCtx, placeholderUrl, metadata, cancellationToken).ConfigureAwait(false);
+            if (item.CopyMetadataColumns)
+            {
+                await _placeholderWriter.StampOriginalMetadataAsync(spCtx, placeholderUrl, metadata, cancellationToken).ConfigureAwait(false);
+            }
             await _statusWriter.RecordPlaceholderCreatedAsync(envelope.ItemId, placeholderUrl, cancellationToken).ConfigureAwait(false);
             return true;
         }
@@ -654,6 +670,49 @@ public sealed class ColdStorageMigratorPipeline : BaseComponent
             },
         };
         await blob.UploadAsync(fs, options, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Best-effort: merges the captured original authorship (Created By / Modified By /
+    /// Created) into the archive blob's metadata so the original metadata is preserved in
+    /// cold storage — and therefore restorable — independent of whether the placeholder is
+    /// given the visible "Original *" columns. Never throws: a metadata-stamp failure must
+    /// not undo an otherwise-successful migration (the blob content + the placeholder's
+    /// <c>[ColdStorage]</c> section already carry what restore needs).
+    /// </summary>
+    private async Task TryStampArchiveAuthorMetadataAsync(
+        string containerName, string blobPath,
+        string? createdBy, string? modifiedBy, DateTime? created,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrEmpty(createdBy) && string.IsNullOrEmpty(modifiedBy)
+            && (created is null || created <= DateTime.MinValue))
+        {
+            return;
+        }
+        try
+        {
+            var blob = GetContainerClient(containerName).GetBlobClient(blobPath);
+            var props = await blob.GetPropertiesAsync(cancellationToken: cancellationToken).ConfigureAwait(false);
+            var metadata = new Dictionary<string, string>(props.Value.Metadata, StringComparer.OrdinalIgnoreCase);
+            if (!string.IsNullOrEmpty(createdBy))
+            {
+                metadata[BlobMetadataKeys.OriginalCreatedBy] = createdBy;
+            }
+            if (!string.IsNullOrEmpty(modifiedBy))
+            {
+                metadata[BlobMetadataKeys.OriginalModifiedBy] = modifiedBy;
+            }
+            if (created is not null && created > DateTime.MinValue)
+            {
+                metadata[BlobMetadataKeys.OriginalCreatedUtc] = created.Value.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture);
+            }
+            await blob.SetMetadataAsync(metadata, cancellationToken: cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "Best-effort: failed to stamp original authorship onto archive blob '{Container}/{Path}'. Continuing.", containerName, blobPath);
+        }
     }
 
     private async Task VerifyBlobAsync(string containerName, string blobPath, long expectedSize, string expectedMd5Base64, CancellationToken cancellationToken)

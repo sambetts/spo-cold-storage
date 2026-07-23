@@ -98,11 +98,15 @@ public interface ISourceStore
     /// Writes the placeholder pointer that replaces the archived item, returning its location.
     /// <paramref name="userFacingUrl"/> optionally overrides the URL embedded in the pointer
     /// (e.g. an app download route) instead of the raw cold-storage URL.
+    /// <paramref name="stampMetadataColumns"/> (default false) additionally copies the original
+    /// authorship onto visible "Original *" columns on the pointer's container; when false the
+    /// pointer is left as just the shortcut file.
     /// </summary>
     Task<string> WritePointerAsync(
         SourceItemRef item,
         PlaceholderFileMetadata pointer,
         string? userFacingUrl = null,
+        bool stampMetadataColumns = false,
         CancellationToken cancellationToken = default);
 
     /// <summary>Reads + parses the placeholder pointer at <paramref name="pointer"/>. Null if absent/corrupt.</summary>

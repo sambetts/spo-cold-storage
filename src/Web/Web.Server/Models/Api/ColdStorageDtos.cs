@@ -18,6 +18,16 @@ public class StartMigrationRequest
 
     public bool Recursive { get; set; }
 
+    /// <summary>
+    /// When true, the migrator also copies the original authorship (Created By /
+    /// Modified By / Created / Modified) onto visible "Original *" columns on the
+    /// placeholder's library. Default false leaves the placeholder as just the
+    /// <c>.url</c> file; the original metadata is preserved in cold storage either
+    /// way. These are additive copy columns — SharePoint won't let the placeholder's
+    /// own Author/Modified fields be back-dated to the source values.
+    /// </summary>
+    public bool CopyMetadataColumns { get; set; }
+
     /// <summary>Optional processing priority (issue #16); higher is more urgent. Default 0.</summary>
     public int Priority { get; set; }
 

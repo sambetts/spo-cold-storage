@@ -251,6 +251,7 @@ public sealed class ColdStorageMessageProcessor(Config config, ILogger logger, I
                 SourceCreatedUtc = file.CreatedDate,
                 SourceSizeHint = file.FileSize,
                 RequestedByUpn = envelope.RequestedByUpn,
+                CopyMetadataColumns = envelope.CopyMetadataColumns,
                 DriveId = file.DriveId,
                 GraphItemId = file.GraphItemId,
             };

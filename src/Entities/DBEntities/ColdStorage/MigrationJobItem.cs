@@ -28,6 +28,16 @@ public class MigrationJobItem
     [Column("recursive")]
     public bool Recursive { get; set; }
 
+    /// <summary>
+    /// Migrate-only: whether the original authorship should be copied onto visible
+    /// "Original *" columns on the placeholder's library. Persisted so a reconciler
+    /// re-drive / resume rebuilds the same intent from the item. Default false =
+    /// leave the placeholder as just the <c>.url</c> file (metadata still preserved
+    /// in cold storage).
+    /// </summary>
+    [Column("copy_metadata_columns")]
+    public bool CopyMetadataColumns { get; set; }
+
     [Required]
     [MaxLength(2048)]
     [Column("sp_site_url")]

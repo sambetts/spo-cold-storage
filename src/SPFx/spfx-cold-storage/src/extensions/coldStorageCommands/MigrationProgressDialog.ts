@@ -32,6 +32,7 @@ import { formatNumber, isTerminal } from '../../common/statusFormat';
 import {
   DialogPhase,
   IConfirmRequest,
+  IConfirmResult,
   IDialogViewHandlers,
   IDialogViewState,
   ITrackedJob,
@@ -58,7 +59,7 @@ export class MigrationProgressDialog {
   private errorMessage?: string;
   private retryHandler?: () => void;
   private confirmRequest?: IConfirmRequest;
-  private confirmHandler?: () => void;
+  private confirmHandler?: (result: IConfirmResult) => void;
   private refreshLibraryOnClose = false;
   private jobs: ITrackedJob[] = [];
   private workerHealth?: IWorkerHealth;
@@ -99,7 +100,7 @@ export class MigrationProgressDialog {
    * confirm button, which invokes {@link onConfirm}. Cancelling closes the
    * dialog without touching the server.
    */
-  public confirm(request: IConfirmRequest, onConfirm: () => void): void {
+  public confirm(request: IConfirmRequest, onConfirm: (result: IConfirmResult) => void): void {
     if (this.closed) return;
     this.confirmRequest = request;
     this.confirmHandler = onConfirm;
@@ -182,7 +183,7 @@ export class MigrationProgressDialog {
       onToggleMaximise: () => { this.maximised = !this.maximised; this.render(); },
       onClose: () => this.userClose(),
       onRetry: () => this.handleRetry(),
-      onConfirm: () => this.handleConfirm(),
+      onConfirm: (result) => this.handleConfirm(result),
       onCancel: () => this.close(),
       onToggleFolder: (nsKey) => this.toggleFolder(nsKey),
       onToggleAllFolders: (nsKeys, expand) => this.toggleAllFolders(nsKeys, expand),
@@ -212,14 +213,14 @@ export class MigrationProgressDialog {
     retry?.();
   }
 
-  private handleConfirm(): void {
+  private handleConfirm(result: IConfirmResult): void {
     const submit = this.confirmHandler;
     this.confirmHandler = undefined;
     this.confirmRequest = undefined;
     this.phase = 'submitting';
     this.statusMessage = this.operation === 'Restore' ? 'Submitting restore…' : 'Submitting migration…';
     this.render();
-    submit?.();
+    submit?.(result);
   }
 
   /**

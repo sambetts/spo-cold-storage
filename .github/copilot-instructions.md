@@ -58,7 +58,7 @@ legacy indexer/snapshot code, so a failing test now is genuinely yours.
 
 ```
 SPFx command set (site-owner only)  ──AadHttpClient──►  Web/Web.Server (API)
-    │                                       │  SiteOwnerAuthorizationService (CSOM AssociatedOwnerGroup)
+    │                                       │  SiteContributorAuthorizationService (CSOM effective permissions)
     │                                       │  ContainerAccessService (per-container ACLs)
     │                                       ▼  persist job.SubmissionRequestJson → 202 (fast)
     │                       MigrationExpansionBackgroundService → batched IColdStorageBusPublisher

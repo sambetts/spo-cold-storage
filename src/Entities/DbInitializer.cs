@@ -153,6 +153,7 @@ BEGIN
         job_id UNIQUEIDENTIFIER NOT NULL,
         item_kind INT NOT NULL,
         recursive BIT NOT NULL CONSTRAINT DF_items_recursive DEFAULT(0),
+        copy_metadata_columns BIT NOT NULL CONSTRAINT DF_items_copymeta DEFAULT(0),
         sp_site_url NVARCHAR(2048) NOT NULL,
         sp_web_url NVARCHAR(2048) NOT NULL,
         sp_server_relative_url NVARCHAR(2048) NOT NULL,
@@ -232,6 +233,9 @@ IF COL_LENGTH('dbo.migration_job_items', 'next_retry_at') IS NULL
 
 IF COL_LENGTH('dbo.migration_job_items', 'last_retry_after_seconds') IS NULL
     ALTER TABLE dbo.migration_job_items ADD last_retry_after_seconds INT NULL;
+
+IF COL_LENGTH('dbo.migration_job_items', 'copy_metadata_columns') IS NULL
+    ALTER TABLE dbo.migration_job_items ADD copy_metadata_columns BIT NOT NULL CONSTRAINT DF_items_copymeta DEFAULT(0);
 ";
 
         const string addColdStorageLogColumnsSql = @"

@@ -85,7 +85,7 @@ public class Program
             options.UseSqlServer(config.ConnectionStrings.SQLConnectionString));
 
         // Cold-storage services backing the new SPFx-facing API surface.
-        builder.Services.AddScoped<ISiteOwnerAuthorizationService, SiteOwnerAuthorizationService>();
+        builder.Services.AddScoped<ISiteContributorAuthorizationService, SiteContributorAuthorizationService>();
         builder.Services.AddScoped<IContainerAccessService, ContainerAccessService>();
         builder.Services.AddScoped<ISharePointFolderExpansionService, SharePointFolderExpansionService>();
         builder.Services.AddScoped<IColdStorageAdminAuthorizationService, ColdStorageAdminAuthorizationService>();

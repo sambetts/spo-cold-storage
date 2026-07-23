@@ -258,7 +258,7 @@ public sealed class MigratePipeline
         try
         {
             var metadata = BuildPlaceholderMetadata(req, size, md5Base64, blobUrl, originalCreatedBy, originalModifiedBy, originalCreated, originalModified);
-            var placeholderPath = await _source.WritePointerAsync(req.Source, metadata, BuildUserFacingUrl(req.ItemId), cancellationToken).ConfigureAwait(false);
+            var placeholderPath = await _source.WritePointerAsync(req.Source, metadata, BuildUserFacingUrl(req.ItemId), req.CopyMetadataColumns, cancellationToken).ConfigureAwait(false);
             await _statusWriter.RecordPlaceholderCreatedAsync(req.ItemId, placeholderPath, cancellationToken).ConfigureAwait(false);
             return true;
         }
@@ -307,7 +307,7 @@ public sealed class MigratePipeline
 
             var metadata = BuildPlaceholderMetadata(req, item.FileSize, item.ContentMd5Base64 ?? string.Empty, item.BlobUrl ?? _cold.GetObjectUrl(coldKey),
                 item.OriginalCreatedBy, item.OriginalModifiedBy, item.OriginalCreated, item.SourceLastModified);
-            var placeholderPath = await _source.WritePointerAsync(req.Source, metadata, BuildUserFacingUrl(req.ItemId), cancellationToken).ConfigureAwait(false);
+            var placeholderPath = await _source.WritePointerAsync(req.Source, metadata, BuildUserFacingUrl(req.ItemId), req.CopyMetadataColumns, cancellationToken).ConfigureAwait(false);
             await _statusWriter.RecordPlaceholderCreatedAsync(req.ItemId, placeholderPath, cancellationToken).ConfigureAwait(false);
             return true;
         }

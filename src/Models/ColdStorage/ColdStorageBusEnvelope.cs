@@ -48,6 +48,16 @@ public class ColdStorageBusEnvelope
     public bool Recursive { get; set; }
 
     /// <summary>
+    /// Migrate-only: when true, the migrator also copies the captured original
+    /// authorship (Created By / Modified By / Created / Modified) onto visible
+    /// "Original *" columns on the placeholder's library. When false (default),
+    /// the placeholder is left as just the <c>.url</c> file. Either way the
+    /// original metadata is preserved in cold storage (blob metadata + the
+    /// placeholder's <c>[ColdStorage]</c> section), so restore is unaffected.
+    /// </summary>
+    public bool CopyMetadataColumns { get; set; }
+
+    /// <summary>
     /// File information for migrate operations. Null for restore operations.
     /// </summary>
     public BaseSharePointFileInfo? File { get; set; }

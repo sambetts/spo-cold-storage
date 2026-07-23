@@ -9,25 +9,103 @@
  */
 import { useEffect, useState } from "react";
 import { useParams } from "react-router-dom";
+import { BrowserAuthError } from "@azure/msal-browser";
 import { ApiError, useApi } from "../../api/client";
 import { DownloadUrl } from "../../api/types";
 
 type Phase = "preparing" | "ready" | "error";
+
+interface ErrorInfo {
+  message: string;
+  detail: string | null;
+  canRetry: boolean;
+}
+
+// MSAL raises these BrowserAuthError codes when it can't open the interactive
+// sign-in pop-up used to (re)confirm the user before minting a download token —
+// almost always because the browser's pop-up blocker ate the window. That is NOT
+// a network failure, so it gets its own actionable message.
+const POPUP_BLOCKED_CODES = new Set(["popup_window_error", "empty_window_error", "popup_window_timeout"]);
+
+function classifyError(err: unknown): ErrorInfo {
+  if (err instanceof ApiError) {
+    if (err.status === 401 || err.status === 403) {
+      return {
+        message: "You don't have permission to download this file from cold storage.",
+        detail: err.detail ?? err.message,
+        canRetry: false,
+      };
+    }
+    if (err.status === 404) {
+      return {
+        message:
+          "We couldn't find a cold-storage record for that item. It may have been removed or never finished migrating.",
+        detail: err.detail ?? err.message,
+        canRetry: false,
+      };
+    }
+    if (err.status === 409) {
+      return {
+        message: "This item isn't ready to download yet — its migration may still be in progress. Try again shortly.",
+        detail: err.detail ?? err.message,
+        canRetry: true,
+      };
+    }
+    return {
+      message: `Something went wrong preparing your download (HTTP ${err.status}). Please try again.`,
+      detail: err.detail ?? err.message,
+      canRetry: true,
+    };
+  }
+  if (err instanceof BrowserAuthError) {
+    if (POPUP_BLOCKED_CODES.has(err.errorCode)) {
+      return {
+        message:
+          "We need to confirm your sign-in before preparing this download, but your browser blocked the pop-up window. Please allow pop-ups for this site, then try again.",
+        detail: err.message,
+        canRetry: true,
+      };
+    }
+    if (err.errorCode === "user_cancelled") {
+      return {
+        message: "Sign-in was cancelled, so we couldn't prepare your download. Try again when you're ready.",
+        detail: err.message,
+        canRetry: true,
+      };
+    }
+    return {
+      message: "We couldn't confirm your sign-in to prepare this download. Please try again.",
+      detail: err.message,
+      canRetry: true,
+    };
+  }
+  return {
+    message:
+      "We couldn't reach the cold-storage service — this is usually a temporary connection hiccup. Check your connection and try again.",
+    detail: err instanceof Error ? err.message : String(err),
+    canRetry: true,
+  };
+}
 
 export function ColdStorageDownload() {
   const { itemId } = useParams<{ itemId: string }>();
   const api = useApi();
   const [phase, setPhase] = useState<Phase>("preparing");
   const [message, setMessage] = useState<string>("Preparing your download…");
-  const [errorDetail, setErrorDetail] = useState<string | null>(null);
+  const [error, setError] = useState<ErrorInfo | null>(null);
+  const [retryKey, setRetryKey] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
 
     const run = async (): Promise<void> => {
+      setPhase("preparing");
+      setMessage("Preparing your download…");
+      setError(null);
+
       if (!itemId) {
         setPhase("error");
-        setMessage("Missing item id in download URL.");
+        setMessage("This download link is incomplete — it's missing an item id.");
         return;
       }
 
@@ -39,22 +117,10 @@ export function ColdStorageDownload() {
         window.location.replace(payload.url);
       } catch (err) {
         if (cancelled) return;
+        const info = classifyError(err);
         setPhase("error");
-        if (err instanceof ApiError) {
-          if (err.status === 401 || err.status === 403) {
-            setMessage("You do not have permission to download this file from cold storage.");
-          } else if (err.status === 404) {
-            setMessage("No cold-storage record found for that item. It may have been removed or never finished migrating.");
-          } else if (err.status === 409) {
-            setMessage("This item is not yet ready for download — its migration may still be in progress.");
-          } else {
-            setMessage(`Could not prepare download (HTTP ${err.status}).`);
-          }
-          setErrorDetail(err.detail ?? err.message);
-        } else {
-          setMessage("Network error contacting the cold-storage API.");
-          setErrorDetail(err instanceof Error ? err.message : String(err));
-        }
+        setMessage(info.message);
+        setError(info);
       }
     };
 
@@ -62,7 +128,7 @@ export function ColdStorageDownload() {
     return () => {
       cancelled = true;
     };
-  }, [itemId, api]);
+  }, [itemId, api, retryKey]);
 
   return (
     <div
@@ -90,7 +156,25 @@ export function ColdStorageDownload() {
           }}
         />
       )}
-      {phase === "error" && errorDetail && (
+      {phase === "error" && error?.canRetry && (
+        <button
+          type="button"
+          onClick={() => setRetryKey((k) => k + 1)}
+          style={{
+            marginTop: 4,
+            padding: "6px 16px",
+            border: "none",
+            borderRadius: 4,
+            background: "#0078d4",
+            color: "#fff",
+            fontSize: 14,
+            cursor: "pointer",
+          }}
+        >
+          Try again
+        </button>
+      )}
+      {phase === "error" && error?.detail && (
         <details style={{ marginTop: 12 }}>
           <summary style={{ cursor: "pointer", color: "#605e5c", fontSize: 12 }}>Technical details</summary>
           <pre
@@ -105,7 +189,7 @@ export function ColdStorageDownload() {
               wordBreak: "break-all",
             }}
           >
-            {errorDetail}
+            {error.detail}
           </pre>
         </details>
       )}

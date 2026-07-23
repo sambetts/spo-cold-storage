@@ -24,6 +24,20 @@ export interface IConfirmRequest {
   message: string;
   confirmLabel: string;
   items: IConfirmItem[];
+  /**
+   * Optional opt-in checkbox shown on the confirmation screen (migrate only).
+   * When present, the user's choice is returned via {@link IConfirmResult}.
+   */
+  metadataOption?: {
+    label: string;
+    note: string;
+    defaultChecked: boolean;
+  };
+}
+
+/** What the user chose on the confirmation screen, passed to the confirm handler. */
+export interface IConfirmResult {
+  copyMetadataColumns: boolean;
 }
 
 /** A job the dialog is tracking (accepted for polling, or listed in browse mode). */
@@ -58,7 +72,7 @@ export interface IDialogViewHandlers {
   onToggleMaximise(): void;
   onClose(): void;
   onRetry(): void;
-  onConfirm(): void;
+  onConfirm(result: IConfirmResult): void;
   onCancel(): void;
   onToggleFolder(nsKey: string): void;
   onToggleAllFolders(nsKeys: string[], expand: boolean): void;
@@ -586,11 +600,12 @@ const WorkerBannerView: React.FC<{ health: IWorkerHealth; jobs: ITrackedJob[] }>
 };
 
 const ConfirmView: React.FC<{
-  operation: DialogMode; confirm: IConfirmRequest; onConfirm: () => void; onCancel: () => void;
+  operation: DialogMode; confirm: IConfirmRequest; onConfirm: (result: IConfirmResult) => void; onCancel: () => void;
 }> = ({ operation, confirm, onConfirm, onCancel }) => {
   const MAX_SHOWN = 100;
   const shown = confirm.items.slice(0, MAX_SHOWN);
   const overflow = confirm.items.length - shown.length;
+  const [copyMetadata, setCopyMetadata] = React.useState<boolean>(confirm.metadataOption?.defaultChecked ?? false);
   const primary: React.CSSProperties = {
     background: operation === 'Migrate' ? '#0078d4' : '#107c10', color: '#fff', border: 'none',
     padding: '8px 18px', borderRadius: '2px', cursor: 'pointer', fontSize: '14px', fontWeight: 600,
@@ -621,8 +636,22 @@ const ConfirmView: React.FC<{
       {overflow > 0 && (
         <div style={{ fontSize: '12px', color: '#605e5c', marginTop: '6px' }}>…and {overflow} more</div>
       )}
+      {confirm.metadataOption && (
+        <label style={{ display: 'flex', gap: '8px', alignItems: 'flex-start', marginTop: '14px', cursor: 'pointer' }}>
+          <input
+            type="checkbox"
+            checked={copyMetadata}
+            onChange={e => setCopyMetadata(e.target.checked)}
+            style={{ marginTop: '3px', flex: '0 0 auto' }}
+          />
+          <span>
+            <span style={{ fontSize: '13px', fontWeight: 600, color: '#323130' }}>{confirm.metadataOption.label}</span>
+            <span style={{ display: 'block', fontSize: '12px', color: '#605e5c', marginTop: '2px', lineHeight: 1.4 }}>{confirm.metadataOption.note}</span>
+          </span>
+        </label>
+      )}
       <div style={{ display: 'flex', gap: '8px', marginTop: '16px' }}>
-        <button type="button" onClick={onConfirm} style={primary}>{confirm.confirmLabel}</button>
+        <button type="button" onClick={() => onConfirm({ copyMetadataColumns: copyMetadata })} style={primary}>{confirm.confirmLabel}</button>
         <button type="button" onClick={onCancel} style={secondary}>Cancel</button>
       </div>
     </div>

@@ -14,7 +14,7 @@ This is enforced in `ColdStorageMigratorPipeline.ProcessAsync` by the **strict o
 
 ## 1b. Product charter (PM) — re-review every change against this
 
-**What it is:** SPO Cold Storage is a first-of-its-kind, **open-source**, *self-service* archival product. It agilises **end users** (SharePoint site owners), not admins, to offload and archive **individual files and folders** into Azure Blob cold storage — each source replaced with a `.url` placeholder — plus automated rules. Restore is the inverse.
+**What it is:** SPO Cold Storage is a first-of-its-kind, **open-source**, *self-service* archival product. It agilises **end users** (SharePoint site owners and contributors), not admins, to offload and archive **individual files and folders** into Azure Blob cold storage — each source replaced with a `.url` placeholder — plus automated rules. Restore is the inverse.
 
 **Three product pillars — every PR must protect all three:**
 
@@ -66,7 +66,7 @@ src/
 │
 ├── Web/Web.Server/                ← ASP.NET Core API host
 │   ├── Controllers/               ← Migrations, Restores, Jobs, Containers, Placeholders
-│   ├── Services/                  ← SiteOwnerAuth, ContainerAccess, BusPublisher
+│   ├── Services/                  ← SiteContributorAuth, ContainerAccess, BusPublisher
 │   ├── Authorization/             ← CallerIdentity (ClaimsPrincipal extensions)
 │   └── Models/Api/                ← REST DTOs (notice: namespace Web.Models.Api)
 ├── Web/web.client/                ← React + Vite SPA (separate npm project)
@@ -118,7 +118,7 @@ dotnet test  Migration.Engine.Tests/Migration.Engine.Tests.csproj --filter "Full
 SPFx command set
       │  AadHttpClient
       ▼
-ASP.NET Core Web.Server  ──► SiteOwnerAuthorizationService (CSOM AssociatedOwnerGroup)
+ASP.NET Core Web.Server  ──► SiteContributorAuthorizationService (CSOM effective permissions: EditListItems)
                           ──► ContainerAccessService (per-container ACLs)
                           ──► persist job.SubmissionRequestJson → 202 (fast)
                               │
