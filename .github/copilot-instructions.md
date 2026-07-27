@@ -11,9 +11,11 @@ Deeper references (keep in sync when you change behaviour):
 - `CONTRIBUTING.md` — human-facing contributor guide.
 - `DATABASE_STRUCTURE.md` — SQL schema, tables, relationships.
 - `deploy/README.md` — deployment parameter/phase reference.
+- `docs/TECHNICAL.md` — technical overview (architecture, stack, build/test, deploy).
 
-> Note: the top-level `README.md` predates this work and still says ".NET 6" and
-> describes only the original indexer/migrator. The current stack is **.NET 10**.
+> Note: the top-level `README.md` is now a **non-technical product pitch** (with
+> screenshots from `docs/screenshots/`) aimed at business/non-developer viewers; all
+> developer-facing detail lives in `docs/TECHNICAL.md`. The current stack is **.NET 10**.
 
 ## The one invariant you must never break
 
