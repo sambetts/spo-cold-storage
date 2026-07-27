@@ -158,6 +158,9 @@ export interface SavingsReport {
   azurePriceIsLive: boolean;
   azureRegion?: string | null;
   azureRetailSku?: string | null;
+  azurePriceSourceUrl: string;
+  spoPriceSourceUrl: string;
+  azurePriceLiveQueryUrl?: string | null;
 }
 
 /** GET /api/placeholders/download/{itemId} — short-lived download URL. */

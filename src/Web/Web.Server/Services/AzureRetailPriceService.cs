@@ -71,9 +71,7 @@ public sealed class AzureRetailPriceService(
     private async Task<decimal?> FetchAsync(string region, string skuName, string currency, CancellationToken cancellationToken)
     {
         // OData filter narrows the response to the blob-storage "Data Stored" rows for this SKU + region.
-        var filter = "serviceName eq 'Storage' and priceType eq 'Consumption' and productName eq 'Blob Storage'"
-                     + $" and armRegionName eq '{EscapeODataLiteral(region)}' and skuName eq '{EscapeODataLiteral(skuName)}'";
-        var url = $"api/retail/prices?currencyCode='{Uri.EscapeDataString(currency)}'&$filter={Uri.EscapeDataString(filter)}";
+        var url = $"{PricesPath}?currencyCode='{Uri.EscapeDataString(currency)}'&$filter={Uri.EscapeDataString(BuildFilter(region, skuName))}";
 
         using var response = await httpClient.GetAsync(url, cancellationToken).ConfigureAwait(false);
         response.EnsureSuccessStatusCode();
@@ -106,6 +104,25 @@ public sealed class AzureRetailPriceService(
 
     // OData string literals escape a single quote by doubling it.
     private static string EscapeODataLiteral(string value) => value.Replace("'", "''", StringComparison.Ordinal);
+
+    // Kept in sync with the BaseAddress configured in Program.cs.
+    private const string PricesBaseUrl = "https://prices.azure.com/";
+    private const string PricesPath = "api/retail/prices";
+
+    private static string BuildFilter(string region, string skuName) =>
+        "serviceName eq 'Storage' and priceType eq 'Consumption' and productName eq 'Blob Storage'"
+        + $" and armRegionName eq '{EscapeODataLiteral(region)}' and skuName eq '{EscapeODataLiteral(skuName)}'";
+
+    /// <summary>
+    /// The absolute Azure Retail Prices API query URL for a region + SKU + currency — the exact,
+    /// publicly verifiable source of a live price. Surfaced by the savings dashboard so an admin
+    /// can open it and confirm the figure the estimate is based on (issue #8, accountability).
+    /// </summary>
+    public static string BuildQueryUrl(string region, string skuName, string currency)
+    {
+        var c = string.IsNullOrWhiteSpace(currency) ? "USD" : currency.Trim().ToUpperInvariant();
+        return $"{PricesBaseUrl}{PricesPath}?currencyCode='{Uri.EscapeDataString(c)}'&$filter={Uri.EscapeDataString(BuildFilter(region, skuName))}";
+    }
 
     private sealed record PriceCacheEntry(decimal? Price);
 

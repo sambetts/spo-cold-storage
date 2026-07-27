@@ -23,6 +23,16 @@ function Kpi({ label, value, accent }: { label: string; value: string; accent?: 
   );
 }
 
+/** A source/documentation link backing a pricing claim. Falls back to plain text when no URL. */
+function Src({ href, children }: { href?: string | null; children: string }) {
+  if (!href) return <>{children}</>;
+  return (
+    <a href={href} target="_blank" rel="noopener noreferrer" style={{ color: "#0f6cbd", textDecoration: "underline" }}>
+      {children}
+    </a>
+  );
+}
+
 /**
  * /savings — cost & savings KPIs. Fetches GET /api/reports/savings (admin-only)
  * and shows reclaimed GB, estimated Azure cost and net monthly savings.
@@ -88,11 +98,24 @@ export function SavingsDashboard() {
             <Kpi label="Reclaimed SPO value / month" value={money(report.estimatedSpoValuePerMonth, report.currency)} />
           </div>
           <div style={{ marginTop: 16, fontSize: 12, color: "#605e5c" }}>
-            Based on {money(report.azurePricePerGbMonth, report.currency)}/GB Azure vs{" "}
-            {money(report.spoPricePerGbMonth, report.currency)}/GB SharePoint.{" "}
-            {report.azurePriceIsLive
-              ? `Live Azure price for ${report.azureRegion} (${report.azureRetailSku}).`
-              : "Azure price from configuration."}
+            Based on {money(report.azurePricePerGbMonth, report.currency)}/GB{" "}
+            <Src href={report.azurePriceSourceUrl}>Azure</Src> vs{" "}
+            {money(report.spoPricePerGbMonth, report.currency)}/GB{" "}
+            <Src href={report.spoPriceSourceUrl}>SharePoint</Src>.{" "}
+            {report.azurePriceIsLive ? (
+              <>
+                Live Azure price for {report.azureRegion} ({report.azureRetailSku})
+                {report.azurePriceLiveQueryUrl && (
+                  <>
+                    {" "}
+                    · <Src href={report.azurePriceLiveQueryUrl}>verify</Src>
+                  </>
+                )}
+                .
+              </>
+            ) : (
+              "Azure price from configuration."
+            )}
           </div>
         </>
       )}

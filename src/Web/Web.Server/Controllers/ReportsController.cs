@@ -99,8 +99,17 @@ public class ReportsController(
             AzurePriceIsLive = azurePriceIsLive,
             AzureRegion = azurePriceIsLive ? region : null,
             AzureRetailSku = azurePriceIsLive ? retailSku : null,
+            AzurePriceSourceUrl = AzurePriceDocUrl,
+            SpoPriceSourceUrl = SpoPriceDocUrl,
+            AzurePriceLiveQueryUrl = azurePriceIsLive
+                ? AzureRetailPriceService.BuildQueryUrl(region, retailSku, currency)
+                : null,
         };
     }
+
+    // Documentation links backing the pricing claims shown on the savings dashboard.
+    private const string AzurePriceDocUrl = "https://azure.microsoft.com/en-us/pricing/details/storage/blobs/";
+    private const string SpoPriceDocUrl = "https://learn.microsoft.com/en-us/office365/servicedescriptions/sharepoint-online-service-description/sharepoint-online-limits";
 
     private static string Normalize(string? raw, string fallback)
         => string.IsNullOrWhiteSpace(raw) ? fallback : raw.Trim();

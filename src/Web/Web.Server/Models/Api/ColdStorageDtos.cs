@@ -359,6 +359,16 @@ public class SavingsReportResponse
 
     /// <summary>Azure retail SKU the live price was fetched for, e.g. "Hot GRS" (null when not live).</summary>
     public string? AzureRetailSku { get; set; }
+
+    /// <summary>Documentation link backing the Azure per-GB price claim (Azure Blob Storage pricing).</summary>
+    public string AzurePriceSourceUrl { get; set; } = string.Empty;
+
+    /// <summary>Documentation link backing the SharePoint per-GB value claim (SharePoint storage limits).</summary>
+    public string SpoPriceSourceUrl { get; set; } = string.Empty;
+
+    /// <summary>When live, the exact Azure Retail Prices API query URL the figure came from, so it can
+    /// be independently verified; null when the configured fallback price was used.</summary>
+    public string? AzurePriceLiveQueryUrl { get; set; }
 }
 
 /// <summary>
