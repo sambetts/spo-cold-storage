@@ -73,14 +73,24 @@ export function formatCountdown(value: string | null | undefined): string {
   return `in ${days}d`;
 }
 
+/** Grace window after an ETA passes before we call the estimate blown rather than imminent. */
+const ETA_OVERDUE_GRACE_SECONDS = 90;
+
 /**
  * ETA label combining the clock time and a countdown, e.g. "~14:32 (in 12m)".
- * Returns "—" for missing/invalid values.
+ * Returns "—" for missing/invalid values. An ETA that has already passed is
+ * stale/optimistic — throughput slowed (e.g. throttling) or live refresh stopped,
+ * freezing the value — so we never show a misleading past clock time labelled "(now)":
+ * a just-passed ETA reads "any moment now"; a long-passed one "taking longer than expected".
  */
 export function formatEta(value: string | null | undefined): string {
   if (!value) return "—";
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "—";
+  const secondsUntil = Math.round((date.getTime() - Date.now()) / 1000);
+  if (secondsUntil <= 0) {
+    return secondsUntil > -ETA_OVERDUE_GRACE_SECONDS ? "any moment now" : "taking longer than expected";
+  }
   const clock = new Intl.DateTimeFormat(undefined, { hour: "2-digit", minute: "2-digit" }).format(date);
   return `~${clock} (${formatCountdown(value)})`;
 }
