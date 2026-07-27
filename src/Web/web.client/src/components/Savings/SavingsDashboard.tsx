@@ -89,7 +89,10 @@ export function SavingsDashboard() {
           </div>
           <div style={{ marginTop: 16, fontSize: 12, color: "#605e5c" }}>
             Based on {money(report.azurePricePerGbMonth, report.currency)}/GB Azure vs{" "}
-            {money(report.spoPricePerGbMonth, report.currency)}/GB SharePoint.
+            {money(report.spoPricePerGbMonth, report.currency)}/GB SharePoint.{" "}
+            {report.azurePriceIsLive
+              ? `Live Azure price for ${report.azureRegion} (${report.azureRetailSku}).`
+              : "Azure price from configuration."}
           </div>
         </>
       )}

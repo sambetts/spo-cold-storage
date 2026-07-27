@@ -119,7 +119,7 @@ reporting, and configuration. After signing in, users see these areas:
 | **File Search** | Full-text / metadata search across archived content to find a specific file fast. |
 | **Logs** | The step-by-step processing history for archive and restore jobs — successes and errors — useful for troubleshooting. |
 | **Targets** | (Admin) Configure which sites / document libraries are candidates for scheduled archiving. |
-| **Savings** | A cost & savings dashboard showing how much storage has been moved and the estimated money saved. |
+| **Savings** | A cost & savings dashboard showing how much storage has been moved and the estimated money saved. Figures are shown in a configurable currency and, when a region is configured, use the **live Azure storage price** for your account's region/tier (fetched from the public Azure Retail Prices API, with a fallback to a configured price). |
 
 > **Container access:** the portal calls Azure Storage directly on the user's behalf.
 > Users must be granted read access (via Entra ID group/user) to a container to browse
@@ -169,7 +169,7 @@ Administrators get extra tools, mostly in the web portal and via admin endpoints
 | --- | --- |
 | **Migration targets** | Define which sites/libraries are scanned for scheduled archiving. |
 | **Processing queue** | See what's queued and in-flight, **re-prioritise** urgent items, and **cancel** items that shouldn't run. |
-| **Savings dashboard** | Track volume archived and estimated cost savings over time. |
+| **Savings dashboard** | Track volume archived and estimated cost savings over time, in a configurable currency and (optionally) at live Azure prices for your region. |
 | **Reconcile** | Detect and report **orphaned** cold-storage blobs (data in storage with no matching SharePoint placeholder) so storage stays clean and accurate. |
 | **Force-restore (break-glass)** | Restore a file straight from a blob back into a library in emergencies, even when the normal placeholder-driven path isn't available. |
 | **Bulk / folder restore** | Kick off large restores across a folder or a batch of items with progress tracking. |

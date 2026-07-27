@@ -155,6 +155,9 @@ export interface SavingsReport {
   estimatedSpoValuePerMonth: number;
   estimatedNetSavingsPerMonth: number;
   currency: string;
+  azurePriceIsLive: boolean;
+  azureRegion?: string | null;
+  azureRetailSku?: string | null;
 }
 
 /** GET /api/placeholders/download/{itemId} — short-lived download URL. */

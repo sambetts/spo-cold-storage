@@ -813,6 +813,18 @@ function Set-AppSettings {
     $sqlAdminLogin  = $global:Params.sql.entraAdminLogin
     $sqlAdminType   = if ($global:Params.sql.entraAdminIsGroup) { '1' } else { '0' }
 
+    # Savings dashboard (issue #8): report currency + optional live Azure pricing.
+    # ColdStorageAzureRegion defaults to the deploy location so the dashboard shows the
+    # live Azure storage price (per the account's tier/redundancy SKU + currency) fetched
+    # from the public Azure Retail Prices API; the app falls back to the configured
+    # ColdStorageAzurePricePerGbMonth if the API is unreachable. Override any of these via
+    # an optional top-level "savings" block in params.json (set azureRegion: "" to disable
+    # live pricing). Default SKU matches the shipped storage account (StorageV2/Hot/GRS).
+    $savings = if ($global:Params.PSObject.Properties['savings']) { $global:Params.savings } else { $null }
+    $savingsCurrency = if ($savings -and $savings.PSObject.Properties['currency'] -and $savings.currency) { [string]$savings.currency } else { 'USD' }
+    $savingsSku      = if ($savings -and $savings.PSObject.Properties['azureRetailSku'] -and $savings.azureRetailSku) { [string]$savings.azureRetailSku } else { 'Hot GRS' }
+    $savingsRegion   = if ($savings -and $savings.PSObject.Properties['azureRegion']) { [string]$savings.azureRegion } else { [string]$global:Params.location }
+
     # Double-underscore convention works on both Windows and Linux.
     $settings = [ordered]@{
         'WEBSITE_LOAD_USER_PROFILE'             = '1'
@@ -849,6 +861,10 @@ function Set-AppSettings {
         'ColdStorage__InitialAdminPrincipalId'             = $sqlAdminOid
         'ColdStorage__InitialAdminPrincipalType'           = $sqlAdminType
         'ColdStorage__InitialAdminPrincipalDisplay'        = $sqlAdminLogin
+        # Savings dashboard: currency + live Azure pricing (see computation above).
+        'ColdStorageCurrency'                              = $savingsCurrency
+        'ColdStorageAzureRegion'                           = $savingsRegion
+        'ColdStorageAzureRetailSku'                        = $savingsSku
     }
 
     # Write to a temp JSON file and use az's @file syntax — avoids cmd.exe parsing semicolons

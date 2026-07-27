@@ -106,6 +106,19 @@ public class Program
         builder.Services.AddSingleton<Migration.Engine.Migration.IArchiveEligibilityEvaluator, Migration.Engine.Migration.ArchiveEligibilityEvaluator>();
         builder.Services.AddSingleton<IColdStorageBusPublisher, ColdStorageBusPublisher>();
 
+        // Live Azure storage pricing for the savings dashboard (issue #8): a typed
+        // HttpClient against the public Azure Retail Prices API, memoised so a
+        // dashboard refresh doesn't re-hit it. Optional — enabled only when a region
+        // is configured; the ReportsController falls back to the configured price on
+        // any failure, so the short timeout keeps the endpoint responsive.
+        builder.Services.AddMemoryCache();
+        builder.Services.AddHttpClient<IAzureRetailPriceService, AzureRetailPriceService>(client =>
+        {
+            client.BaseAddress = new Uri("https://prices.azure.com/");
+            client.Timeout = TimeSpan.FromSeconds(10);
+            client.DefaultRequestHeaders.UserAgent.ParseAdd("SPOColdStorage/1.0");
+        });
+
         // Async migrate submission: a large-folder submit records the job + returns
         // immediately; this background service expands folders, creates the per-file
         // items and enqueues them off the request thread. Durable via the persisted

@@ -349,6 +349,16 @@ public class SavingsReportResponse
     public decimal EstimatedSpoValuePerMonth { get; set; }
     public decimal EstimatedNetSavingsPerMonth { get; set; }
     public string Currency { get; set; } = "USD";
+
+    /// <summary>True when <see cref="AzurePricePerGbMonth"/> was fetched live from the
+    /// Azure Retail Prices API; false when it's the configured fallback value.</summary>
+    public bool AzurePriceIsLive { get; set; }
+
+    /// <summary>Azure region the live price was fetched for (null when not live).</summary>
+    public string? AzureRegion { get; set; }
+
+    /// <summary>Azure retail SKU the live price was fetched for, e.g. "Hot GRS" (null when not live).</summary>
+    public string? AzureRetailSku { get; set; }
 }
 
 /// <summary>

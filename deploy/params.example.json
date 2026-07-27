@@ -44,6 +44,12 @@
     "maxConcurrentCalls": 5
   },
 
+  "savings": {
+    "_comment": "Optional. Cost-savings KPI dashboard (issue #8). 'currency' is the ISO 4217 code the KPIs are reported in (default USD). Live Azure pricing is fetched from the public Azure Retail Prices API for the deploy 'location' region above, using 'azureRetailSku' (must match your storage account's access tier + redundancy — e.g. 'Hot GRS' (the shipped default: StorageV2/Hot/Standard_GRS), 'Cool LRS', 'Cold LRS'); it falls back to the app's configured ColdStorageAzurePricePerGbMonth if the API is unreachable. Add an 'azureRegion' key to override the region, or set 'azureRegion': '' to disable live pricing. SharePoint has no public regional price API, so the reclaimed-SPO value stays a configured assumption (ColdStorageSpoPricePerGbMonth).",
+    "currency": "USD",
+    "azureRetailSku": "Hot GRS"
+  },
+
   "azureAd": {
     "_comment": "Used by both scripts. If you run deploy-spo.ps1 AadApp phase first, it will create the AAD app and write clientId + servicePrincipalObjectId back here.",
     "clientId": "00000000-0000-0000-0000-000000000000",

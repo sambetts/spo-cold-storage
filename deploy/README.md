@@ -62,6 +62,7 @@ Edit `deploy/params.json` and fill in:
 | `sharePoint.appCatalogUrl` | `https://contoso.sharepoint.com/sites/appcatalog` | Confirm with `Get-PnPTenantAppCatalogUrl` |
 | `sharePoint.targetSiteRelativeUrl` | `/sites/ColdStorage` | Where the SPFx web part installs |
 | `storage.userDataReaders` | `[{ "objectId": "<entra-group-oid>", "type": "Group" }]` | Members get `Storage Blob Data Reader` so the SPA can browse blobs |
+| `savings` *(optional)* | `{ "currency": "USD", "azureRetailSku": "Hot GRS" }` | Savings dashboard currency + live Azure pricing. Region defaults to `location`; the app fetches the live per-GB price from the Azure Retail Prices API (fallback to the configured price). Omit the block to accept the defaults. |
 
 ### 4. Provision the AAD app
 

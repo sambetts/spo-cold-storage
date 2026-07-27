@@ -210,6 +210,39 @@ public class Config(Microsoft.Extensions.Configuration.IConfiguration config) : 
     public string ColdStorageSpoPricePerGbMonth { get; set; } = "0.20";
 
     /// <summary>
+    /// ISO 4217 currency code the savings KPIs are reported in (issue #8), e.g.
+    /// <c>USD</c>, <c>EUR</c>, <c>GBP</c>. Drives both the SPA currency formatting
+    /// and the <c>currencyCode</c> passed to the Azure Retail Prices API when live
+    /// pricing is enabled, so the fetched Azure figure matches the displayed
+    /// currency. Default <c>USD</c>.
+    /// </summary>
+    [ConfigValue(true)]
+    public string ColdStorageCurrency { get; set; } = "USD";
+
+    /// <summary>
+    /// Azure region (ARM region name, e.g. <c>westeurope</c>, <c>eastus</c>) of the
+    /// cold-storage account, used to fetch the live Azure storage price from the
+    /// public Azure Retail Prices API for the savings dashboard (issue #8). When
+    /// <b>empty (default)</b> live pricing is disabled and the dashboard uses the
+    /// configured <see cref="ColdStorageAzurePricePerGbMonth"/>; when set, the live
+    /// price is looked up (region + <see cref="ColdStorageAzureRetailSku"/> +
+    /// <see cref="ColdStorageCurrency"/>) and only falls back to the configured value
+    /// if the lookup fails.
+    /// </summary>
+    [ConfigValue(true)]
+    public string ColdStorageAzureRegion { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Azure Storage retail SKU name priced for live savings (issue #8), matching the
+    /// cold-storage account's access tier + redundancy, e.g. <c>Hot GRS</c>,
+    /// <c>Cool LRS</c>, <c>Cold LRS</c>. Must be a valid Retail Prices API skuName.
+    /// Default <c>Hot GRS</c> (the shipped bicep account: StorageV2, accessTier Hot,
+    /// Standard_GRS). Only used when <see cref="ColdStorageAzureRegion"/> is set.
+    /// </summary>
+    [ConfigValue(true)]
+    public string ColdStorageAzureRetailSku { get; set; } = "Hot GRS";
+
+    /// <summary>
     /// Grace window (hours) a user is given between a pre-archive notice and an
     /// auto-archive actually moving their file (issue #17). 0 (default) disables
     /// pre-archive notices — matching today's user-initiated flow, which needs no
