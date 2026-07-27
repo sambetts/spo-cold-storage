@@ -15,6 +15,44 @@ admins.
 
 ---
 
+## See it in action
+
+**Archive right from the SharePoint toolbar, watch the savings add up.** No admin
+console, no migration project — a site owner selects files or folders and picks
+*Migrate to cold storage*.
+
+<p align="center">
+  <img src="docs/screenshots/spa-savings.png" alt="Savings dashboard: files archived, storage reclaimed, and estimated net monthly saving with live Azure pricing" width="900" />
+</p>
+
+<table>
+  <tr>
+    <td width="50%" valign="top">
+      <img src="docs/screenshots/spfx-migrate-menu.png" alt="Migrate to cold storage in the SharePoint document library command menu" /><br />
+      <sub><b>Built into SharePoint.</b> One click on any file or folder — no separate app to learn.</sub>
+    </td>
+    <td width="50%" valign="top">
+      <img src="docs/screenshots/spfx-migrate-progress.png" alt="Live migration progress with a progress bar, ETA and streaming activity log" /><br />
+      <sub><b>Live progress at scale.</b> Thousands of files, a real-time ETA, and a streaming activity log — copy is verified before the source is ever removed.</sub>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top">
+      <img src="docs/screenshots/spa-transfers-logs.png" alt="Transfers and Logs accountability console showing a filterable per-file lifecycle timeline" /><br />
+      <sub><b>Fully accountable.</b> Every transfer across every site, filterable, with a per-file lifecycle timeline.</sub>
+    </td>
+    <td width="50%" valign="top">
+      <img src="docs/screenshots/spfx-restore-progress.png" alt="Restore from cold storage completed, with the full activity log of the round trip" /><br />
+      <sub><b>Reversible on demand.</b> Restore a file or a whole folder back to its original location — the archive is only removed after the restore is verified.</sub>
+    </td>
+  </tr>
+</table>
+
+> More screens and a step-by-step walkthrough are in the
+> [**User & Admin Guide**](USER_ADMIN_GUIDE.md).
+
+---
+
 ## Product pillars
 
 Every change is reviewed against three pillars (see `AGENTS.md` §1b):
@@ -51,8 +89,8 @@ Every change is reviewed against three pillars (see `AGENTS.md` §1b):
 ```
 
 The `.url` placeholder is an INI-style file that records where the content went;
-opening it routes the user through the web app (auth + ACL check + short-lived
-SAS) to download from cold storage.
+opening it routes the user through the web app (auth + ACL check) to download the
+file, streamed back through the API from cold storage.
 
 ## Features
 

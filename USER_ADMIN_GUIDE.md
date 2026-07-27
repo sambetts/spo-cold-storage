@@ -60,11 +60,32 @@ The system adds a small menu to your SharePoint document libraries and an extra
 
 1. Select one or more files, or a folder, in the document library.
 2. Choose **Migrate to cold storage** from the command menu.
-3. Confirm the action when prompted.
+
+![The SharePoint document library command menu with "Migrate to cold storage" highlighted](docs/screenshots/spfx-migrate-menu.png)
+*The command set adds **Migrate to cold storage**, **Restore from cold storage** and **Cold storage status** to the library toolbar and item menu — visible only to site owners.*
+
+3. Confirm the action when prompted. You can optionally tick **Keep a copy of the
+   original metadata as columns** to record the original author/editor/modified
+   values on the library.
+
+![The Migrate to cold storage confirmation dialog explaining that each item is copied and verified before the original is removed](docs/screenshots/spfx-migrate-confirm.png)
+*The confirmation spells out the safety promise up front: each item is copied and **verified** before the original is removed, and folders include everything inside them.*
+
 4. If more than one destination is available, **pick a container** (destinations can
    have different access rules — see §6).
-5. The system queues the work. A progress indicator and the **status column** update
-   automatically as each item moves through the lifecycle.
+5. The system queues the work. A progress dialog and the **status column** update
+   automatically as each item moves through the lifecycle. You can close the dialog —
+   the work continues in the background.
+
+![Live migration progress showing a progress bar, ETA, and a streaming activity log](docs/screenshots/spfx-migrate-progress.png)
+*Live progress with a real-time **ETA** and a streaming per-item activity log. The worker scales out (here, dozens of parallel instances) so large batches move quickly.*
+
+For a big archive spanning many folders, the dialog breaks progress down by folder so
+you can see exactly where things are. Throttling by SharePoint is handled
+automatically — affected items wait and retry, and the count is shown.
+
+![Migration progress broken down by folder, with per-folder counts and a throttle-retry notice](docs/screenshots/spfx-migrate-progress-tree.png)
+*Per-folder progress for a large job (2,322 files across 673 folders). Throttled items retry automatically — nothing is lost, it just waits its turn.*
 
 When it's done, each selected file is replaced by a **`.url` placeholder** of the same
 name, in the same folder. Folders keep their structure, including nested content when
@@ -74,8 +95,18 @@ you archive recursively.
 
 1. Select one or more `.url` placeholders (or a folder containing them).
 2. Choose **Restore from cold storage** and confirm.
+
+![The Restore from cold storage confirmation dialog](docs/screenshots/spfx-restore-confirm.png)
+*Restore is the exact inverse: each archived file is downloaded and its `.url`
+placeholder is swapped back for the original. Folders restore everything archived beneath them.*
+
 3. The system copies the file's content back to its **original SharePoint location**
    and removes the placeholder once the restore is confirmed.
+
+![Restore progress showing "Restore Completed" and the full activity log of the round trip](docs/screenshots/spfx-restore-progress.png)
+*A completed restore with its full activity log. The cold-storage copy is only deleted
+**after** the restored file is verified present in SharePoint — the same never-lose-data
+rule, in reverse.*
 
 Restores can run on a **single item, a whole folder, or a batch**, with progress shown
 as it goes.
@@ -97,12 +128,16 @@ if they still need it. This avoids surprise archiving of something you're about 
 ## 5. Opening an archived file (everyone)
 
 A `.url` placeholder is a normal, clickable item. Opening it takes the user to a
-**cold-storage page** for that file where — if they have permission to the container —
-they can:
+**cold-storage download page** for that file. If they have permission to the
+container, they can download a copy of the archived file directly.
 
-- **Download** the archived file directly from cold storage, or
-- **Request a restore** so the file comes back into SharePoint at its original spot.
+![The cold-storage download page showing the file name and size, a warning that edits won't sync back, and a Download button](docs/screenshots/spa-download.png)
+*Opening a placeholder lands here. The page is explicit that the download is a
+**separate copy** — to *change* the file, restore it to SharePoint first, then edit it
+there, so the archived version and the edited version never silently diverge.*
 
+The file is streamed back through the web app (which holds the private connection to
+storage), so downloads work even when the storage account blocks all public access.
 If a user doesn't have access to the container the file lives in, they won't be able to
 download it — access is deliberately enforced per container.
 
@@ -110,18 +145,41 @@ download it — access is deliberately enforced per container.
 
 ## 6. The web portal
 
-Alongside the SharePoint experience there's a **web portal** for browsing, searching,
-reporting, and configuration. After signing in, users see these areas:
+Alongside the SharePoint experience there's a **web portal** for browsing, reporting,
+accountability, and configuration. After signing in, users see four areas across the
+top: **Cold Storage**, **Transfers & Logs**, **Savings**, and **Archive Rules**.
 
 | Area | What it's for |
 | --- | --- |
-| **Browser** | Browse the cold-storage containers and the files inside them. You pick which container to view (you only see the ones you're allowed to). |
-| **File Search** | Full-text / metadata search across archived content to find a specific file fast. |
-| **Logs** | The step-by-step processing history for archive and restore jobs — successes and errors — useful for troubleshooting. |
-| **Targets** | (Admin) Configure which sites / document libraries are candidates for scheduled archiving. |
-| **Savings** | A cost & savings dashboard showing how much storage has been moved and the estimated money saved. Figures are shown in a configurable currency and, when a region is configured, use the **live Azure storage price** for your account's region/tier (fetched from the public Azure Retail Prices API, with a fallback to a configured price). |
+| **Cold Storage** | Browse the cold-storage containers and the files inside them, and download any archived file. You only see the containers you've been granted access to. |
+| **Transfers & Logs** | Find any archive or restore across every site, filter it, and drill into its full per-file lifecycle timeline. The one-stop accountability console. |
+| **Savings** | A cost & savings dashboard: how much storage has been reclaimed and the estimated net monthly saving. |
+| **Archive Rules** | *(Admin)* Control which files are eligible — file-type rules and site/folder exclusion scopes. |
 
-> **Container access:** the portal calls Azure Storage directly on the user's behalf.
+### Transfers & Logs
+
+![The Transfers & Logs view listing timestamped Info and Warning log entries for a running migration](docs/screenshots/spa-transfers-logs.png)
+*Every step of every transfer is recorded — downloads, copies, verifications, source
+deletions, placeholder writes, and automatic throttle retries — with timestamps and
+severity, filterable and easy to find.*
+
+### Savings
+
+![The Savings dashboard showing files archived, storage reclaimed, Azure cost, reclaimed SharePoint value and net monthly saving](docs/screenshots/spa-savings.png)
+*Reclaimed storage and estimated net monthly saving. Figures are shown in a
+configurable currency and, when a region is configured, use the **live Azure storage
+price** for your account's region/tier (fetched from the public Azure Retail Prices API,
+with a fallback to a configured price). Each price links to its source, and the live
+figure links to the exact price query so the numbers can be verified.*
+
+### Archive Rules (admin)
+
+![The Archive Rules admin page with file-type rules and site/folder exclusion scopes](docs/screenshots/spa-archive-rules.png)
+*Admins tune eligibility here — exclude (or allow-list) file types, and protect whole
+site collections or library/folder subtrees from archiving. Changes take effect within
+a minute, with no redeploy.*
+
+> **Container access:** the portal calls Azure Storage on the user's behalf.
 > Users must be granted read access (via Entra ID group/user) to a container to browse
 > or download its files. Without it, they'll see an access-denied message for that
 > container — this is by design.
