@@ -3,9 +3,11 @@
  *
  * Landing page that placeholders point at. It acquires a token (via the shared
  * API client), calls GET /api/placeholders/download/{itemId} — which checks the
- * container ACL and issues a short-lived user-delegation SAS for the backing
- * blob — then navigates the browser to that SAS URL. Error states are rendered
- * inline so a user who followed a placeholder link never sees a blank tab.
+ * container ACL and returns a short-lived, token-authorised URL to our own
+ * content endpoint — then navigates the browser there to stream the file. We
+ * stream through the API because the storage account denies public network
+ * access, so the browser can't reach the blob directly. Error states are
+ * rendered inline so a user who followed a placeholder link never sees a blank tab.
  */
 import { useEffect, useState } from "react";
 import { useParams } from "react-router-dom";

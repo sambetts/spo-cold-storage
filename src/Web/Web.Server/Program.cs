@@ -68,6 +68,12 @@ public class Program
         var config = new Config(builder.Configuration);
         builder.Services.AddSingleton(config);
 
+        // Data Protection backs the short-lived, tamper-proof tokens that authorise
+        // cold-storage blob downloads streamed through PlaceholdersController.ContentAsync
+        // (the browser can't reach the private storage account directly). On Azure App
+        // Service keys persist to the %HOME% key ring, shared across instances + restarts.
+        builder.Services.AddDataProtection();
+
         // Wire up Azure Monitor (Application Insights) via OpenTelemetry when configured.
         if (config.HaveAppInsightsConfigured)
         {

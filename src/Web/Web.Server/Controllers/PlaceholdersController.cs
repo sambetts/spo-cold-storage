@@ -1,7 +1,8 @@
-using Azure.Storage.Sas;
 using Entities;
 using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.StaticFiles;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using Migration.Engine.Utils;
@@ -18,9 +19,11 @@ namespace Web.Controllers;
 /// restore. Returns enough metadata for the restore workflow without
 /// disclosing storage details to callers who lack restore permission.
 ///
-/// <c>GET /api/placeholders/download/{itemId}</c> – issue a short-lived
-/// user-delegation SAS URL for the underlying blob so authorised users can
-/// download the file from the SPA without ever needing direct blob RBAC.
+/// <c>GET /api/placeholders/download/{itemId}</c> – authorise a download and hand
+/// back a URL to <c>content/{itemId}</c>; <c>GET /api/placeholders/content/{itemId}</c>
+/// streams the blob back through this API. We stream (rather than redirect the
+/// browser to a blob SAS) because the storage account denies public network access,
+/// so only this VNet-integrated Web App can reach the blob (via its MSI).
 /// </summary>
 [Authorize]
 [ApiController]
@@ -29,12 +32,23 @@ public class PlaceholdersController(
     SPOColdStorageDbContext db,
     IContainerAccessService containerAccess,
     Entities.Configuration.Config config,
+    IDataProtectionProvider dataProtection,
     ILogger<PlaceholdersController> logger) : ControllerBase
 {
     private readonly SPOColdStorageDbContext _db = db ?? throw new ArgumentNullException(nameof(db));
     private readonly IContainerAccessService _containerAccess = containerAccess ?? throw new ArgumentNullException(nameof(containerAccess));
     private readonly Entities.Configuration.Config _config = config ?? throw new ArgumentNullException(nameof(config));
     private readonly ILogger<PlaceholdersController> _logger = logger ?? throw new ArgumentNullException(nameof(logger));
+
+    // Short-lived, tamper-proof token that authorises the (otherwise anonymous) content
+    // stream — minted only once the ACL check in DownloadAsync has passed.
+    private readonly ITimeLimitedDataProtector _downloadProtector =
+        (dataProtection ?? throw new ArgumentNullException(nameof(dataProtection)))
+            .CreateProtector("ColdStorage.PlaceholderDownload.v1").ToTimeLimitedDataProtector();
+
+    private static readonly FileExtensionContentTypeProvider ContentTypes = new();
+
+    private static readonly TimeSpan DownloadTokenLifetime = TimeSpan.FromMinutes(5);
 
     [HttpGet("resolve")]
     public async Task<ActionResult<PlaceholderMetadataResponse>> ResolveAsync(
@@ -124,10 +138,12 @@ public class PlaceholdersController(
     }
 
     /// <summary>
-    /// Issues a short-lived (5 min) user-delegation SAS URL for the blob behind
-    /// a cold-storage placeholder and returns it to the caller. The SPA bounces
-    /// the user's browser to this URL so the download works without our Web API
-    /// having to stream the bytes itself.
+    /// Authorises a download for the blob behind a cold-storage placeholder and returns a URL
+    /// to <see cref="ContentAsync"/> (which streams the bytes), carrying a short-lived, item-
+    /// scoped, tamper-proof token minted only after the ACL check here passes. We stream through
+    /// this API rather than redirecting to a blob SAS URL because the storage account denies
+    /// public network access — the browser can't reach the blob, but this VNet-integrated Web
+    /// App can (via its MSI over the private endpoint).
     ///
     /// Auth flow:
     ///   1. User double-clicks the .url placeholder in SharePoint or browser.
@@ -135,12 +151,11 @@ public class PlaceholdersController(
     ///   3. SPA performs MSAL login if needed, then hits this endpoint with a
     ///      Bearer token.
     ///   4. This endpoint checks container ACL (CanBrowse OR CanRestore - read
-    ///      access only) and asks Azure Storage for a user-delegation key (the
-    ///      Web App MSI has Storage Blob Data Contributor + Storage Blob
-    ///      Delegator implicitly granted by the Contributor role).
-    ///   5. Returns { url, expiresAt } - SPA does window.location.href = url.
+    ///      access only) and mints the item-scoped download token.
+    ///   5. Returns { url, expiresAt }; the SPA does window.location.replace(url) and the
+    ///      browser downloads via GET content/{itemId}?t=token.
     ///
-    /// We never issue write/delete SAS - users always restore through the
+    /// We never grant write/delete - users always restore through the
     /// proper /api/restores/start path which has its own ACL + audit trail.
     /// </summary>
     [HttpGet("download/{itemId:guid}")]
@@ -180,64 +195,121 @@ public class PlaceholdersController(
             return Forbid();
         }
 
+        // The storage account denies public network access, so we don't hand the browser a
+        // blob SAS (it couldn't reach the blob). Instead mint a short-lived, item-scoped,
+        // tamper-proof token and point the browser at our own content endpoint, which streams
+        // the blob over the private endpoint. The token is minted only now the ACL check passed.
+        var fileName = System.IO.Path.GetFileName(item.SpServerRelativeUrl);
+        var expiresOn = DateTimeOffset.UtcNow.Add(DownloadTokenLifetime);
+        var token = _downloadProtector.Protect($"{item.ItemId:N}|{User.GetUpn()}", expiresOn);
+        var url = $"/api/placeholders/content/{item.ItemId}?t={Uri.EscapeDataString(token)}";
+
+        _logger.LogInformation(
+            "Issued {Mins}m download token for item {ItemId} ({Path}) to {Upn}.",
+            (int)DownloadTokenLifetime.TotalMinutes, item.ItemId, item.SpServerRelativeUrl, User.Identity?.Name ?? "(unknown)");
+
+        // Audit trail (issue #13): persist who downloaded what, and when.
+        _db.MigrationJobLogs.Add(new Entities.DBEntities.ColdStorage.MigrationJobLog
+        {
+            JobId = item.JobId,
+            ItemId = item.ItemId,
+            Status = item.Status,
+            Level = (int)LogLevel.Information,
+            Message = $"Download link issued for '{item.SpServerRelativeUrl}'.",
+            ActorUpn = User.GetUpn(),
+            Action = "Download",
+        });
+        await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+
+        return new DownloadUrlResponse
+        {
+            Url = url,
+            ExpiresAt = expiresOn.UtcDateTime,
+            FileName = fileName,
+            ContentLength = item.FileSize,
+        };
+    }
+
+    /// <summary>
+    /// Streams the blob behind a cold-storage placeholder back to the browser, authorised by the
+    /// short-lived token minted by <see cref="DownloadAsync"/>. This is what the browser is sent
+    /// to (not a blob SAS) because the storage account denies public network access — only this
+    /// VNet-integrated Web App can reach the blob, via its MSI over the private endpoint.
+    /// Anonymous by design: the item-scoped, time-limited, tamper-proof token is the authorisation.
+    /// </summary>
+    [AllowAnonymous]
+    [HttpGet("content/{itemId:guid}")]
+    public async Task<IActionResult> ContentAsync(Guid itemId, [FromQuery] string? t, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrEmpty(t))
+        {
+            return Unauthorized();
+        }
+
+        string payload;
         try
         {
-            var storageUri = !string.IsNullOrEmpty(container.StorageAccountUri)
-                ? container.StorageAccountUri
-                : _config.ConnectionStrings.Storage;
-            var serviceClient = BlobServiceClientFactory.Create(storageUri, _config);
-
-            var startsOn  = DateTimeOffset.UtcNow.AddMinutes(-1);  // small clock-skew tolerance
-            var expiresOn = DateTimeOffset.UtcNow.AddMinutes(5);
-
-            var userDelegationKey = await serviceClient.GetUserDelegationKeyAsync(startsOn, expiresOn, cancellationToken).ConfigureAwait(false);
-
-            var sasBuilder = new BlobSasBuilder
-            {
-                BlobContainerName = item.BlobContainerName,
-                BlobName = item.BlobPath,
-                Resource = "b",
-                StartsOn = startsOn,
-                ExpiresOn = expiresOn,
-                ContentDisposition = $"attachment; filename=\"{Uri.EscapeDataString(System.IO.Path.GetFileName(item.SpServerRelativeUrl))}\"",
-            };
-            sasBuilder.SetPermissions(BlobSasPermissions.Read);
-
-            var blobClient = serviceClient
-                .GetBlobContainerClient(item.BlobContainerName)
-                .GetBlobClient(item.BlobPath);
-            var sasToken = sasBuilder.ToSasQueryParameters(userDelegationKey.Value, serviceClient.AccountName).ToString();
-            var sasUrl = new UriBuilder(blobClient.Uri) { Query = sasToken }.Uri.ToString();
-
-            _logger.LogInformation(
-                "Issued {Mins}m download SAS for item {ItemId} ({Path}) to {Upn}.",
-                (int)(expiresOn - DateTimeOffset.UtcNow).TotalMinutes, item.ItemId, item.SpServerRelativeUrl, User.Identity?.Name ?? "(unknown)");
-
-            // Audit trail (issue #13): persist who downloaded what, and when.
-            _db.MigrationJobLogs.Add(new Entities.DBEntities.ColdStorage.MigrationJobLog
-            {
-                JobId = item.JobId,
-                ItemId = item.ItemId,
-                Status = item.Status,
-                Level = (int)LogLevel.Information,
-                Message = $"Download link issued for '{item.SpServerRelativeUrl}'.",
-                ActorUpn = User.GetUpn(),
-                Action = "Download",
-            });
-            await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
-
-            return new DownloadUrlResponse
-            {
-                Url = sasUrl,
-                ExpiresAt = expiresOn.UtcDateTime,
-                FileName = System.IO.Path.GetFileName(item.SpServerRelativeUrl),
-                ContentLength = item.FileSize,
-            };
+            payload = _downloadProtector.Unprotect(t);
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Failed to issue download SAS for item {ItemId}.", item.ItemId);
-            return StatusCode(StatusCodes.Status502BadGateway, new { error = $"Could not issue download URL: {ex.Message}" });
+            // Expired, tampered, or minted under a rotated key — all indistinguishable, all unauthorised.
+            _logger.LogWarning(ex, "Rejected cold-storage download token for item {ItemId}.", itemId);
+            return Unauthorized();
+        }
+
+        // Payload is "{itemId:N}|{upn}" — the token must be the one minted for this item.
+        var parts = payload.Split('|', 2);
+        if (!Guid.TryParse(parts[0], out var tokenItemId) || tokenItemId != itemId)
+        {
+            return Unauthorized();
+        }
+        var upn = parts.Length > 1 ? parts[1] : "(unknown)";
+
+        var item = await _db.MigrationJobItems
+            .AsNoTracking()
+            .FirstOrDefaultAsync(i => i.ItemId == itemId, cancellationToken)
+            .ConfigureAwait(false);
+        if (item is null || string.IsNullOrEmpty(item.BlobContainerName) || string.IsNullOrEmpty(item.BlobPath))
+        {
+            return NotFound(new { error = "No downloadable cold-storage blob for that item." });
+        }
+
+        var container = item.ContainerId is null
+            ? null
+            : await _db.ColdStorageContainers
+                .AsNoTracking()
+                .FirstOrDefaultAsync(c => c.ID == item.ContainerId, cancellationToken)
+                .ConfigureAwait(false);
+        var storageUri = container is not null && !string.IsNullOrEmpty(container.StorageAccountUri)
+            ? container.StorageAccountUri
+            : _config.ConnectionStrings.Storage;
+
+        var fileName = System.IO.Path.GetFileName(item.SpServerRelativeUrl);
+        try
+        {
+            var serviceClient = BlobServiceClientFactory.Create(storageUri, _config);
+            var blobClient = serviceClient
+                .GetBlobContainerClient(item.BlobContainerName)
+                .GetBlobClient(item.BlobPath);
+
+            // Stream server-side over the private endpoint (MSI). enableRangeProcessing gives the
+            // browser Content-Length + resumable/range support for large archived files.
+            var stream = await blobClient.OpenReadAsync(cancellationToken: cancellationToken).ConfigureAwait(false);
+
+            _logger.LogInformation(
+                "Streaming cold-storage blob for item {ItemId} ({Path}) to {Upn}.",
+                itemId, item.SpServerRelativeUrl, upn);
+
+            return File(stream, ContentTypeFor(fileName), fileName, enableRangeProcessing: true);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to stream cold-storage blob for item {ItemId}.", itemId);
+            return StatusCode(StatusCodes.Status502BadGateway, new { error = $"Could not download the file: {ex.Message}" });
         }
     }
+
+    private static string ContentTypeFor(string fileName) =>
+        ContentTypes.TryGetContentType(fileName, out var contentType) ? contentType : "application/octet-stream";
 }
