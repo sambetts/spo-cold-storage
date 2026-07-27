@@ -48,7 +48,9 @@ public class PlaceholdersController(
 
     private static readonly FileExtensionContentTypeProvider ContentTypes = new();
 
-    private static readonly TimeSpan DownloadTokenLifetime = TimeSpan.FromMinutes(5);
+    // The download link is presented for the user to click (after reading the edit warning),
+    // so give it a comfortable window rather than seconds.
+    private static readonly TimeSpan DownloadTokenLifetime = TimeSpan.FromMinutes(30);
 
     [HttpGet("resolve")]
     public async Task<ActionResult<PlaceholderMetadataResponse>> ResolveAsync(
