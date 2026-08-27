@@ -318,6 +318,11 @@ public class QueueController(
             item.Attempts = 0;
             item.NextRetryAt = null;
             item.LastRetryAfterSeconds = null;
+            // Stamp the re-queue time. The dispatch reconciler's give-up window runs from the last
+            // enqueue, so without this an old row keeps its original (possibly weeks-old)
+            // LastEnqueuedAt and is given up on the very next reconciler pass — the item bounces
+            // straight back to failed and "Recover failed" achieves nothing.
+            item.LastEnqueuedAt = DateTime.UtcNow;
             item.UpdatedAt = DateTime.UtcNow;
             _db.MigrationJobLogs.Add(new MigrationJobLog
             {
