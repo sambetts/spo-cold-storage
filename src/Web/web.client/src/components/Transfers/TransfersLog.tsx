@@ -11,6 +11,39 @@ const REFRESH_MS = 10000;
 // Recovery drains fast once the worker picks the items up, so poll harder than the
 // normal auto-refresh while an admin is watching a "Recover failed" run.
 const RECOVER_POLL_MS = 3000;
+// A recovery of thousands of items outlives a page view, so the progress baseline is kept in
+// localStorage: refreshing (or reopening) the Transfers page resumes the same progress bar
+// instead of silently losing it. Dropped once it's older than the TTL so a long-abandoned run
+// can't resurrect a meaningless baseline.
+const RECOVER_STATE_KEY = "spocs.recovery.progress.v1";
+const RECOVER_STATE_TTL_MS = 6 * 60 * 60 * 1000;
+
+type RecoverProgressState = { start: number; watching: boolean; startedAt: number };
+
+function readRecoverState(): RecoverProgressState | null {
+  try {
+    const raw = window.localStorage.getItem(RECOVER_STATE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<RecoverProgressState>;
+    if (typeof parsed.start !== "number" || typeof parsed.startedAt !== "number") return null;
+    if (Date.now() - parsed.startedAt > RECOVER_STATE_TTL_MS) {
+      window.localStorage.removeItem(RECOVER_STATE_KEY);
+      return null;
+    }
+    return { start: parsed.start, watching: parsed.watching !== false, startedAt: parsed.startedAt };
+  } catch {
+    return null;
+  }
+}
+
+function writeRecoverState(state: RecoverProgressState | null): void {
+  try {
+    if (state) window.localStorage.setItem(RECOVER_STATE_KEY, JSON.stringify(state));
+    else window.localStorage.removeItem(RECOVER_STATE_KEY);
+  } catch {
+    // Storage can be unavailable (private mode / quota). Progress just won't survive a refresh.
+  }
+}
 
 // Resizable columns for the transfers table. Widths persist in localStorage so a
 // user's layout survives reloads. The trailing "Files" column is auto-sized so it
@@ -255,10 +288,11 @@ function TransfersList() {
   const [auto, setAuto] = useState(false);
   const [recovering, setRecovering] = useState(false);
   const [recoverMsg, setRecoverMsg] = useState<string | null>(null);
-  // Live recovery progress. `startedAt` total is the baseline we measure "cleared" against;
-  // `watching` keeps the auto-refresh running after the POST returns so the user can watch the
-  // worker actually drain the backlog instead of staring at a spinner.
-  const [recoverProgress, setRecoverProgress] = useState<{ start: number; watching: boolean } | null>(null);
+  // Live recovery progress. `start` is the baseline we measure "resolved" against; `watching`
+  // keeps the auto-refresh running after the POST returns so the user can watch the worker
+  // actually drain the backlog. Rehydrated from localStorage so a page refresh mid-recovery
+  // resumes the same bar rather than losing it.
+  const [recoverProgress, setRecoverProgress] = useState<RecoverProgressState | null>(() => readRecoverState());
   const reqId = useRef(0);
 
   const load = useCallback(async () => {
@@ -312,6 +346,11 @@ function TransfersList() {
   const totalInProgress = useMemo(() => (jobs ?? []).reduce((n, j) => n + j.inProgressCount, 0), [jobs]);
   const totalThrottled = useMemo(() => (jobs ?? []).reduce((n, j) => n + (j.throttledCount ?? 0), 0), [jobs]);
 
+  // Persist every progress change so a refresh (or reopening the page) resumes the same bar.
+  useEffect(() => {
+    writeRecoverState(recoverProgress);
+  }, [recoverProgress]);
+
   // While a recovery is being watched, poll on a short interval regardless of the
   // "Auto-refresh" checkbox, and stop once nothing is failed or in flight any more.
   useEffect(() => {
@@ -321,11 +360,14 @@ function TransfersList() {
   }, [recoverProgress?.watching, load]);
 
   useEffect(() => {
-    if (!recoverProgress?.watching || loading) return;
+    // Only conclude "finished" from a real, loaded snapshot — on a fresh page load (or after a
+    // failed fetch) jobs is null and the totals are 0, which would otherwise instantly mark a
+    // rehydrated in-progress recovery as complete.
+    if (!recoverProgress?.watching || loading || jobs === null) return;
     if (totalFailed === 0 && totalInProgress === 0) {
       setRecoverProgress((p) => (p ? { ...p, watching: false } : p));
     }
-  }, [recoverProgress?.watching, loading, totalFailed, totalInProgress]);
+  }, [recoverProgress?.watching, loading, jobs, totalFailed, totalInProgress]);
 
   const recoverAllFailed = useCallback(async () => {
     if (
@@ -338,7 +380,7 @@ function TransfersList() {
     }
     setRecovering(true);
     setRecoverMsg(null);
-    setRecoverProgress({ start: totalFailed, watching: true });
+    setRecoverProgress({ start: totalFailed, watching: true, startedAt: Date.now() });
     try {
       const res = await api.post<{ requeued: number; recovered?: number; skipped: number; publishFailed: number }>(
         "/api/admin/queue/requeue",
