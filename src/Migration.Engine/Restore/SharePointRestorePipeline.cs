@@ -178,9 +178,7 @@ public sealed class SharePointRestorePipeline : BaseComponent
 
             using (var fs = IOFile.OpenRead(tempFile))
             {
-                var folder = spCtx.Web.GetFolderByServerRelativeUrl(destinationFolder);
-                spCtx.Load(folder);
-                await spCtx.ExecuteQueryAsyncWithThrottleRetries(_logger).ConfigureAwait(false);
+                var folder = await EnsureDestinationFolderAsync(spCtx, destinationFolder, cancellationToken).ConfigureAwait(false);
 
                 var restoredLength = new FileInfo(tempFile).Length;
                 var addInfo = new FileCreationInformation
@@ -345,9 +343,7 @@ public sealed class SharePointRestorePipeline : BaseComponent
             var restoredLength = new FileInfo(tempFile).Length;
             using (var fs = IOFile.OpenRead(tempFile))
             {
-                var folder = spCtx.Web.GetFolderByServerRelativeUrl(destinationFolder);
-                spCtx.Load(folder);
-                await spCtx.ExecuteQueryAsyncWithThrottleRetries(_logger).ConfigureAwait(false);
+                var folder = await EnsureDestinationFolderAsync(spCtx, destinationFolder, cancellationToken).ConfigureAwait(false);
 
                 var addInfo = new FileCreationInformation
                 {
@@ -622,9 +618,7 @@ public sealed class SharePointRestorePipeline : BaseComponent
 
             using (var fs = IOFile.OpenRead(tempFile))
             {
-                var folder = spCtx.Web.GetFolderByServerRelativeUrl(destinationFolder);
-                spCtx.Load(folder);
-                await spCtx.ExecuteQueryAsyncWithThrottleRetries(_logger).ConfigureAwait(false);
+                var folder = await EnsureDestinationFolderAsync(spCtx, destinationFolder, cancellationToken).ConfigureAwait(false);
 
                 var addInfo = new FileCreationInformation
                 {
@@ -859,8 +853,69 @@ public sealed class SharePointRestorePipeline : BaseComponent
         }
     }
 
-    private static string GetParentFolder(string serverRelativeUrl)
+    /// <summary>
+    /// Returns the destination folder, creating it (and any missing ancestors) when it no longer
+    /// exists. A restore frequently targets a folder that was itself removed — e.g. the whole
+    /// folder was archived, or the user deleted the tree after archiving. Without this,
+    /// <c>GetFolderByServerRelativeUrl</c> throws <c>ServerException: File Not Found</c> and the
+    /// item fails permanently even though the archived content is perfectly restorable.
+    /// Walks down from the document library root so each level is created in order.
+    /// </summary>
+    private async Task<Folder> EnsureDestinationFolderAsync(ClientContext ctx, string folderServerRelativeUrl, CancellationToken cancellationToken)
     {
+        cancellationToken.ThrowIfCancellationRequested();
+        var folder = ctx.Web.GetFolderByServerRelativeUrl(folderServerRelativeUrl);
+        ctx.Load(folder);
+        try
+        {
+            await ctx.ExecuteQueryAsyncWithThrottleRetries(_logger).ConfigureAwait(false);
+            return folder;
+        }
+        catch (ServerException)
+        {
+            // Not there — fall through and build the path.
+        }
+
+        _logger.LogInformation("Destination folder '{Folder}' is missing; recreating it for the restore.", folderServerRelativeUrl);
+
+        var segments = folderServerRelativeUrl.Trim('/').Split('/', StringSplitOptions.RemoveEmptyEntries);
+        // /sites/<site>/<library> is the shallowest thing we can attach to; anything above that
+        // is site plumbing we must never try to create.
+        var rootDepth = segments.Length >= 4 && segments[0].Equals("sites", StringComparison.OrdinalIgnoreCase) ? 3 : 1;
+        if (segments.Length <= rootDepth)
+        {
+            throw new InvalidOperationException($"Cannot recreate '{folderServerRelativeUrl}': it is above the document-library root.");
+        }
+
+        var currentPath = "/" + string.Join('/', segments.Take(rootDepth));
+        var current = ctx.Web.GetFolderByServerRelativeUrl(currentPath);
+        ctx.Load(current);
+        await ctx.ExecuteQueryAsyncWithThrottleRetries(_logger).ConfigureAwait(false);
+
+        for (var i = rootDepth; i < segments.Length; i++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            currentPath += "/" + segments[i];
+            var next = ctx.Web.GetFolderByServerRelativeUrl(currentPath);
+            ctx.Load(next);
+            try
+            {
+                await ctx.ExecuteQueryAsyncWithThrottleRetries(_logger).ConfigureAwait(false);
+                current = next;
+                continue;
+            }
+            catch (ServerException)
+            {
+                // Missing level — create it.
+            }
+            current = current.Folders.Add(segments[i]);
+            ctx.Load(current);
+            await ctx.ExecuteQueryAsyncWithThrottleRetries(_logger).ConfigureAwait(false);
+        }
+        return current;
+    }
+
+    private static string GetParentFolder(string serverRelativeUrl)    {
         var idx = serverRelativeUrl.LastIndexOf('/');
         if (idx <= 0)
         {

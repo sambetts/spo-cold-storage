@@ -26,8 +26,16 @@ public class MigrationDispatchReconcilerTests
     [InlineData(MigrationLifecycleStatus.Queued, 300, 0, 30, DispatchAction.None)]
     // Queued, last sent longer ago than grace -> re-drive (message likely lost).
     [InlineData(MigrationLifecycleStatus.Queued, 600, 0, 200, DispatchAction.ReDrive)]
-    // Queued past the give-up window -> fail (takes precedence over re-drive).
-    [InlineData(MigrationLifecycleStatus.Queued, 90000, 0, 200, DispatchAction.FailGaveUp)]
+    // Queued past the give-up window, never sent -> fail (measured from creation).
+    [InlineData(MigrationLifecycleStatus.Queued, 90000, 0, -1, DispatchAction.FailGaveUp)]
+    // Queued past the give-up window since it was last SENT -> fail.
+    [InlineData(MigrationLifecycleStatus.Queued, 200000, 0, 90000, DispatchAction.FailGaveUp)]
+    // An OLD row that was just re-queued must be re-driven, NOT given up on. The give-up window
+    // runs from the last enqueue, so "Recover failed" can rescue an item created weeks ago;
+    // measuring from CreatedAt killed every requeue of an old item before a worker could run it.
+    [InlineData(MigrationLifecycleStatus.Queued, 90000, 0, 200, DispatchAction.ReDrive)]
+    // Same, but only just re-queued -> still inside the grace, leave the in-flight publish alone.
+    [InlineData(MigrationLifecycleStatus.Queued, 3000000, 0, 30, DispatchAction.None)]
     // Active, recently updated -> leave alone.
     [InlineData(MigrationLifecycleStatus.MigrationInProgress, 0, 5, -1, DispatchAction.None)]
     [InlineData(MigrationLifecycleStatus.PostCopyValidation, 0, 29, -1, DispatchAction.None)]

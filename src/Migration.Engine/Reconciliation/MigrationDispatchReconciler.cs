@@ -94,7 +94,14 @@ public sealed class MigrationDispatchReconciler : BaseComponent
 
         if (status == MigrationLifecycleStatus.Queued)
         {
-            if ((nowUtc - createdAtUtc).TotalMinutes >= thresholds.MaxQueuedMinutes)
+            // Measure the give-up window from when the item was last QUEUED, not when the row was
+            // first created — which is what the failure message has always claimed ("not processed
+            // within N min of being queued"). Using CreatedAt meant any requeue of an item older
+            // than the window was killed by this sweep before a worker could touch it, so
+            // "Recover failed" could never rescue an old item: it went Queued -> given up
+            // instantly, straight back to failed. Fall back to CreatedAt when it was never sent.
+            var queuedSinceUtc = lastEnqueuedAtUtc ?? createdAtUtc;
+            if ((nowUtc - queuedSinceUtc).TotalMinutes >= thresholds.MaxQueuedMinutes)
             {
                 return DispatchAction.FailGaveUp;
             }
