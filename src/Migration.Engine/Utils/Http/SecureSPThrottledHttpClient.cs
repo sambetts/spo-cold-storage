@@ -23,6 +23,13 @@ public class SecureSPHandler : DelegatingHandler
 
     protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
     {
+        // Security boundary (mirrors AuthUtils.ValidateSiteUrl): this handler attaches an app-only
+        // SharePoint token with Sites.FullControl.All to the outgoing request. Request URLs are built
+        // from stored site/web URLs that originate in caller-supplied input, so refuse to send the
+        // token anywhere outside the configured tenant.
+        AuthUtils.ValidateSiteUrl(
+            request.RequestUri?.GetLeftPart(UriPartial.Authority) ?? string.Empty,
+            _config.BaseServerAddress);
 
         // Get auth for REST
         var app = await AuthUtils.GetNewClientApp(_config);

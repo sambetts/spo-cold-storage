@@ -44,7 +44,7 @@ param sharePoint object
 @description('Public IP of the deploying machine — added to SQL firewall during deploy. Leave empty to skip.')
 param deployClientIpAddress string = ''
 
-@description('Object IDs of users / groups that should get Storage Blob Data Reader on the storage account. End-user browsers call blob storage directly with a user-scoped token, so the signed-in users (or a group containing them) need data-plane RBAC. Leave empty to skip.')
+@description('OPTIONAL. Object IDs of users / groups to grant Storage Blob Data Reader on the storage account. NOT required by the SPA — it browses/downloads through the API using the Web App managed identity. Populate only to allow direct storage access (Storage Explorer / portal). Leave empty to skip.')
 param storageUserDataReaderPrincipals array = []
 
 @description('Optional: principalType for each entry in storageUserDataReaderPrincipals. Must be same length when supplied; values: User | Group | ServicePrincipal. Defaults to User when omitted.')
@@ -536,8 +536,8 @@ resource raWebStorageDelegator 'Microsoft.Authorization/roleAssignments@2022-04-
 }
 
 // End-user / group → Storage Blob Data Reader on the storage account.
-// Needed because the SPA calls Azure Blob Storage directly with a user-scoped token
-// (https://storage.azure.com/user_impersonation), bypassing the Web App MSI.
+// Optional: the SPA reaches cold-storage content through the API (Web App MSI), so this is
+// only for operators who want users to open the storage account directly.
 var storageReaderId = '2a2b9908-6ea1-4ae2-8e65-a410df84e7d1'  // Storage Blob Data Reader
 
 resource raStorageUserReaders 'Microsoft.Authorization/roleAssignments@2022-04-01' = [for (oid, i) in storageUserDataReaderPrincipals: {

@@ -15,6 +15,77 @@ public class AuthUtils
 {
     private static X509Certificate2? _cachedCert = null;
 
+    /// <summary>
+    /// Validates a site URL before it is ever used to build a <see cref="ClientContext"/>.
+    /// <para>
+    /// This is a security boundary, not a convenience check. The contexts built below acquire an
+    /// <b>app-only</b> SharePoint token for the configured tenant (the app holds
+    /// <c>Sites.FullControl.All</c>) and then attach it as an <c>Authorization: Bearer</c> header to
+    /// every request the context makes to <paramref name="siteUrl"/>. Site URLs arrive from
+    /// caller-supplied request bodies (migrate/restore/authorization checks), so an unvalidated URL
+    /// would let any authenticated caller point a context at a host they control and be handed a
+    /// tenant-wide SharePoint token.
+    /// </para>
+    /// Only https URLs, with no user-info and on a default port, whose host belongs to the configured
+    /// SharePoint tenant (its root, plus the <c>-my</c> / <c>-admin</c> hosts) are accepted.
+    /// Anything else throws <b>before</b> a token is acquired.
+    /// </summary>
+    /// <exception cref="ArgumentException">The URL is malformed or is not on the configured tenant.</exception>
+    public static Uri ValidateSiteUrl(string siteUrl, string baseServerAddress)
+    {
+        if (string.IsNullOrWhiteSpace(siteUrl))
+        {
+            throw new ArgumentException($"'{nameof(siteUrl)}' cannot be null or empty.", nameof(siteUrl));
+        }
+        if (string.IsNullOrWhiteSpace(baseServerAddress))
+        {
+            throw new ArgumentException($"'{nameof(baseServerAddress)}' cannot be null or empty.", nameof(baseServerAddress));
+        }
+        if (!Uri.TryCreate(siteUrl, UriKind.Absolute, out var uri))
+        {
+            throw new ArgumentException($"Site URL '{siteUrl}' is not an absolute URL.", nameof(siteUrl));
+        }
+        if (!Uri.TryCreate(baseServerAddress, UriKind.Absolute, out var baseUri))
+        {
+            throw new ArgumentException($"Configured BaseServerAddress '{baseServerAddress}' is not an absolute URL.", nameof(baseServerAddress));
+        }
+        if (!string.Equals(uri.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)
+            || !string.IsNullOrEmpty(uri.UserInfo)
+            || !uri.IsDefaultPort)
+        {
+            throw new ArgumentException($"Site URL '{siteUrl}' must be an https URL on the default port with no user info.", nameof(siteUrl));
+        }
+        if (!IsAllowedTenantHost(uri.Host, baseUri.Host))
+        {
+            throw new ArgumentException(
+                $"Site URL host '{uri.Host}' is not part of the configured SharePoint tenant ('{baseUri.Host}'); refusing to use it.",
+                nameof(siteUrl));
+        }
+        return uri;
+    }
+
+    /// <summary>
+    /// True when <paramref name="host"/> is the tenant root host or one of its sibling hosts
+    /// (<c>contoso-my.sharepoint.com</c> / <c>contoso-admin.sharepoint.com</c> for a
+    /// <c>contoso.sharepoint.com</c> root), so OneDrive and admin URLs keep working.
+    /// </summary>
+    private static bool IsAllowedTenantHost(string host, string baseHost)
+    {
+        if (string.Equals(host, baseHost, StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+        var dot = baseHost.IndexOf('.');
+        if (dot <= 0)
+        {
+            return false;
+        }
+        var tenantLabel = baseHost[..dot];
+        var domainSuffix = baseHost[dot..];
+        return string.Equals(host, tenantLabel + "-my" + domainSuffix, StringComparison.OrdinalIgnoreCase)
+            || string.Equals(host, tenantLabel + "-admin" + domainSuffix, StringComparison.OrdinalIgnoreCase);
+    }
+
     // Confidential-client apps cached per (tenant|client|auth) so MSAL's in-memory token
     // cache is reused across items. Without this, every ClientContext creation rebuilt the
     // app and re-acquired an app-only token from AAD — needless latency and an extra throttle
@@ -79,6 +150,10 @@ public class AuthUtils
             throw new ArgumentException($"'{nameof(baseServerAddress)}' cannot be null or empty.", nameof(baseServerAddress));
         }
 
+        // Security boundary: reject an off-tenant site URL BEFORE acquiring a token, so a
+        // caller-supplied host can never be handed the app-only SharePoint bearer token.
+        ValidateSiteUrl(siteUrl, baseServerAddress);
+
         var app = await GetNewClientApp(tenantId, clientId, clientSecret, keyVaultUrl, useCertificateAuth, certificateName);
         var result = await app.AuthForSharePointOnline(baseServerAddress);
         if (authResultDelegate != null)
@@ -106,6 +181,10 @@ public class AuthUtils
     }
     public async static Task<ClientContext> GetClientContext(IConfidentialClientApplication app, string baseServerAddress, string siteUrl, ILogger logger)
     {
+        // Same security boundary as the overload above — never attach the app-only token to a host
+        // outside the configured tenant.
+        ValidateSiteUrl(siteUrl, baseServerAddress);
+
         var result = await app.AuthForSharePointOnline(baseServerAddress);
 
         var ctx = new ClientContext(siteUrl);

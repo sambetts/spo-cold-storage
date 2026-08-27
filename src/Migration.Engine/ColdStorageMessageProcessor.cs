@@ -1,5 +1,7 @@
 using Entities;
 using Entities.Configuration;
+using Entities.DBEntities.ColdStorage;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using Migration.Engine.Lifecycle;
 using Migration.Engine.Migration;
@@ -60,6 +62,97 @@ public sealed class ColdStorageMessageProcessor(Config config, ILogger logger, I
         return MessageOutcome.DeadLetter;
     }
 
+    /// <summary>
+    /// True when every SharePoint path in <paramref name="envelope"/> belongs to the site the job
+    /// was authorized against. The job row is server-side data (written from the site the caller
+    /// passed the contributor check for), so it is the authority — the envelope is not.
+    /// <para>
+    /// Fails closed: a missing job, a job with no recorded site, or any path outside that site
+    /// returns false. That covers messages already on the bus at deploy time and rows written
+    /// before the API-side scope checks existed.
+    /// </para>
+    /// </summary>
+    public static bool IsEnvelopeInJobScope(ColdStorageBusEnvelope envelope, MigrationJob? job, out string reason)
+    {
+        if (job is null)
+        {
+            reason = "the job row no longer exists";
+            return false;
+        }
+        if (string.IsNullOrWhiteSpace(job.SiteUrl))
+        {
+            reason = "the job has no recorded site to authorize against";
+            return false;
+        }
+        var site = job.SiteUrl;
+
+        if (envelope.Operation == MigrationOperationKind.Migrate)
+        {
+            var file = envelope.File;
+            if (file is null)
+            {
+                reason = "the migrate envelope carries no file";
+                return false;
+            }
+            if (!SharePointScope.IsSameSite(site, file.SiteUrl))
+            {
+                reason = $"site '{file.SiteUrl}' != '{site}'";
+                return false;
+            }
+            if (!string.IsNullOrEmpty(file.WebUrl) && !SharePointScope.IsWebWithinSite(site, file.WebUrl))
+            {
+                reason = $"web '{file.WebUrl}' is outside '{site}'";
+                return false;
+            }
+            if (!SharePointScope.IsWithinSite(site, file.ServerRelativeFilePath))
+            {
+                reason = $"path '{file.ServerRelativeFilePath}' is outside '{site}'";
+                return false;
+            }
+            reason = string.Empty;
+            return true;
+        }
+
+        var target = envelope.RestoreTarget;
+        if (target is null)
+        {
+            reason = "the restore envelope carries no target";
+            return false;
+        }
+        if (!SharePointScope.IsSameSite(site, target.SiteUrl))
+        {
+            reason = $"site '{target.SiteUrl}' != '{site}'";
+            return false;
+        }
+        if (!string.IsNullOrEmpty(target.WebUrl) && !SharePointScope.IsWebWithinSite(site, target.WebUrl))
+        {
+            reason = $"web '{target.WebUrl}' is outside '{site}'";
+            return false;
+        }
+        if (!string.IsNullOrEmpty(target.OriginalServerRelativeUrl)
+            && !SharePointScope.IsWithinSite(site, target.OriginalServerRelativeUrl))
+        {
+            reason = $"destination '{target.OriginalServerRelativeUrl}' is outside '{site}'";
+            return false;
+        }
+        // The placeholder is *read* (and deleted) on SharePoint, so it must be in scope too.
+        if (!string.IsNullOrEmpty(target.PlaceholderServerRelativeUrl)
+            && !SharePointScope.IsWithinSite(site, target.PlaceholderServerRelativeUrl))
+        {
+            reason = $"placeholder '{target.PlaceholderServerRelativeUrl}' is outside '{site}'";
+            return false;
+        }
+        // The blob key encodes "{host}/{server-relative path}", so a blob-driven restore can name
+        // another site's — or another host's — archive. Hold it to the same scope, host included.
+        if (!string.IsNullOrEmpty(target.BlobPath) && !SharePointScope.IsBlobKeyWithinSite(site, target.BlobPath))
+        {
+            reason = $"archive '{target.BlobPath}' originates outside '{site}'";
+            return false;
+        }
+        reason = string.Empty;
+        return true;
+    }
+
     private async Task<MessageOutcome> ProcessEnvelopeAsync(ColdStorageBusEnvelope envelope, CancellationToken cancellationToken)
     {
         // Per-host placeholder lock for restores: defer a second concurrent
@@ -93,6 +186,29 @@ public sealed class ColdStorageMessageProcessor(Config config, ILogger logger, I
             // already finished after the message was enqueued, do no work and let
             // the message complete.
             var current = await writer.FindItemAsync(envelope.ItemId, cancellationToken).ConfigureAwait(false);
+
+            // Authorization backstop. The API scope-checks every caller-supplied path before it
+            // queues work, but that does not cover a message already sitting on the bus, a row
+            // written before those checks existed, or any future producer that forgets. The job row
+            // is server-side data, so re-assert here — the one point every envelope flows through —
+            // that the envelope's SharePoint paths belong to the job's authorized site. The worker
+            // acts app-only with Sites.FullControl.All, so anything out of scope is dead-lettered
+            // rather than executed.
+            var job = await db.MigrationJobs
+                .AsNoTracking()
+                .FirstOrDefaultAsync(j => j.JobId == envelope.JobId, cancellationToken)
+                .ConfigureAwait(false);
+            if (!IsEnvelopeInJobScope(envelope, job, out var scopeReason))
+            {
+                _logger.LogError(
+                    "Item {ItemId}: envelope is outside its job's authorized site ({Reason}); dead-lettering instead of acting app-only.",
+                    envelope.ItemId, scopeReason);
+                await writer.TransitionAsync(envelope.ItemId, MigrationLifecycleStatus.ValidationFailed,
+                    $"Refused: the queued request targets content outside the job's authorized site ({scopeReason}).",
+                    level: LogLevel.Error, cancellationToken: cancellationToken).ConfigureAwait(false);
+                return MessageOutcome.DeadLetter;
+            }
+
             if (current is not null && current.Status.IsTerminal())
             {
                 _logger.LogInformation("Item {ItemId} is already {Status} (e.g. admin-cancelled); skipping.", envelope.ItemId, current.Status);

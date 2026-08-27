@@ -42,14 +42,3 @@ export const msalConfig = {
 export const loginRequest = {
   scopes: [readConfigVal("MSAL_SCOPES")]
 };
-
-// Scope used when talking directly to Azure Blob Storage via RBAC (Storage Blob Data Reader, etc.).
-// Configurable so different clouds / sovereign endpoints can be supported; defaults to public cloud.
-const storageScope = readConfigVal("MSAL_STORAGE_SCOPES");
-export const storageRequest = {
-  scopes: [
-    storageScope && storageScope !== "undefined"
-      ? storageScope
-      : "https://storage.azure.com/user_impersonation"
-  ]
-};

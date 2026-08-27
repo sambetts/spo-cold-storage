@@ -61,7 +61,8 @@ Edit `deploy/params.json` and fill in:
 | `sharePoint.baseServerAddress` | `https://contoso.sharepoint.com` | Your SPO root |
 | `sharePoint.appCatalogUrl` | `https://contoso.sharepoint.com/sites/appcatalog` | Confirm with `Get-PnPTenantAppCatalogUrl` |
 | `sharePoint.targetSiteRelativeUrl` | `/sites/ColdStorage` | Where the SPFx web part installs |
-| `storage.userDataReaders` | `[{ "objectId": "<entra-group-oid>", "type": "Group" }]` | Members get `Storage Blob Data Reader` so the SPA can browse blobs |
+| `storage.userDataReaders` *(optional)* | `[]` | Only needed if you want users to open the storage account **directly** (Storage Explorer / portal). The SPA browses and downloads via the API, so leave this empty by default |
+| `coldStorage` *(optional)* | `{ "deleteBlobAfterRestore": 1, "useProviderPipelines": 0 }` | `deleteBlobAfterRestore`: `1` (default) deletes the archive after a **verified** restore; `0` keeps it. `useProviderPipelines`: leave `0` — the provider-abstraction pipelines don't yet cover blob-driven/orphan restore or version history. Omit the block to accept the defaults |
 | `savings` *(optional)* | `{ "currency": "USD", "azureRetailSku": "Hot GRS" }` | Savings dashboard currency + live Azure pricing. Region defaults to `location`; the app fetches the live per-GB price from the Azure Retail Prices API (fallback to the configured price). Omit the block to accept the defaults. |
 
 ### 4. Provision the AAD app
@@ -136,7 +137,7 @@ Get-PnPTenantServicePrincipalPermissionRequests |
 
 Without this, SPFx Migrate / Restore commands fail with HTTP 401.
 
-**b. (If you didn't put a group in `storage.userDataReaders`)** &mdash; grant your end-users `Storage Blob Data Reader` on the storage account. The SPA calls Azure Blob Storage **directly** from the browser, so users need data-plane RBAC. See [Grant end-users storage access](#grant-end-users-storage-access) below.
+**b. Nothing.** &mdash; end-user storage RBAC is *not* required: the SPA browses and downloads cold-storage content through the API, which reads blobs with the Web App's managed identity. See [Grant end-users storage access](#grant-end-users-storage-access) only if you want users to reach the storage account directly.
 
 That's it. Visit the App URL, sign in, add a root SharePoint URL, and verify the Function worker is running and draining the queue:
 
@@ -209,9 +210,19 @@ Useful flags: `-Phase <name>` (single phase), `-WhatIfPreview` (Infra dry-run), 
 
 ### Grant end-users storage access
 
-The SPA calls Azure Blob Storage **directly** with a user-scoped token (`https://storage.azure.com/user_impersonation`). Without RBAC, users see `AuthorizationPermissionMismatch` when browsing cold-storage files.
+> **No longer required.** Browsing and downloading cold-storage content is now **proxied
+> through the API**, which reads blobs with the Web App's managed identity — the browser
+> never calls Blob Storage directly and no user-scoped storage token is issued. Access is
+> authorized by the app's own per-container ACLs (`ContainerAccessService`), not by
+> data-plane RBAC.
+>
+> `storage.userDataReaders` is therefore **optional** and left in place only for operators
+> who want users to be able to open the storage account directly (Storage Explorer, the
+> Azure portal, or a custom tool). Leave it empty (`[]`) unless you specifically want that —
+> granting it hands users standing read access to every blob in the account, bypassing the
+> per-container ACLs.
 
-**Recommended** &mdash; list user/group object IDs in `params.json` and re-run Infra:
+If you *do* want that direct access, list user/group object IDs in `params.json` and re-run Infra:
 
 ```jsonc
 "storage": {
@@ -234,8 +245,6 @@ az role assignment create `
   --role 'Storage Blob Data Reader' `
   --scope '/subscriptions/<sub>/resourceGroups/<rg>/providers/Microsoft.Storage/storageAccounts/<name>'
 ```
-
-After granting, **sign out and back in** to the web app to refresh the cached token (storage tokens last ~1h).
 
 ### (Optional) Attach the field customizer to a column
 
@@ -341,7 +350,7 @@ reintroduce a WebJob worker.
 | `Sql` phase: `The command line is too long` / Kudu `503` | Both are handled by the current script (VFS upload + Kudu readiness wait). If you see them, you're on an old `deploy.ps1` — pull latest. |
 | Web app returns 500.30, logs show **Service Bus** connectivity errors and `sku.serviceBus` is `Basic` | Basic-tier Service Bus doesn't support Private Link. Either re-enable Service Bus public access on the namespace, or upgrade `sku.serviceBus` to `Standard` and re-run `-Phase Infra` so the SB private endpoint gets provisioned. |
 | Web app starts but throws `ConfigurationMissingException` | A Key Vault reference isn't resolving. Portal → App Service → Configuration → Application settings, look for red "Key Vault reference" badges. Usually means the Secrets phase wasn't run, or the Web App MSI doesn't yet have Key Vault Secrets User (re-run `-Phase Infra`). |
-| Web app: `AuthorizationPermissionMismatch` when browsing blobs | The signed-in user has no `Storage Blob Data Reader`. See [Grant end-users storage access](#grant-end-users-storage-access). Sign out + back in after granting. |
+| Web app: `AuthorizationPermissionMismatch` when browsing blobs | Only possible for *direct* storage access (Storage Explorer / portal); the SPA itself proxies through the API and needs no user RBAC. If you want direct access, see [Grant end-users storage access](#grant-end-users-storage-access). |
 | Sign-in fails with `AADSTS700016` | You ran `SpaConfig` but didn't re-run `deploy.ps1 -Phase App`. The deployed SPA bundle still has the old client ID baked in. Re-run the App phase. |
 | Function worker not draining the queue | `az functionapp show -g <rg> -n <funcApp> --query properties.state` should be `Running`. Check `func-*` in App Insights for "Job host started" + the `ColdStorageQueue` listener. On Flex Consumption keep **always-ready ≥ 1** (Bicep `functionAppConfig`) — scale-from-zero doesn't reliably wake the identity-based Service Bus trigger. |
 | SPFx commands return 401 from `AadHttpClient` | The webApiPermissionRequest from the SPFx package needs admin approval — see [step 7a](#7-two-manual-steps-that-cant-be-automated). |

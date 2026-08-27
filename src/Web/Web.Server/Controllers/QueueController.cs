@@ -6,6 +6,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using Migration.Engine.Lifecycle;
 using Migration.Engine.Migration;
+using Migration.Engine.Utils;
 using Models;
 using Models.ColdStorage;
 using Web.Authorization;
@@ -418,15 +419,35 @@ public class QueueController(
     // reprocess it. Returns null when required coordinates are missing.
     private static ColdStorageBusEnvelope? BuildEnvelope(MigrationJobItem item, string? upn)
     {
+        // Authorization scope: a requeue/recovery replays a *persisted* row onto the bus, where the
+        // worker acts app-only with Sites.FullControl.All. Re-assert that the row still belongs to
+        // the site its job was authorized for, so a row written before the API-side scope checks
+        // existed can never be revived into a cross-site operation. Fails closed on a job with no
+        // recorded site. (The worker re-validates identically before executing.)
+        if (string.IsNullOrWhiteSpace(item.Job.SiteUrl)
+            || !SharePointScope.IsSameSite(item.Job.SiteUrl, item.SpSiteUrl)
+            || !SharePointScope.IsWithinSite(item.Job.SiteUrl, item.SpServerRelativeUrl)
+            || (!string.IsNullOrEmpty(item.SpWebUrl) && !SharePointScope.IsWebWithinSite(item.Job.SiteUrl, item.SpWebUrl))
+            || (!string.IsNullOrEmpty(item.PlaceholderServerRelativeUrl)
+                && !SharePointScope.IsWithinSite(item.Job.SiteUrl, item.PlaceholderServerRelativeUrl))
+            || (!string.IsNullOrEmpty(item.BlobPath)
+                && !SharePointScope.IsBlobKeyWithinSite(item.Job.SiteUrl, item.BlobPath)))
+        {
+            return null;
+        }
+
         if (item.Job.Operation == MigrationOperationKind.Migrate)
         {
             // Fall back to the job's target container when the item never recorded one — an item
             // that failed BEFORE a successful copy (validation, or copy before the container was
             // stamped) has no BlobContainerName, and without this fallback it could never be
             // recovered by "Recover failed" (BuildEnvelope returned null → skipped → stuck failed).
+            // Must be BlobContainerName (the physical Azure container, e.g. "spexports"), NOT Name
+            // (the logical display key, which defaults to "default") — the worker passes this
+            // straight to GetBlobContainerClient.
             var containerName = !string.IsNullOrEmpty(item.BlobContainerName)
                 ? item.BlobContainerName
-                : item.Job.Container?.Name;
+                : item.Job.Container?.BlobContainerName;
             if (string.IsNullOrEmpty(containerName))
             {
                 return null;
@@ -467,6 +488,9 @@ public class QueueController(
                 WebUrl = string.IsNullOrEmpty(item.SpWebUrl) ? item.SpSiteUrl : item.SpWebUrl,
                 PlaceholderServerRelativeUrl = item.PlaceholderServerRelativeUrl,
                 OriginalServerRelativeUrl = item.SpServerRelativeUrl,
+                // Carry the TRUSTED persisted blob key so the requeue stays blob-driven rather than
+                // trusting the (contributor-editable) `.url` placeholder for its blob coordinates.
+                BlobPath = item.BlobPath,
             },
         };
     }

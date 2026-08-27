@@ -52,9 +52,9 @@ Every change is reviewed against three pillars (see [`AGENTS.md`](../AGENTS.md) 
 
 ```
  SharePoint doc library
-   │  SPFx command set (site owners): Migrate · Restore · Status
+   │  SPFx command set (site contributors/owners): Migrate · Restore · Status
    ▼  AadHttpClient
- ASP.NET Core Web API  ──►  site-owner auth (CSOM) + per-container ACLs
+ ASP.NET Core Web API  ──►  contributor auth (CSOM effective perms) + per-container ACLs
    │                        eligibility rules (size / type / exclusions / holds)
    ▼  enqueue only
  Azure Service Bus  ('filediscovery' queue, ColdStorageBusEnvelope)

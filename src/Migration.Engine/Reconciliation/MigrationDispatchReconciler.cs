@@ -212,15 +212,20 @@ public sealed class MigrationDispatchReconciler : BaseComponent
 
         if (toPublish.Count > 0)
         {
+            // Claim first: stamp LastEnqueuedAt and SAVE before publishing, mirroring the
+            // RetryScheduled pass below. Publishing first and saving second means a crash (or a
+            // failed save) between the two leaves the rows looking un-enqueued, so the next pass
+            // re-publishes them and the same item gets duplicate in-flight messages. If the publish
+            // fails after the claim the items simply age past the grace window and are re-driven.
+            foreach (var item in reDriveItems)
+            {
+                item.LastEnqueuedAt = now;
+                item.UpdatedAt = now;
+            }
+            await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
             try
             {
                 await _publisher.PublishManyAsync(toPublish, cancellationToken).ConfigureAwait(false);
-                foreach (var item in reDriveItems)
-                {
-                    item.LastEnqueuedAt = now;
-                    item.UpdatedAt = now;
-                }
-                await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
                 reDriven = reDriveItems.Count;
             }
             catch (Exception ex)

@@ -170,15 +170,48 @@ Any failure before `DeletePending` puts the item in `CopyToColdStorageFailed` / 
 
 ## 5b. Restore is blob-driven (cold storage is the source of truth)
 
-Restore does **not** trust the SQL DB for "what should be restored" — the DB is an audit log. `MigrationExpander.ExpandRestoreAsync` enumerates the archived **blobs** under the selected folder's blob prefix (`IColdStorageBlobEnumerator`, `ColdStorageBlobEnumerator` reads each blob's `spOriginal*` metadata for the authoritative destination, falling back to `ColdStorageBlobKey.ReverseServerRelativeUrl`) and resolves explicit placeholders to their blob. `SharePointRestorePipeline.ProcessBlobDrivenAsync` (taken when `RestoreTarget.BlobPath` is set → `IsBlobDriven`) restores straight from the blob: download → conflict-resolve → upload to the original path → verify → (optional) blob delete → remove the `.url` placeholder **only if it still exists**. This is what makes an **orphaned archive** (blob present, placeholder and/or `migration_job_items` row missing) restorable — the exact failure the DB-driven flow silently skipped. It is idempotent: a destination already present at the archived size is marked `Skipped` (no re-copy, no conflict-fail), so re-restoring a folder is safe. The legacy placeholder-driven path still handles in-flight envelopes with no `BlobPath`.
+Restore does **not** trust the SQL DB for "what should be restored" — the DB is an audit log. `MigrationExpander.ExpandRestoreAsync` enumerates the archived **blobs** under the selected folder's blob prefix (`IColdStorageBlobEnumerator`, `ColdStorageBlobEnumerator` reads each blob's `spOriginal*` metadata for the authoritative destination, falling back to `ColdStorageBlobKey.ReverseServerRelativeUrl`) and resolves explicit placeholders to their blob. `SharePointRestorePipeline.ProcessBlobDrivenAsync` (taken when `RestoreTarget.BlobPath` is set → `IsBlobDriven`) restores straight from the blob: download → conflict-resolve → upload to the original path → verify → (optional) blob delete → remove the `.url` placeholder **only if it still exists**. This is what makes an **orphaned archive** (blob present, placeholder and/or `migration_job_items` row missing) restorable — the exact failure the DB-driven flow silently skipped. It is idempotent: a destination already present at the archived size — or present when the archive is already gone (deleted by an earlier verified restore) — is marked `Skipped` (no re-copy, no conflict-fail, archive retained), so re-restoring a folder is safe. The legacy placeholder-driven path still handles in-flight envelopes with no `BlobPath`.
 
 **Two easy-to-reintroduce bugs (both caught in review, PR #54):**
 - Blob enumeration MUST skip version-history sidecars via `VersionBlobLayout.IsVersionArtifact` (`{key}.versions/<id>` content + `{key}.versions.json` manifest live under the same prefix as real files) — otherwise they get pushed back into SharePoint as junk `.json` files / spurious failures.
 - Any restore envelope rebuilt from a DB row (`ColdStorageBusMessageFactory.BuildEnvelopeFromItem`) MUST set `BlobPath = item.BlobPath`, or a reconciler re-drive of an orphaned archive falls back to the placeholder path and terminal-fails as `ValidationFailed`.
 
-The `#1` delete-safety invariant is preserved: a placeholder/blob is only ever removed **after** the restored file is verified present, and blob deletion stays gated by `ColdStorageDeleteBlobAfterRestore` (default off).
+The `#1` delete-safety invariant is preserved: a placeholder/blob is only ever removed **after** the restored file is verified present, and blob deletion is gated by `ColdStorageDeleteBlobAfterRestore` (int, **default `1` = on**; set `0` to keep the archive after a restore). The delete is **only** reachable from the verified copy path (upload → `VerifyRestoredAsync` → delete). The idempotent `Skipped` path deliberately **retains** the archive: "already restored" there is *inferred* from the destination matching the archived byte length, and a same-size-but-different file at that path would otherwise cost the only copy of the archived data. A leftover blob is a cost concern that orphan reconciliation reports; a deleted one is unrecoverable.
 
-## 5c. Provider abstraction (feature-flagged foundation)
+## 5c. Authorization boundaries (do not weaken)
+
+Two guards exist purely to stop caller-supplied strings reaching an **app-only** SharePoint
+operation (the worker holds `Sites.FullControl.All`). Both fail closed. Keep them.
+
+- **`AuthUtils.ValidateSiteUrl(siteUrl, baseServerAddress)`** — runs *before* any token is
+  acquired, in both `GetClientContext` overloads and in `SecureSPHandler.SendAsync`. Requires
+  https, no user-info, default port, and a host on the configured tenant (root + `-my` /
+  `-admin`). Without it, a caller-supplied `siteUrl` gets the app-only bearer token attached and
+  sent to a host they control — tenant-wide token theft. The only two `new ClientContext(` sites
+  are inside those methods; keep it that way.
+- **`Migration.Engine.Utils.SharePointScope`** — proves a caller-supplied path belongs to the
+  authorized site collection. `IsWithinSite` (server-relative paths; rejects traversal incl.
+  multi-round percent-encoding, `//`, backslash, control chars, and enforces a segment boundary),
+  `IsWebWithinSite` (a `WebUrl`, so sub-webs pass), `IsSameSite` (path-identity), and
+  `IsBlobKeyWithinSite` (a `{host}/{path}` blob key — **the host segment is part of the boundary**).
+  For a root site collection, the managed paths `/sites`, `/teams`, `/personal`, `/portals`,
+  `/search` are *not* owned by the root.
+
+Enforced at every entry point: `MigrationExpander` (migrate items, restore folders/placeholders,
+blob-derived destinations), `RestoresController.StartAsync`, `QueueController.BuildEnvelope`,
+`ColdStorageBusMessageFactory.BuildEnvelopeFromItem`, and — as the authoritative backstop for
+messages already on the bus — **`ColdStorageMessageProcessor.IsEnvelopeInJobScope`**, which
+re-validates every envelope against the **DB job row's** `SiteUrl` and dead-letters mismatches.
+A job with no `SiteUrl` is refused (fail closed), so any new job-creation path **must** set it.
+
+The `.url` placeholder is a normal file that a contributor can edit, so
+`SharePointRestorePipeline` also verifies the parsed `metadata.ContainerName` matches
+`envelope.ContainerName` and that `metadata.BlobPath` is in scope before downloading. Prefer
+carrying the **trusted persisted `BlobPath`** in `RestoreTarget` (blob-driven) over trusting the
+placeholder. Admin break-glass `ForceAsync` is intentionally unscoped — it is admin-gated and runs
+in-process, not via the bus.
+
+## 5d. Provider abstraction (feature-flagged foundation)
 
 `Migration.Engine/Providers/` is a provider-neutral rewrite of the migrate + restore logic so the engine can be **unit-tested with in-memory adaptors** and so new source/cold-store backends (beyond SharePoint + Azure Blob) can be added later. It is **off by default** — the config flag `ColdStorageUseProviderPipelines` (int, `0` = legacy inline pipelines, `>0` = new path) gates it in `ColdStorageMessageProcessor`. Merging is safe; **do not flip the flag in prod until the real adaptors are integration-tested in a non-prod env** (the neutral pipelines are unit-proven, the SharePoint/Azure adaptors are not yet).
 

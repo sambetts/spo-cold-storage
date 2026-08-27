@@ -1,5 +1,6 @@
 using Azure.Messaging.ServiceBus;
 using Entities.DBEntities.ColdStorage;
+using Migration.Engine.Utils;
 using Models;
 using Models.ColdStorage;
 using System.Text.Json;
@@ -93,6 +94,26 @@ public static class ColdStorageBusMessageFactory
     {
         ArgumentNullException.ThrowIfNull(item);
         ArgumentNullException.ThrowIfNull(job);
+
+        // Defence in depth: this is a funnel through which a *persisted* row is replayed onto the
+        // bus (reconciler re-drive, admin requeue, failure recovery). The row's paths were
+        // scope-checked when it was created, but re-asserting here means a row written before that
+        // check existed — or by any future path that forgets it — can never be replayed into an
+        // app-only operation against a site the job was not authorized for. Fails closed: a job with
+        // no recorded site cannot be authorized, so it is not replayed.
+        // (ColdStorageMessageProcessor re-validates the same way before executing any envelope, so
+        // a message that is already on the bus is covered too.)
+        if (string.IsNullOrWhiteSpace(job.SiteUrl)
+            || !SharePointScope.IsSameSite(job.SiteUrl, item.SpSiteUrl)
+            || !SharePointScope.IsWithinSite(job.SiteUrl, item.SpServerRelativeUrl)
+            || (!string.IsNullOrEmpty(item.SpWebUrl) && !SharePointScope.IsWebWithinSite(job.SiteUrl, item.SpWebUrl))
+            || (!string.IsNullOrEmpty(item.PlaceholderServerRelativeUrl)
+                && !SharePointScope.IsWithinSite(job.SiteUrl, item.PlaceholderServerRelativeUrl))
+            || (!string.IsNullOrEmpty(item.BlobPath)
+                && !SharePointScope.IsBlobKeyWithinSite(job.SiteUrl, item.BlobPath)))
+        {
+            return null;
+        }
 
         var webUrl = string.IsNullOrEmpty(item.SpWebUrl) ? item.SpSiteUrl : item.SpWebUrl;
         var envelope = new ColdStorageBusEnvelope

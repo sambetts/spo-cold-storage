@@ -9,7 +9,7 @@ import {
   IWorkerHealth,
   MigrationLifecycleStatus,
 } from '../../common/ColdStorageApiClient';
-import { colorFor, describeStatus, effectiveJobStatus, formatCountdown, formatEta, formatLabel, formatNumber, isTerminal, normalizeStatus } from '../../common/statusFormat';
+import { colorFor, describeStatus, effectiveJobStatus, formatCountdown, formatEta, formatLabel, formatNumber, isFailedStatus, isTerminal, normalizeStatus } from '../../common/statusFormat';
 
 export type DialogPhase = 'submitting' | 'confirm' | 'polling' | 'terminal' | 'expired' | 'error' | 'browse';
 
@@ -281,11 +281,15 @@ function mergedWarnings(job: ITrackedJob): string[] {
   return out;
 }
 
+/**
+ * True when nothing in the batch actually failed. Skipped/Cancelled items are terminal but are not
+ * failures (already archived / already restored / not eligible), so a batch that only skipped must
+ * not be reported as "some did not complete successfully".
+ */
 function allJobsSucceeded(jobs: ITrackedJob[]): boolean {
   for (const job of jobs) {
     for (const item of job.lastResponse?.items ?? []) {
-      if (item.status !== MigrationLifecycleStatus.ColdStorageMigrationCompleted &&
-        item.status !== MigrationLifecycleStatus.RestoreCompleted) {
+      if (isFailedStatus(item.status)) {
         return false;
       }
     }

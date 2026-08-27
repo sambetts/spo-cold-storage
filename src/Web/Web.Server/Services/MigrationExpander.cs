@@ -6,6 +6,7 @@ using Migration.Engine.Migration;
 using Models;
 using Models.ColdStorage;
 using System.Text.Json;
+using Migration.Engine.Utils;
 
 namespace Web.Services;
 
@@ -171,6 +172,23 @@ public sealed class MigrationExpander(
         foreach (var dto in expandedItems)
         {
             if (string.IsNullOrWhiteSpace(dto.ServerRelativeUrl)) { emptyPaths++; continue; }
+
+            // Authorization scope: the caller was authorized for `siteUrl` only, but the selected
+            // paths are caller-supplied and the worker acts app-only with Sites.FullControl.All.
+            // Refuse anything outside the authorized site collection so a contributor on site A can
+            // never have site B's files read and deleted.
+            if (!SharePointScope.IsWithinSite(siteUrl, dto.ServerRelativeUrl))
+            {
+                _logger.LogWarning(
+                    "Migrate job {JobId}: '{Path}' is outside the authorized site '{Site}'; refusing.",
+                    job.JobId, dto.ServerRelativeUrl, siteUrl);
+                notEligible++;
+                if (notEligibleSamples.Count < 3)
+                {
+                    notEligibleSamples.Add($"'{dto.ServerRelativeUrl}': outside the site you selected.");
+                }
+                continue;
+            }
 
             // Idempotency + self-heal of orphaned Queued rows (see MigrationsController).
             var existing = await _db.MigrationJobItems
@@ -409,6 +427,19 @@ public sealed class MigrationExpander(
                 : blob.OriginalWebUrl;
             var placeholder = destination + ".url";
 
+            // Authorization scope: the caller was authorized for `siteUrl` only. The destination here
+            // comes from blob metadata, so a blob whose metadata points at another site collection
+            // must never be restored under this job — that would let a contributor on site A write
+            // (and, with Overwrite, clobber) files on site B via the app-only worker.
+            if (!SharePointScope.IsSameSite(siteUrl, site) || !SharePointScope.IsWithinSite(siteUrl, destination))
+            {
+                _logger.LogWarning(
+                    "Restore job {JobId}: blob '{Blob}' resolves to '{Destination}' on '{Site}', outside the authorized site '{Authorized}'; refusing.",
+                    job.JobId, blob.BlobPath, destination, site, siteUrl);
+                Skip($"'{blob.BlobPath}': archived destination is outside the site you selected; skipped.");
+                return true;
+            }
+
             // Idempotency: skip if a restore for this destination is already in flight (non-terminal).
             var inFlight = await _db.MigrationJobItems
                 .Where(i => i.SpServerRelativeUrl == destination && i.Job.Operation == MigrationOperationKind.Restore)
@@ -473,6 +504,14 @@ public sealed class MigrationExpander(
         foreach (var folder in submission.FolderServerRelativeUrls.Where(f => !string.IsNullOrWhiteSpace(f)))
         {
             if (hitCap) { break; }
+            // The blob prefix is derived from the caller's folder path with only the *host* taken from
+            // siteUrl, so an unscoped folder would enumerate another site collection's archives.
+            if (!SharePointScope.IsWithinSite(siteUrl, folder))
+            {
+                _logger.LogWarning("Restore job {JobId}: folder '{Folder}' is outside the authorized site '{Site}'; refusing.", job.JobId, folder, siteUrl);
+                Skip($"'{folder}': outside the site you selected; skipped.");
+                continue;
+            }
             var prefix = ColdStorageBlobKey.Build(siteUrl, folder.TrimEnd('/')) + "/";
             foreach (var container in containers)
             {
@@ -492,6 +531,12 @@ public sealed class MigrationExpander(
         foreach (var ph in submission.Placeholders.Where(p => !string.IsNullOrWhiteSpace(p)))
         {
             if (hitCap) { break; }
+            if (!SharePointScope.IsWithinSite(siteUrl, ph))
+            {
+                _logger.LogWarning("Restore job {JobId}: placeholder '{Placeholder}' is outside the authorized site '{Site}'; refusing.", job.JobId, ph, siteUrl);
+                Skip($"'{ph}': outside the site you selected; skipped.");
+                continue;
+            }
             var destination = ph.EndsWith(".url", StringComparison.OrdinalIgnoreCase) ? ph[..^4] : ph;
             var blobKey = ColdStorageBlobKey.Build(siteUrl, destination);
             ArchivedBlob? resolved = null;

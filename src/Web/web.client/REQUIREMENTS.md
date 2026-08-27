@@ -1,61 +1,64 @@
 # Azure AD Configuration Requirements
 
-## App Registration Setup
+> **The SPA does not talk to Azure Blob Storage directly.** Browsing and downloading
+> cold-storage content is proxied through the API, which reads blobs with the Web App's
+> **managed identity**, and access is authorized by the app's own per-container ACLs
+> (`ContainerAccessService`). The SPA therefore needs **only** this app's own API scope —
+> no Azure Storage delegated permission and no per-user data-plane RBAC.
+>
+> Do **not** grant users `Storage Blob Data Reader` to make the SPA work: it grants standing
+> read access to every blob in the account and bypasses the per-container ACLs. See
+> `deploy/README.md` → *Grant end-users storage access*, which is only needed if you
+> separately want users to open the storage account directly (Storage Explorer / Azure portal).
 
-To enable Azure Storage access with Azure AD authentication, ensure your Azure AD app registration has the following configuration:
+## App Registration Setup
 
 ### API Permissions
 
-1. **Azure Storage**
-   - Permission: `user_impersonation` (Delegated)
-   - Scope: `https://storage.azure.com/user_impersonation`
+1. **This app's Web API**
+   - Permission: `access_as_user` (Delegated)
+   - Scope: `api://<client-id>/access_as_user`
 
-2. **Custom API** (if applicable)
-   - Permission: `access`
-   - Scope: `api://5935d0e4-7401-45cf-a3a4-f8cd973b4447/access`
+That is the only permission the SPA needs. The AAD app is created for you by
+`deploy/deploy-spo.ps1 -Phase AadApp`.
 
 ### Configuration Steps
 
-1. Navigate to Azure Portal → Azure Active Directory → App Registrations
-2. Select your application (Client ID: `5935d0e4-7401-45cf-a3a4-f8cd973b4447`)
-3. Go to **API Permissions**
-4. Click **Add a permission**
-5. Select **Azure Storage**
-6. Choose **Delegated permissions**
-7. Check `user_impersonation`
-8. Click **Add permissions**
-9. If required by your organization, click **Grant admin consent**
+1. Navigate to Azure Portal → Microsoft Entra ID → App Registrations
+2. Select your application
+3. Go to **API Permissions** and confirm the delegated scope for this app's own API is present
+4. If required by your organization, click **Grant admin consent**
 
 ### Storage Account Configuration
 
-Ensure the Azure Storage account has:
+The deploy configures this for you. For reference, the storage account runs with:
+
 - **Shared Key Access**: Disabled (key-based authentication not permitted)
-- **Azure AD Authentication**: Enabled
-- **RBAC Roles**: Assign appropriate roles to users/groups:
-  - `Storage Blob Data Reader` - for read-only access
-  - `Storage Blob Data Contributor` - for read/write access
-
-### User Permissions
-
-Users accessing the application must have one of the following RBAC roles assigned on the storage account:
-- Storage Blob Data Reader
-- Storage Blob Data Contributor
-- Storage Blob Data Owner
+- **Microsoft Entra Authentication**: Enabled
+- **RBAC**: `Storage Blob Data Contributor` for the **Web App** and **Function** managed
+  identities. End users need no role assignment for the SPA to work.
 
 ## Environment Variables
 
-The application requires the following environment variables in `.env.local`:
+`deploy/deploy-spo.ps1 -Phase SpaConfig` writes `.env.production` for you. For local
+development, copy `.env template.local` to `.env.development` and fill in:
 
 ```
-VITE_MSAL_CLIENT_ID=5935d0e4-7401-45cf-a3a4-f8cd973b4447
-VITE_MSAL_AUTHORITY=https://login.microsoftonline.com/organizations
-VITE_MSAL_SCOPES=api://5935d0e4-7401-45cf-a3a4-f8cd973b4447/access https://storage.azure.com/user_impersonation
+VITE_MSAL_CLIENT_ID=<client-id>
+VITE_MSAL_AUTHORITY=https://login.microsoftonline.com/<tenant-id>
+VITE_MSAL_SCOPES=api://<client-id>/access_as_user
 VITE_TEAMSFX_START_LOGIN_PAGE_URL=https://localhost:5173/auth-start.html
 ```
 
+> Note: `VITE_MSAL_SCOPES` is baked in **at build time**. Rebuilding the SPA without a current
+> `.env.production` makes it the literal string `"undefined"` and MSAL fails with
+> `ClientConfigurationError: url_parse_error`. Always run the `SpaConfig` phase before an
+> `App` deploy.
+
 ## Authentication Flow
 
-1. User authenticates via MSAL with multiple scopes
-2. Access token includes both custom API and Azure Storage permissions
-3. Token is used to create a `BlobServiceClient` with Azure AD credentials
-4. All blob operations use Azure AD authentication instead of SAS tokens
+1. User authenticates via MSAL and acquires a token for this app's API scope
+2. The SPA calls the API with that token
+3. The API checks the caller against the per-container ACLs
+4. The API reads the blob with its **managed identity** and streams the bytes back — no SAS
+   token is issued and no storage token is ever held by the browser

@@ -519,7 +519,6 @@ function Invoke-Phase-SpaConfig {
 VITE_MSAL_CLIENT_ID=$clientId
 VITE_MSAL_AUTHORITY=https://login.microsoftonline.com/$tenantId
 VITE_MSAL_SCOPES=api://$clientId/access_as_user
-VITE_MSAL_STORAGE_SCOPES=https://storage.azure.com/user_impersonation
 VITE_TEAMSFX_START_LOGIN_PAGE_URL=https://$webHost/auth-start.html
 "@
     Set-Content -LiteralPath $envPath -Value $content -Encoding utf8

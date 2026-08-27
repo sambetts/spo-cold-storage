@@ -29,8 +29,9 @@ saving each month, in your currency, using live Azure prices.
 has been made *and* verified byte-for-byte. If anything goes wrong at any step, the
 original stays exactly where it is. This is the system's number-one rule.
 
-🙋 **Self-service — no IT ticket required.** Site owners archive and restore straight from
-the SharePoint toolbar. No migration project, no admin console, no waiting.
+🙋 **Self-service — no IT ticket required.** Anyone who can already edit the library —
+site contributors and owners — archives and restores straight from the SharePoint toolbar.
+No migration project, no admin console, no waiting.
 
 ↩️ **Always reversible.** Every archived file can be restored to its original location on
 demand — one file, a whole folder, or a batch.
@@ -47,8 +48,8 @@ left alone, so archiving never interferes with your obligations.
 
 ## How it works — in three steps
 
-**1. Pick your files.** In any SharePoint document library, a site owner selects files or
-a folder and chooses **Migrate to cold storage**.
+**1. Pick your files.** In any SharePoint document library, anyone with edit rights selects
+files or a folder and chooses **Migrate to cold storage**.
 
 **2. The system does the rest.** Each file is safely copied to low-cost storage, verified,
 and replaced with a small link (a `.url` placeholder) of the same name in the same place.

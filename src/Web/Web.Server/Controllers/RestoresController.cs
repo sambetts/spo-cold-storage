@@ -7,6 +7,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using Migration.Engine.Lifecycle;
 using Migration.Engine.Restore;
+using Migration.Engine.Utils;
 using Models.ColdStorage;
 using System.Text.Json;
 using Web.Authorization;
@@ -64,6 +65,26 @@ public class RestoresController(
             return Forbid();
         }
 
+        // Authorization scope: the caller was authorized for request.SiteUrl only, but the
+        // placeholder and destination paths are caller-supplied and the worker acts app-only with
+        // Sites.FullControl.All. Without this, a contributor on site A could name a placeholder /
+        // destination under site B and (with Overwrite) clobber files there. Checked BEFORE the
+        // lookup so a site-B row can't even be resolved.
+        if (!SharePointScope.IsWithinSite(request.SiteUrl, request.PlaceholderServerRelativeUrl)
+            || (!string.IsNullOrEmpty(request.OriginalServerRelativeUrl)
+                && !SharePointScope.IsWithinSite(request.SiteUrl, request.OriginalServerRelativeUrl)))
+        {
+            _logger.LogWarning(
+                "Restore refused: '{Placeholder}' / '{Destination}' is outside the authorized site '{Site}'.",
+                request.PlaceholderServerRelativeUrl, request.OriginalServerRelativeUrl, request.SiteUrl);
+            return Forbid();
+        }
+        if (!string.IsNullOrEmpty(request.WebUrl) && !SharePointScope.IsWebWithinSite(request.SiteUrl, request.WebUrl))
+        {
+            _logger.LogWarning("Restore refused: web '{Web}' is outside the authorized site '{Site}'.", request.WebUrl, request.SiteUrl);
+            return Forbid();
+        }
+
         // Idempotency: refuse to restore the same placeholder while a previous
         // restore is in flight.
         var inFlight = await _db.MigrationJobItems
@@ -93,6 +114,17 @@ public class RestoresController(
         if (migrateItem is null || string.IsNullOrEmpty(migrateItem.BlobContainerName) || migrateItem.ContainerId is null)
         {
             return NotFound("Could not locate the source migration record for that placeholder.");
+        }
+
+        // The resolved migrate row is looked up by placeholder path alone, so re-assert that it
+        // belongs to the site the caller was authorized for before its blob coordinates are used.
+        if (!SharePointScope.IsSameSite(request.SiteUrl, migrateItem.SpSiteUrl)
+            || !SharePointScope.IsWithinSite(request.SiteUrl, migrateItem.SpServerRelativeUrl))
+        {
+            _logger.LogWarning(
+                "Restore refused: migration record for '{Placeholder}' belongs to '{RecordSite}', not the authorized site '{Site}'.",
+                request.PlaceholderServerRelativeUrl, migrateItem.SpSiteUrl, request.SiteUrl);
+            return Forbid();
         }
 
         var container = await _db.ColdStorageContainers
@@ -167,6 +199,10 @@ public class RestoresController(
                 WebUrl = string.IsNullOrEmpty(request.WebUrl) ? request.SiteUrl : request.WebUrl,
                 PlaceholderServerRelativeUrl = request.PlaceholderServerRelativeUrl,
                 OriginalServerRelativeUrl = item.SpServerRelativeUrl,
+                // Carry the TRUSTED persisted blob key so the restore is blob-driven. Without it the
+                // pipeline would fall back to reading the container/blob path out of the `.url` file,
+                // which a site contributor can edit to point at another site's archive.
+                BlobPath = migrateItem.BlobPath,
             },
         }, cancellationToken).ConfigureAwait(false);
 

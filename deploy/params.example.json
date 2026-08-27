@@ -89,8 +89,16 @@
   },
 
   "storage": {
-    "_comment": "userDataReaders: object IDs of end-users (or a group) that should get 'Storage Blob Data Reader' on the storage account. The SPA calls Blob Storage directly with the signed-in user's token, so without this they'll see 'AuthorizationPermissionMismatch'. Each entry can be a bare GUID (defaults to type=User) or {objectId, type} where type is User|Group|ServicePrincipal. Recommended pattern: create one Entra group containing all SPA users, put its objectId here.",
+    "_comment": "userDataReaders: OPTIONAL. Object IDs of end-users (or a group) to grant 'Storage Blob Data Reader' on the storage account. NOT needed for the SPA — it browses and downloads cold-storage content through the API, which reads blobs with the Web App's managed identity, and access is authorized by the app's per-container ACLs. Only populate this if you want users to open the storage account directly (Storage Explorer / Azure portal); doing so gives standing read access to every blob in the account, bypassing the per-container ACLs. Each entry can be a bare GUID (defaults to type=User) or {objectId, type} where type is User|Group|ServicePrincipal.",
     "userDataReaders": []
+  },
+
+  "coldStorage": {
+    "_comment": "Optional runtime toggles. Omit the block to accept the defaults shown.",
+    "_deleteBlobAfterRestore_comment": "1 (default) deletes the archive after a VERIFIED restore so the file isn't duplicated across SharePoint + cold storage. Set 0 to keep the archive after a restore. Never deletes on the inferred 'already restored' skip path.",
+    "deleteBlobAfterRestore": 1,
+    "_useProviderPipelines_comment": "0 (default) uses the proven inline migrate/restore pipelines. 1 switches to the provider-abstraction pipelines — do NOT enable in production until the SharePoint/Azure adaptors are integration-tested (they do not yet cover blob-driven/orphan restore or version history).",
+    "useProviderPipelines": 0
   },
 
   "network": {

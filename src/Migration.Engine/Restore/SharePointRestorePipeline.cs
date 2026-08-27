@@ -94,6 +94,27 @@ public sealed class SharePointRestorePipeline : BaseComponent
                 return false;
             }
 
+            // The `.url` placeholder is an ordinary SharePoint file, so anyone who can edit the
+            // library can rewrite these coordinates. Never let them redirect the restore: the
+            // container must be the one the caller was ACL-checked against, and the archive must
+            // have originated inside the site this job was authorized for. (Blob-driven restores
+            // don't come through here — they use the trusted persisted key.)
+            if (!string.IsNullOrEmpty(envelope.ContainerName)
+                && !string.Equals(metadata.ContainerName, envelope.ContainerName, StringComparison.OrdinalIgnoreCase))
+            {
+                await _statusWriter.TransitionAsync(envelope.ItemId, MigrationLifecycleStatus.ValidationFailed,
+                    $"Placeholder names cold-storage container '{metadata.ContainerName}', but this restore was authorized for '{envelope.ContainerName}'; refusing.",
+                    level: LogLevel.Error, cancellationToken: cancellationToken);
+                return false;
+            }
+            if (!SharePointScope.IsBlobKeyWithinSite(target.SiteUrl, metadata.BlobPath))
+            {
+                await _statusWriter.TransitionAsync(envelope.ItemId, MigrationLifecycleStatus.ValidationFailed,
+                    $"Placeholder points at archive '{metadata.BlobPath}', which originates outside '{target.SiteUrl}'; refusing.",
+                    level: LogLevel.Error, cancellationToken: cancellationToken);
+                return false;
+            }
+
             // Concurrency guard (issue #10): if another item is already actively
             // restoring this same placeholder, coalesce this duplicate (no-op) so we
             // don't double-upload or fight over the destination. Checked before we
@@ -264,16 +285,27 @@ public sealed class SharePointRestorePipeline : BaseComponent
                 return await ResumeRemovePlaceholderAsync(envelope, spCtx, target, cancellationToken).ConfigureAwait(false);
             }
 
-            // Idempotent lift-and-shift: if the destination already holds a file of the archived size,
-            // it was already restored (the blob is retained by default), so re-restoring the same
-            // folder is a no-op rather than a conflict failure. Skip the copy, clean up any leftover
-            // placeholder, and mark the item Skipped.
+            // Idempotent lift-and-shift: if the destination already holds the archived file, the
+            // restore already happened, so re-restoring the same folder is a no-op rather than a
+            // conflict failure. Skip the copy, clean up any leftover placeholder, and mark Skipped.
+            // Note this is an *inferred* restore (matched on size, or the archive is already gone) —
+            // not one this run copied and verified — so the archive is deliberately NOT deleted here.
             var alreadyPresentLength = await GetFileLengthOrNullAsync(spCtx, destinationUrl, cancellationToken).ConfigureAwait(false);
-            if (alreadyPresentLength is long present
-                && present == await GetBlobLengthAsync(envelope.ContainerName, target.BlobPath!, cancellationToken).ConfigureAwait(false))
+            if (alreadyPresentLength is long present)
             {
-                _logger.LogInformation("Item {ItemId}: '{Dest}' already present at the archived size ({Len} bytes); skipping the copy (already restored).", envelope.ItemId, destinationUrl, present);
-                return await SkipAlreadyRestoredAsync(envelope, spCtx, target, cancellationToken).ConfigureAwait(false);
+                var archivedLength = await GetBlobLengthAsync(envelope.ContainerName, target.BlobPath!, cancellationToken).ConfigureAwait(false);
+                if (archivedLength is null)
+                {
+                    // Archive already deleted by an earlier verified restore of this file: the copy
+                    // is back in SharePoint and there is nothing left to pull. Skip, don't fail.
+                    _logger.LogInformation("Item {ItemId}: '{Dest}' is present and the archive is already gone; treating as already restored.", envelope.ItemId, destinationUrl);
+                    return await SkipAlreadyRestoredAsync(envelope, spCtx, target, cancellationToken).ConfigureAwait(false);
+                }
+                if (archivedLength == present)
+                {
+                    _logger.LogInformation("Item {ItemId}: '{Dest}' already present at the archived size ({Len} bytes); skipping the copy (already restored).", envelope.ItemId, destinationUrl, present);
+                    return await SkipAlreadyRestoredAsync(envelope, spCtx, target, cancellationToken).ConfigureAwait(false);
+                }
             }
 
             await _statusWriter.TransitionAsync(envelope.ItemId, MigrationLifecycleStatus.RestoreInProgress,
@@ -377,11 +409,15 @@ public sealed class SharePointRestorePipeline : BaseComponent
     }
 
     /// <summary>
-    /// The destination already holds the archived file (same size), so this restore is a no-op: remove
-    /// any leftover placeholder, delete the now-redundant blob (so the file isn't duplicated across
-    /// SharePoint + cold storage), and mark the item Skipped. A transient placeholder-removal failure
-    /// parks for an automatic retry (which re-detects the already-restored state — with the blob still
-    /// present, since the blob is only deleted after the placeholder is gone — and retries the cleanup).
+    /// The destination already holds the archived file, so this restore is a no-op: remove any leftover
+    /// placeholder and mark the item Skipped. The archive blob is deliberately <b>retained</b>: unlike
+    /// the copy path, this run never downloaded or verified the content — "already restored" is inferred
+    /// from the destination matching the archived byte length, and a same-size-but-different file would
+    /// otherwise cost us the only copy of the archived data. Deleting the archive stays exclusively on
+    /// the verified path (upload → <see cref="VerifyRestoredAsync"/> → delete). A leftover blob is a cost
+    /// concern that orphan reconciliation reports; a deleted one is unrecoverable.
+    /// A transient placeholder-removal failure parks for an automatic retry, which re-detects the
+    /// already-restored state and retries the cleanup.
     /// </summary>
     private async Task<bool> SkipAlreadyRestoredAsync(ColdStorageBusEnvelope envelope, ClientContext spCtx, PlaceholderRestoreTarget target, CancellationToken cancellationToken)
     {
@@ -393,14 +429,9 @@ public sealed class SharePointRestorePipeline : BaseComponent
                     "Already restored; removing leftover placeholder if present.", cancellationToken: cancellationToken);
                 await RemovePlaceholderIfPresentAsync(spCtx, target.PlaceholderServerRelativeUrl, cancellationToken).ConfigureAwait(false);
             }
-            // The file is confirmed present in SharePoint, so the archive blob is redundant — remove it
-            // (best-effort). Done only AFTER placeholder removal so a retry can still re-detect the state.
-            if (_deleteBlobAfterRestore && !string.IsNullOrEmpty(target.BlobPath))
-            {
-                await TryDeleteBlobAsync(envelope.JobId, envelope.ItemId, envelope.ContainerName, target.BlobPath, cancellationToken).ConfigureAwait(false);
-            }
             await _statusWriter.TransitionAsync(envelope.ItemId, MigrationLifecycleStatus.Skipped,
-                "Already restored — a file of the archived size is already in SharePoint; skipped the copy.", cancellationToken: cancellationToken);
+                "Already restored — a file of the archived size is already in SharePoint; skipped the copy. The archive was left in place because this run did not verify the restored content.",
+                cancellationToken: cancellationToken);
             return true;
         }
         catch (Exception ex)

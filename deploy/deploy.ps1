@@ -319,6 +319,22 @@ function Get-Tags { param($p) if ($p.PSObject.Properties['tags']) { return (Conv
 
 function Convert-TagsToCliArgs { param($p) (Get-Tags $p).GetEnumerator() | ForEach-Object { "$($_.Key)=$($_.Value)" } }
 
+# Optional cold-storage runtime toggles from an optional top-level "coldStorage" block in
+# params.json. StrictMode-safe. Accepts 0/1 or true/false; falls back to the code default.
+function Get-ColdStorageIntOption {
+    param($p, [string]$Name, [int]$Default)
+    if (-not $p.PSObject.Properties['coldStorage']) { return $Default }
+    if (-not $p.coldStorage.PSObject.Properties[$Name]) { return $Default }
+    $v = $p.coldStorage.$Name
+    if ($null -eq $v -or "$v" -eq '') { return $Default }
+    if ($v -is [bool]) { return [int]$v }
+    if ("$v" -ieq 'true') { return 1 }
+    if ("$v" -ieq 'false') { return 0 }
+    $parsed = 0
+    if ([int]::TryParse("$v", [ref]$parsed)) { return $parsed }
+    return $Default
+}
+
 function Get-StorageUserReaderOids {
     param($p)
     if (-not $p.PSObject.Properties['storage']) { return @() }
@@ -825,6 +841,9 @@ function Set-AppSettings {
     $savingsSku      = if ($savings -and $savings.PSObject.Properties['azureRetailSku'] -and $savings.azureRetailSku) { [string]$savings.azureRetailSku } else { 'Hot GRS' }
     $savingsRegion   = if ($savings -and $savings.PSObject.Properties['azureRegion']) { [string]$savings.azureRegion } else { [string]$global:Params.location }
 
+    # Restore behaviour, deployed explicitly so it can be changed without a code change.
+    $deleteBlobAfterRestore = Get-ColdStorageIntOption $global:Params 'deleteBlobAfterRestore' 1
+
     # Double-underscore convention works on both Windows and Linux.
     $settings = [ordered]@{
         'WEBSITE_LOAD_USER_PROFILE'             = '1'
@@ -865,6 +884,9 @@ function Set-AppSettings {
         'ColdStorageCurrency'                              = $savingsCurrency
         'ColdStorageAzureRegion'                           = $savingsRegion
         'ColdStorageAzureRetailSku'                        = $savingsSku
+        # Restore behaviour. Deployed explicitly so operators can choose it without a code
+        # change; the API needs it too because the break-glass/force restore runs in-process.
+        'ColdStorageDeleteBlobAfterRestore'                = [string]$deleteBlobAfterRestore
     }
 
     # Write to a temp JSON file and use az's @file syntax — avoids cmd.exe parsing semicolons
@@ -908,6 +930,10 @@ function Invoke-Phase-Function {
         $workerMaxConcurrentCalls = [int]$p.worker.maxConcurrentCalls
     }
 
+    # Cold-storage runtime toggles (optional top-level "coldStorage" block in params.json).
+    $deleteBlobAfterRestore = Get-ColdStorageIntOption $p 'deleteBlobAfterRestore' 1
+    $useProviderPipelines   = Get-ColdStorageIntOption $p 'useProviderPipelines' 0
+
     # App settings: identity-based AzureWebJobsStorage (accountName, no key) + the
     # Service Bus trigger (fullyQualifiedNamespace, no connection string), plus the
     # same Config values the API uses. KV references resolve via the Function MSI's
@@ -931,6 +957,12 @@ function Invoke-Phase-Function {
         'ServiceBusConnection__fullyQualifiedNamespace' = $o['serviceBusFqdn']
         'AzureWebJobsStorage__accountName'      = $o['storageAccountName']
         'AzureFunctionsJobHost__extensions__serviceBus__maxConcurrentCalls' = [string]$workerMaxConcurrentCalls
+        # Restore behaviour: 1 (default) deletes the archive after a VERIFIED restore so the
+        # file isn't duplicated across SharePoint + cold storage; 0 keeps the archive.
+        'ColdStorageDeleteBlobAfterRestore'     = [string]$deleteBlobAfterRestore
+        # Provider-abstraction pipelines. 0 (default) = the proven inline pipelines. Do NOT
+        # enable in production until the SharePoint/Azure adaptors are integration-tested.
+        'ColdStorageUseProviderPipelines'       = [string]$useProviderPipelines
     }
     $tmp = New-TemporaryFile
     try {

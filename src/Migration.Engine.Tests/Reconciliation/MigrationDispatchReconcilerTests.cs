@@ -58,6 +58,7 @@ public class MigrationDispatchReconcilerTests
             JobId = Guid.NewGuid(),
             Operation = MigrationOperationKind.Migrate,
             RequestedByUpn = "user@contoso.onmicrosoft.com",
+            SiteUrl = "https://contoso.sharepoint.com/sites/MigrationHost",
         };
         var item = new MigrationJobItem
         {
@@ -89,6 +90,7 @@ public class MigrationDispatchReconcilerTests
             JobId = Guid.NewGuid(),
             Operation = MigrationOperationKind.Restore,
             RequestedByUpn = "user@contoso.onmicrosoft.com",
+            SiteUrl = "https://contoso.sharepoint.com/sites/MigrationHost",
         };
         var item = new MigrationJobItem
         {
@@ -109,6 +111,34 @@ public class MigrationDispatchReconcilerTests
         Assert.NotNull(envelope.RestoreTarget);
     }
 
+    /// <summary>
+    /// Fail-closed: a job row with no recorded site can't be authorized, so its items are never
+    /// replayed onto the bus (the worker acts app-only with Sites.FullControl.All).
+    /// </summary>
+    [Fact]
+    public void BuildEnvelopeFromItem_JobWithoutASite_ReturnsNull()
+    {
+        var job = new MigrationJob
+        {
+            JobId = Guid.NewGuid(),
+            Operation = MigrationOperationKind.Migrate,
+            RequestedByUpn = "user@contoso.onmicrosoft.com",
+        };
+        var item = new MigrationJobItem
+        {
+            ItemId = Guid.NewGuid(),
+            JobId = job.JobId,
+            SpSiteUrl = "https://contoso.sharepoint.com/sites/MigrationHost",
+            SpWebUrl = "https://contoso.sharepoint.com/sites/MigrationHost",
+            SpServerRelativeUrl = "/sites/MigrationHost/Shared Documents/a.docx",
+            BlobContainerName = "cold",
+            FileSize = 1234,
+            SourceLastModified = Now,
+        };
+
+        Assert.Null(ColdStorageBusMessageFactory.BuildEnvelopeFromItem(item, job));
+    }
+
     [Fact]
     public void BuildEnvelopeFromItem_MissingCoordinates_ReturnsNull()
     {
@@ -118,5 +148,61 @@ public class MigrationDispatchReconcilerTests
         var envelope = ColdStorageBusMessageFactory.BuildEnvelopeFromItem(item, job);
 
         Assert.Null(envelope);
+    }
+
+    /// <summary>
+    /// Replay guard: this factory is the single funnel through which a persisted row is re-published
+    /// (reconciler re-drive, admin requeue, failure recovery). A row whose paths point outside the
+    /// job's authorized site must never be replayed into an app-only SharePoint operation.
+    /// </summary>
+    [Theory]
+    [InlineData("https://contoso.sharepoint.com/sites/Other", "/sites/Other/Shared Documents/a.docx")]
+    [InlineData("https://contoso.sharepoint.com/sites/MigrationHost", "/sites/Other/Shared Documents/a.docx")]
+    [InlineData("https://evil.example/sites/MigrationHost", "/sites/MigrationHost/Shared Documents/a.docx")]
+    public void BuildEnvelopeFromItem_OutsideTheJobSite_ReturnsNull(string itemSiteUrl, string itemPath)
+    {
+        var job = new MigrationJob
+        {
+            JobId = Guid.NewGuid(),
+            Operation = MigrationOperationKind.Restore,
+            RequestedByUpn = "user@contoso.onmicrosoft.com",
+            SiteUrl = "https://contoso.sharepoint.com/sites/MigrationHost",
+        };
+        var item = new MigrationJobItem
+        {
+            ItemId = Guid.NewGuid(),
+            JobId = job.JobId,
+            SpSiteUrl = itemSiteUrl,
+            SpWebUrl = itemSiteUrl,
+            SpServerRelativeUrl = itemPath,
+            PlaceholderServerRelativeUrl = itemPath + ".url",
+            BlobContainerName = "cold",
+        };
+
+        Assert.Null(ColdStorageBusMessageFactory.BuildEnvelopeFromItem(item, job));
+    }
+
+    [Fact]
+    public void BuildEnvelopeFromItem_InsideTheJobSite_StillBuilds()
+    {
+        var job = new MigrationJob
+        {
+            JobId = Guid.NewGuid(),
+            Operation = MigrationOperationKind.Restore,
+            RequestedByUpn = "user@contoso.onmicrosoft.com",
+            SiteUrl = "https://contoso.sharepoint.com/sites/MigrationHost",
+        };
+        var item = new MigrationJobItem
+        {
+            ItemId = Guid.NewGuid(),
+            JobId = job.JobId,
+            SpSiteUrl = "https://contoso.sharepoint.com/sites/MigrationHost",
+            SpWebUrl = "https://contoso.sharepoint.com/sites/MigrationHost",
+            SpServerRelativeUrl = "/sites/MigrationHost/Shared Documents/a.docx",
+            PlaceholderServerRelativeUrl = "/sites/MigrationHost/Shared Documents/a.docx.url",
+            BlobContainerName = "cold",
+        };
+
+        Assert.NotNull(ColdStorageBusMessageFactory.BuildEnvelopeFromItem(item, job));
     }
 }

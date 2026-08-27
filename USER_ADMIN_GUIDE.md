@@ -26,13 +26,14 @@ Think of it as an **automated archive-and-recall service for SharePoint document
 
 | Role | Where they work | What they can do |
 | --- | --- | --- |
-| **Site-collection owner** | Inside SharePoint document libraries | Archive (migrate) files/folders to cold storage and restore them back. This is the only role that can trigger archive/restore actions from SharePoint. |
+| **Site contributor / owner** | Inside SharePoint document libraries | Archive (migrate) files/folders to cold storage and restore them back. Anyone with **edit (contribute) rights** on the site qualifies — which includes site-collection owners. |
 | **End user (reader)** | SharePoint + the web portal | See which files are archived, open a placeholder to download or request a file back, browse and search archived content (if granted storage access). |
 | **Administrator** | The web portal + admin APIs | Configure what gets archived, watch and prioritise the processing queue, see cost savings, reconcile storage, force-restore in emergencies, manage exclusions, and review the audit trail. |
 
 > **Golden rule of access:** cold-storage actions from SharePoint are offered **only
-> to site-collection owners**. Access to the archived files themselves is controlled
-> separately, per storage container, by Entra ID (Azure AD) user/group membership.
+> to users who can already edit the file** — i.e. contributor (edit) rights or better on
+> the site. Read-only visitors never see them. Access to the archived files themselves is
+> controlled separately, per storage container, by Entra ID (Azure AD) user/group membership.
 
 ---
 
@@ -51,10 +52,11 @@ see a "failed" status, but you will not lose data.
 
 ---
 
-## 4. Using it in SharePoint (site owners)
+## 4. Using it in SharePoint (site contributors and owners)
 
 The system adds a small menu to your SharePoint document libraries and an extra
-**status column**. You'll only see the archive/restore commands if you're a site owner.
+**status column**. You'll only see the archive/restore commands if you have edit
+(contributor) rights on the site — read-only visitors don't get them.
 
 ### Archiving files ("Migrate to cold storage")
 
@@ -62,7 +64,7 @@ The system adds a small menu to your SharePoint document libraries and an extra
 2. Choose **Migrate to cold storage** from the command menu.
 
 ![The SharePoint document library command menu with "Migrate to cold storage" highlighted](docs/screenshots/spfx-migrate-menu.png)
-*The command set adds **Migrate to cold storage**, **Restore from cold storage** and **Cold storage status** to the library toolbar and item menu — visible only to site owners.*
+*The command set adds **Migrate to cold storage**, **Restore from cold storage** and **Cold storage status** to the library toolbar and item menu — visible only to users with edit (contributor) rights.*
 
 3. Confirm the action when prompted. You can optionally tick **Keep a copy of the
    original metadata as columns** to record the original author/editor/modified
@@ -71,8 +73,8 @@ The system adds a small menu to your SharePoint document libraries and an extra
 ![The Migrate to cold storage confirmation dialog explaining that each item is copied and verified before the original is removed](docs/screenshots/spfx-migrate-confirm.png)
 *The confirmation spells out the safety promise up front: each item is copied and **verified** before the original is removed, and folders include everything inside them.*
 
-4. If more than one destination is available, **pick a container** (destinations can
-   have different access rules — see §6).
+4. The system picks the destination container for you (the first cold-storage container
+   you have migrate rights on — destinations can have different access rules, see §6).
 5. The system queues the work. A progress dialog and the **status column** update
    automatically as each item moves through the lifecycle. You can close the dialog —
    the work continues in the background.
@@ -279,8 +281,9 @@ No. The original is only deleted after the copy is made **and** verified. Any ea
 failure leaves the original untouched.
 
 **Who can archive or restore?**
-Only **site-collection owners** can trigger these actions from SharePoint. Access to the
-archived files is controlled separately per storage container by Entra ID membership.
+Anyone with **contributor (edit) rights** on the site — which includes site-collection
+owners — can trigger these actions from SharePoint. Read-only visitors cannot. Access to
+the archived files is controlled separately per storage container by Entra ID membership.
 
 **What happens to files under legal hold or a retention label?**
 They are excluded from archiving so compliance requirements are preserved.

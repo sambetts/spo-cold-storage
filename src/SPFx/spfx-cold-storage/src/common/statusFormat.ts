@@ -114,6 +114,16 @@ export function formatLabel(value: StatusLike): string {
 }
 
 /**
+ * True for a terminal status that represents an actual failure. Skipped/Cancelled are terminal
+ * but are NOT failures (nothing to do / already in the desired state), so they must not turn the
+ * finished banner into an error. Mirrors isFailedStatus in the SPA (web.client/src/api/status.ts).
+ */
+export function isFailedStatus(value: StatusLike): boolean {
+  const status = normalizeStatus(value);
+  return status ? FAILED_SUFFIX_REGEX.test(status) : false;
+}
+
+/**
  * True when the lifecycle will not transition further without an explicit
  * retry or re-queue. Mirrors MigrationLifecycleStatusExtensions.IsTerminal on
  * the backend.

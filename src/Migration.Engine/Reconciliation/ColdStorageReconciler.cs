@@ -97,9 +97,24 @@ public sealed class ColdStorageReconciler : BaseComponent
                     try
                     {
                         var placeholderExists = siteReachable
-                            && await PlaceholderExistsAsync(ctx!, item.PlaceholderServerRelativeUrl!, cancellationToken).ConfigureAwait(false);
+                            && await FileExistsAsync(ctx!, item.PlaceholderServerRelativeUrl!, cancellationToken).ConfigureAwait(false);
                         if (placeholderExists)
                         {
+                            continue;
+                        }
+
+                        // A missing placeholder is NOT proof of an orphan: a successful restore
+                        // legitimately removes the placeholder and puts the real file back at the
+                        // original path. If that file is present, the archive is a retained copy of
+                        // live data — deleting it here would destroy the operator's retained archive
+                        // (ColdStorageDeleteBlobAfterRestore=0). Only an absent original is an orphan.
+                        if (siteReachable
+                            && !string.IsNullOrEmpty(item.SpServerRelativeUrl)
+                            && await FileExistsAsync(ctx!, item.SpServerRelativeUrl, cancellationToken).ConfigureAwait(false))
+                        {
+                            _logger.LogDebug(
+                                "Reconcile: placeholder '{Placeholder}' is gone but '{Original}' is present (restored); not an orphan.",
+                                item.PlaceholderServerRelativeUrl, item.SpServerRelativeUrl);
                             continue;
                         }
 
@@ -136,7 +151,7 @@ public sealed class ColdStorageReconciler : BaseComponent
         return summary;
     }
 
-    private static async Task<bool> PlaceholderExistsAsync(ClientContext ctx, string serverRelativeUrl, CancellationToken cancellationToken)
+    private static async Task<bool> FileExistsAsync(ClientContext ctx, string serverRelativeUrl, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
         var file = ctx.Web.GetFileByServerRelativeUrl(serverRelativeUrl);
