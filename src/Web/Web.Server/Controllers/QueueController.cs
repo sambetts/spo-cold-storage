@@ -350,17 +350,27 @@ public class QueueController(
             }
         }
 
+        // Publish in batches, and OFF the request token. One-at-a-time sends made a 4,000-item
+        // recover spend ~83s inside the HTTP request; a client disconnect part-way through then
+        // left the remainder Queued with no bus message, so only the dispatch reconciler would
+        // rescue them (up to MaxQueuedMinutes later). Batching plus CancellationToken.None keeps
+        // the click fast and stops a disconnect orphaning half the recovery.
         var publishFailures = new List<(Guid ItemId, string Error)>();
-        foreach (var envelope in toPublish)
+        const int PublishChunkSize = 100;
+        for (var offset = 0; offset < toPublish.Count; offset += PublishChunkSize)
         {
+            var chunk = toPublish.GetRange(offset, Math.Min(PublishChunkSize, toPublish.Count - offset));
             try
             {
-                await _publisher.PublishAsync(envelope, cancellationToken).ConfigureAwait(false);
+                await _publisher.PublishManyAsync(chunk, CancellationToken.None).ConfigureAwait(false);
             }
-            catch (Exception ex) when (ex is not OperationCanceledException)
+            catch (Exception ex)
             {
-                publishFailures.Add((envelope.ItemId, ex.Message));
-                _logger.LogError(ex, "Requeue publish failed for item {ItemId}.", envelope.ItemId);
+                foreach (var envelope in chunk)
+                {
+                    publishFailures.Add((envelope.ItemId, ex.Message));
+                }
+                _logger.LogError(ex, "Requeue publish failed for a batch of {Count} item(s).", chunk.Count);
             }
         }
 
@@ -370,7 +380,7 @@ public class QueueController(
             var failedItems = await _db.MigrationJobItems
                 .Include(i => i.Job)
                 .Where(i => failedIds.Contains(i.ItemId))
-                .ToListAsync(cancellationToken)
+                .ToListAsync(CancellationToken.None)
                 .ConfigureAwait(false);
             foreach (var item in failedItems)
             {
@@ -392,7 +402,7 @@ public class QueueController(
                     Action = "Requeue",
                 });
             }
-            await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+            await _db.SaveChangesAsync(CancellationToken.None).ConfigureAwait(false);
             result.Requeued -= publishFailures.Count;
             result.PublishFailed = publishFailures.Count;
         }

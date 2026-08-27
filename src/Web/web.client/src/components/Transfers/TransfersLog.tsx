@@ -8,6 +8,9 @@ import { describeLogLevel, describeOperation, describeStatus, effectiveJobStatus
 import { fileName, formatCountdown, formatDateTime, formatEta, formatNumber, formatRelative } from "../../utils/format";
 
 const REFRESH_MS = 10000;
+// Recovery drains fast once the worker picks the items up, so poll harder than the
+// normal auto-refresh while an admin is watching a "Recover failed" run.
+const RECOVER_POLL_MS = 3000;
 
 // Resizable columns for the transfers table. Widths persist in localStorage so a
 // user's layout survives reloads. The trailing "Files" column is auto-sized so it
@@ -170,6 +173,75 @@ function WorkerBanner() {
 // ---------------------------------------------------------------------------
 type ResultFilter = "all" | "failures" | "inprogress" | "completed";
 
+/**
+ * Live progress for an admin "Recover failed" run. Recovery is asynchronous — the click only
+ * re-queues the items; the worker then drains them over seconds-to-minutes (and can be throttled
+ * by SharePoint on the way). Without this the admin got a spinner and no idea whether anything
+ * was happening, so it looked like the button did nothing.
+ */
+function RecoveryProgress({
+  start,
+  remaining,
+  inProgress,
+  throttled,
+  watching,
+  onDismiss,
+}: {
+  start: number;
+  remaining: number;
+  inProgress: number;
+  throttled: number;
+  watching: boolean;
+  onDismiss: () => void;
+}) {
+  const cleared = Math.max(0, start - remaining);
+  const pct = start > 0 ? Math.min(100, Math.round((cleared / start) * 100)) : 100;
+  const done = !watching;
+  return (
+    <div
+      style={{
+        border: "1px solid #d6e4f0",
+        background: "#f3f9fd",
+        borderRadius: 6,
+        padding: "10px 12px",
+        marginBottom: 12,
+      }}
+    >
+      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 6 }}>
+        <strong style={{ fontSize: 13 }}>
+          {done ? "Recovery finished" : "Recovering…"} {formatNumber(cleared)} of {formatNumber(start)} cleared
+        </strong>
+        <span style={{ fontSize: 12, color: "#605e5c" }}>
+          {formatNumber(remaining)} still failed
+          {inProgress > 0 && ` · ${formatNumber(inProgress)} in flight`}
+          {throttled > 0 && ` · ${formatNumber(throttled)} waiting to retry`}
+        </span>
+        {done && (
+          <Button size="small" appearance="subtle" onClick={onDismiss} style={{ marginLeft: "auto" }}>
+            Dismiss
+          </Button>
+        )}
+      </div>
+      <div style={{ height: 6, background: "#e1dfdd", borderRadius: 3, overflow: "hidden" }}>
+        <div
+          style={{
+            width: `${pct}%`,
+            height: "100%",
+            background: remaining === 0 ? "#107c10" : "#0078d4",
+            transition: "width .4s ease",
+          }}
+        />
+      </div>
+      {!done && (
+        <div style={{ fontSize: 11, color: "#605e5c", marginTop: 5 }}>
+          Refreshing automatically. Items that were already done are cleared instantly; the rest are
+          re-processed by the worker and may be slowed by SharePoint throttling.
+        </div>
+      )}
+    </div>
+  );
+}
+
 function TransfersList() {
   const api = useApi();
   const navigate = useNavigate();
@@ -183,6 +255,10 @@ function TransfersList() {
   const [auto, setAuto] = useState(false);
   const [recovering, setRecovering] = useState(false);
   const [recoverMsg, setRecoverMsg] = useState<string | null>(null);
+  // Live recovery progress. `startedAt` total is the baseline we measure "cleared" against;
+  // `watching` keeps the auto-refresh running after the POST returns so the user can watch the
+  // worker actually drain the backlog instead of staring at a spinner.
+  const [recoverProgress, setRecoverProgress] = useState<{ start: number; watching: boolean } | null>(null);
   const reqId = useRef(0);
 
   const load = useCallback(async () => {
@@ -233,6 +309,23 @@ function TransfersList() {
   }, [jobs, search, result]);
 
   const totalFailed = useMemo(() => (jobs ?? []).reduce((n, j) => n + j.failedCount, 0), [jobs]);
+  const totalInProgress = useMemo(() => (jobs ?? []).reduce((n, j) => n + j.inProgressCount, 0), [jobs]);
+  const totalThrottled = useMemo(() => (jobs ?? []).reduce((n, j) => n + (j.throttledCount ?? 0), 0), [jobs]);
+
+  // While a recovery is being watched, poll on a short interval regardless of the
+  // "Auto-refresh" checkbox, and stop once nothing is failed or in flight any more.
+  useEffect(() => {
+    if (!recoverProgress?.watching) return;
+    const t = setInterval(() => void load(), RECOVER_POLL_MS);
+    return () => clearInterval(t);
+  }, [recoverProgress?.watching, load]);
+
+  useEffect(() => {
+    if (!recoverProgress?.watching || loading) return;
+    if (totalFailed === 0 && totalInProgress === 0) {
+      setRecoverProgress((p) => (p ? { ...p, watching: false } : p));
+    }
+  }, [recoverProgress?.watching, loading, totalFailed, totalInProgress]);
 
   const recoverAllFailed = useCallback(async () => {
     if (
@@ -245,6 +338,7 @@ function TransfersList() {
     }
     setRecovering(true);
     setRecoverMsg(null);
+    setRecoverProgress({ start: totalFailed, watching: true });
     try {
       const res = await api.post<{ requeued: number; recovered?: number; skipped: number; publishFailed: number }>(
         "/api/admin/queue/requeue",
@@ -259,6 +353,7 @@ function TransfersList() {
       );
       await load();
     } catch (err) {
+      setRecoverProgress(null);
       setRecoverMsg(
         err instanceof ApiError
           ? err.status === 403
@@ -269,7 +364,7 @@ function TransfersList() {
     } finally {
       setRecovering(false);
     }
-  }, [api, load]);
+  }, [api, load, totalFailed]);
 
   const recoverStuckQueued = useCallback(async () => {
     if (
@@ -353,6 +448,16 @@ function TransfersList() {
           Recover stuck queued
         </Button>
       </div>
+      {recoverProgress && (
+        <RecoveryProgress
+          start={recoverProgress.start}
+          remaining={totalFailed}
+          inProgress={totalInProgress}
+          throttled={totalThrottled}
+          watching={recoverProgress.watching}
+          onDismiss={() => setRecoverProgress(null)}
+        />
+      )}
       {recoverMsg && <div style={{ fontSize: 13, color: "#605e5c", marginBottom: 12 }}>{recoverMsg}</div>}
 
       {loading && !jobs && <Spinner label="Loading transfers…" size="small" />}
