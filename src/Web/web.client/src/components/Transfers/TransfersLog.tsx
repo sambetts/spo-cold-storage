@@ -194,7 +194,7 @@ function RecoveryProgress({
   watching: boolean;
   onDismiss: () => void;
 }) {
-  const cleared = Math.max(0, start - remaining);
+  const cleared = Math.max(0, start - remaining - inProgress);
   const pct = start > 0 ? Math.min(100, Math.round((cleared / start) * 100)) : 100;
   const done = !watching;
   return (
@@ -209,11 +209,11 @@ function RecoveryProgress({
     >
       <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 6 }}>
         <strong style={{ fontSize: 13 }}>
-          {done ? "Recovery finished" : "Recovering…"} {formatNumber(cleared)} of {formatNumber(start)} cleared
+          {done ? "Recovery finished" : "Recovering…"} {formatNumber(cleared)} of {formatNumber(start)} resolved
         </strong>
         <span style={{ fontSize: 12, color: "#605e5c" }}>
+          {inProgress > 0 && `${formatNumber(inProgress)} in flight · `}
           {formatNumber(remaining)} still failed
-          {inProgress > 0 && ` · ${formatNumber(inProgress)} in flight`}
           {throttled > 0 && ` · ${formatNumber(throttled)} waiting to retry`}
         </span>
         {done && (
