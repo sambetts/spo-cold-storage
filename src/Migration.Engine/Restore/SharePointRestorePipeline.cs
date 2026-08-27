@@ -79,8 +79,27 @@ public sealed class SharePointRestorePipeline : BaseComponent
             await spCtx.ExecuteQueryAsyncWithThrottleRetries(_logger).ConfigureAwait(false);
             if (!placeholderFile.Exists)
             {
+                // A missing placeholder is NOT automatically a failure. The normal end state of a
+                // SUCCESSFUL restore is exactly this: the file is back and the placeholder was
+                // removed. Re-running such an item (e.g. a duplicate row from re-submitting the
+                // same folder, or an admin "Recover failed") would otherwise fail forever with
+                // "Placeholder not found" and could never clear. Check the destination first: if
+                // the real file is sitting there, the work is already done — mark it Skipped.
+                var destination = target.OriginalServerRelativeUrl;
+                if (!string.IsNullOrEmpty(destination)
+                    && await GetFileLengthOrNullAsync(spCtx, destination, cancellationToken).ConfigureAwait(false) is not null)
+                {
+                    _logger.LogInformation(
+                        "Item {ItemId}: placeholder '{Placeholder}' is gone and '{Dest}' is present — already restored; marking Skipped.",
+                        envelope.ItemId, target.PlaceholderServerRelativeUrl, destination);
+                    await _statusWriter.TransitionAsync(envelope.ItemId, MigrationLifecycleStatus.Skipped,
+                        "Already restored — the file is back in SharePoint and its placeholder has been removed; nothing to do.",
+                        cancellationToken: cancellationToken);
+                    return true;
+                }
                 await _statusWriter.TransitionAsync(envelope.ItemId, MigrationLifecycleStatus.ValidationFailed,
-                    "Placeholder not found in SharePoint.", level: LogLevel.Warning, cancellationToken: cancellationToken);
+                    "Placeholder not found in SharePoint, and no file is present at the original location to restore to.",
+                    level: LogLevel.Warning, cancellationToken: cancellationToken);
                 return false;
             }
 

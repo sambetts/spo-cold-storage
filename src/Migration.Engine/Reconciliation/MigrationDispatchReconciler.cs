@@ -170,9 +170,15 @@ public sealed class MigrationDispatchReconciler : BaseComponent
                 // Queued but keeps the original CreatedAt, so an item that already archived days
                 // ago trips the 24h give-up instantly. Never label a file whose source is gone
                 // "copy failed / source untouched" — that is wrong and unsafe to act on.
+                // Restore items must never be labelled with a migrate status either: a restore
+                // never "copies to cold storage", so CopyToColdStorageFailed + "the source file was
+                // left untouched" is nonsense on a restore and misleads whoever reads the log.
+                var isRestore = item.Job.Operation == MigrationOperationKind.Restore;
+                var giveUpDefault = isRestore
+                    ? MigrationLifecycleStatus.RestoreFailed
+                    : MigrationLifecycleStatus.CopyToColdStorageFailed;
                 var failStatus = ArchivedItemReconcile.ResolveFailureStatus(
-                    item.SourceDeletedAt, item.PlaceholderCreatedAt,
-                    MigrationLifecycleStatus.CopyToColdStorageFailed);
+                    item.SourceDeletedAt, item.PlaceholderCreatedAt, giveUpDefault);
                 if (failStatus is null)
                 {
                     // Fully archived — pass 0 (this run or the next) completes it. Don't fail.
@@ -191,8 +197,10 @@ public sealed class MigrationDispatchReconciler : BaseComponent
                 }
                 await writer.TransitionAsync(
                     item.ItemId,
-                    MigrationLifecycleStatus.CopyToColdStorageFailed,
-                    $"Not processed within {thresholds.MaxQueuedMinutes} min of being queued; giving up. The source file was left untouched in SharePoint.",
+                    failStatus.Value,
+                    isRestore
+                        ? $"Not processed within {thresholds.MaxQueuedMinutes} min of being queued; giving up. Nothing was changed in SharePoint and the archived copy is still in cold storage."
+                        : $"Not processed within {thresholds.MaxQueuedMinutes} min of being queued; giving up. The source file was left untouched in SharePoint.",
                     level: LogLevel.Error,
                     cancellationToken: cancellationToken).ConfigureAwait(false);
                 gaveUp++;
