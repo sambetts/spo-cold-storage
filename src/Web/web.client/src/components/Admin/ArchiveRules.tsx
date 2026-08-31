@@ -2,13 +2,14 @@ import { CSSProperties, useCallback, useEffect, useState } from "react";
 import { Badge, Button, Input, Select, Spinner } from "@fluentui/react-components";
 import { Delete20Regular, LockClosed16Regular } from "@fluentui/react-icons";
 import { ApiError, useApi } from "../../api/client";
-import { ExclusionScope, ExtensionRule, ExtensionRuleMode } from "../../api/types";
+import { ExclusionScope, ExtensionRule, ExtensionRuleMode, RuntimeSetting } from "../../api/types";
 import { formatDateTime } from "../../utils/format";
 
 /**
- * /admin/rules — runtime-editable archive rules (admin only). Two sections:
- *   1. File-type rules  (GET/POST/DELETE /api/exclusions/extensions)
- *   2. Site & folder scopes (GET/POST/DELETE /api/exclusions)
+ * /admin/rules — runtime-editable archive rules (admin only). Three sections:
+ *   1. Preservation settings (GET/PUT/DELETE /api/admin/settings)
+ *   2. File-type rules  (GET/POST/DELETE /api/exclusions/extensions)
+ *   3. Site & folder scopes (GET/POST/DELETE /api/exclusions)
  * `.url` is shown as a permanent, non-removable exclusion — cold-storage
  * placeholders are hardcoded to never be archived (ArchiveEligibilityEvaluator).
  */
@@ -41,6 +42,7 @@ export function ArchiveRules() {
   const api = useApi();
   const [rules, setRules] = useState<ExtensionRule[] | null>(null);
   const [scopes, setScopes] = useState<ExclusionScope[] | null>(null);
+  const [settings, setSettings] = useState<RuntimeSetting[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
@@ -48,12 +50,14 @@ export function ArchiveRules() {
     setLoading(true);
     setError(null);
     try {
-      const [r, s] = await Promise.all([
+      const [r, s, cfg] = await Promise.all([
         api.get<ExtensionRule[]>("/api/exclusions/extensions"),
         api.get<ExclusionScope[]>("/api/exclusions"),
+        api.get<RuntimeSetting[]>("/api/admin/settings"),
       ]);
       setRules(r);
       setScopes(s);
+      setSettings(cfg);
     } catch (err) {
       setError(apiErrText(err, "Could not load archive rules."));
     } finally {
@@ -81,10 +85,145 @@ export function ArchiveRules() {
 
       {!loading && !error && (
         <>
+          <SettingsCard settings={settings ?? []} onChanged={load} />
           <ExtensionRulesCard rules={rules ?? []} onChanged={load} />
           <ScopesCard scopes={scopes ?? []} onChanged={load} />
         </>
       )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Runtime settings (portal-configurable, no redeploy)
+// ---------------------------------------------------------------------------
+function SettingsCard({ settings, onChanged }: { settings: RuntimeSetting[]; onChanged: () => Promise<void> }) {
+  const api = useApi();
+  const [busyKey, setBusyKey] = useState<string | null>(null);
+  const [formErr, setFormErr] = useState<string | null>(null);
+  const [drafts, setDrafts] = useState<Record<string, string>>({});
+
+  const save = async (setting: RuntimeSetting, value: string) => {
+    setBusyKey(setting.key);
+    setFormErr(null);
+    try {
+      await api.put(`/api/admin/settings/${encodeURIComponent(setting.key)}`, { value });
+      setDrafts(d => {
+        const next = { ...d };
+        delete next[setting.key];
+        return next;
+      });
+      await onChanged();
+    } catch (err) {
+      setFormErr(apiErrText(err, "Could not save the setting."));
+    } finally {
+      setBusyKey(null);
+    }
+  };
+
+  const reset = async (setting: RuntimeSetting) => {
+    setBusyKey(setting.key);
+    setFormErr(null);
+    try {
+      await api.del(`/api/admin/settings/${encodeURIComponent(setting.key)}`);
+      await onChanged();
+    } catch (err) {
+      setFormErr(apiErrText(err, "Could not reset the setting."));
+    } finally {
+      setBusyKey(null);
+    }
+  };
+
+  const describeValue = (s: RuntimeSetting) =>
+    s.kind === "Toggle" ? (s.value === "1" ? "On" : "Off") : s.value;
+
+  return (
+    <div style={card}>
+      <h2 style={{ fontSize: 16, fontWeight: 600, margin: "0 0 4px" }}>Settings</h2>
+      <p style={{ color: "#605e5c", fontSize: 13, margin: "0 0 12px" }}>
+        Apply to both the web app and the background worker, within about a minute. No redeploy needed.
+      </p>
+
+      {settings.length === 0 && <div style={{ color: "#605e5c", fontSize: 13 }}>No configurable settings.</div>}
+
+      {settings.map(s => {
+        const draft = drafts[s.key] ?? s.value;
+        const dirty = draft !== s.value;
+        const busy = busyKey === s.key;
+        return (
+          <div key={s.key} style={{ borderTop: "1px solid #f3f2f1", paddingTop: 12, marginTop: 12 }}>
+            <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
+              <strong style={{ fontSize: 14 }}>{s.label || s.key}</strong>
+              <Badge appearance="filled" color={s.kind === "Toggle" && s.value === "1" ? "success" : "informative"}>
+                {describeValue(s)}
+              </Badge>
+              {s.isOverridden && (
+                <Badge appearance="outline" color="warning">
+                  Overridden (deployed: {s.kind === "Toggle" ? (s.deployedValue === "1" ? "On" : "Off") : s.deployedValue})
+                </Badge>
+              )}
+
+              <div style={{ marginLeft: "auto", display: "flex", gap: 8, alignItems: "center" }}>
+                {s.kind === "Toggle" && (
+                  <Button
+                    size="small"
+                    appearance={s.value === "1" ? "secondary" : "primary"}
+                    disabled={busy}
+                    onClick={() => void save(s, s.value === "1" ? "0" : "1")}
+                  >
+                    {s.value === "1" ? "Turn off" : "Turn on"}
+                  </Button>
+                )}
+
+                {s.kind === "Number" && (
+                  <>
+                    <Input
+                      type="number"
+                      min={0}
+                      size="small"
+                      style={{ width: 130 }}
+                      value={draft}
+                      disabled={busy}
+                      onChange={(_, d) => setDrafts(prev => ({ ...prev, [s.key]: d.value }))}
+                    />
+                    <Button size="small" appearance="primary" disabled={busy || !dirty} onClick={() => void save(s, draft)}>
+                      Save
+                    </Button>
+                  </>
+                )}
+
+                {s.kind === "Choice" && (
+                  <Select
+                    size="small"
+                    value={s.value}
+                    disabled={busy}
+                    onChange={(_, d) => void save(s, d.value)}
+                  >
+                    {(s.choices ?? []).map(c => (
+                      <option key={c} value={c}>{c}</option>
+                    ))}
+                  </Select>
+                )}
+
+                {s.isOverridden && (
+                  <Button size="small" appearance="subtle" disabled={busy} onClick={() => void reset(s)}>
+                    Reset
+                  </Button>
+                )}
+              </div>
+            </div>
+            <p style={{ color: "#605e5c", fontSize: 12, margin: "6px 0 0" }}>{s.description}</p>
+            {s.updatedBy && (
+              <p style={{ color: "#8a8886", fontSize: 12, margin: "4px 0 0" }}>
+                Last changed by {s.updatedBy}
+                {s.updatedAt ? ` on ${formatDateTime(s.updatedAt)}` : ""}.
+              </p>
+            )}
+          </div>
+        );
+      })}
+
+      {formErr && <ErrorText>{formErr}</ErrorText>}
     </div>
   );
 }

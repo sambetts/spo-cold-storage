@@ -103,6 +103,12 @@ public interface IJobStatusWriter
     Task RecordRestoredAsync(Guid itemId, string restoredServerRelativeUrl, CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// Persists the snapshot of the source item's unique permissions taken before the
+    /// source was deleted (issue #67), so they can be re-applied to the restored file.
+    /// </summary>
+    Task RecordPermissionsAsync(Guid itemId, string permissionsJson, CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// True if a DIFFERENT item is already actively restoring the same placeholder
     /// (cross-process concurrency guard for issue #10). Excludes <paramref name="itemId"/>
     /// itself.

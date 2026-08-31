@@ -194,6 +194,18 @@ public sealed class JobStatusWriter(SPOColdStorageDbContext db, ILogger logger) 
     }
 
     /// <inheritdoc />
+    public async Task RecordPermissionsAsync(Guid itemId, string permissionsJson, CancellationToken cancellationToken = default)
+    {
+        var item = await _db.MigrationJobItems.FirstOrDefaultAsync(i => i.ItemId == itemId, cancellationToken);
+        if (item == null)
+        {
+            return;
+        }
+        item.PermissionsJson = permissionsJson;
+        await _db.SaveChangesAsync(cancellationToken);
+    }
+
+    /// <inheritdoc />
     public async Task<bool> IsRestoreInFlightForOtherItemAsync(
         Guid itemId,
         string placeholderServerRelativeUrl,

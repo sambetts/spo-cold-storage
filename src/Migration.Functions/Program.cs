@@ -19,6 +19,11 @@ var host = new HostBuilder()
         var config = new Config(context.Configuration);
         services.AddSingleton(config);
 
+        // Cross-process cache (issue #68): a value warmed by any instance is available to
+        // every instance, so scaling the worker out no longer multiplies SharePoint load.
+        Migration.Engine.Caching.ColdStorageCacheFactory.Initialise(
+            config, LoggerFactory.Create(b => b.AddConsole()).CreateLogger("ColdStorageCache"));
+
         // Shared, transport-agnostic dispatch core — identical behaviour to the
         // WebJob listener (envelope + legacy fallback, per-host in-flight guards,
         // dead-letter of unparseable messages). The retry publisher lets it schedule
@@ -39,6 +44,11 @@ var host = new HostBuilder()
         // fail items stuck by a crashed worker, so a migration can never silently
         // freeze (see DispatchReconcilerService / MigrationDispatchReconciler).
         services.AddHostedService<DispatchReconcilerService>();
+
+        // Scheduled orphan reconciliation (issue #21): sweeps for archives whose
+        // .url placeholder or whole site has been deleted, so they aren't billed
+        // forever. Disabled unless an interval is configured (portal or app setting).
+        services.AddHostedService<OrphanReconcilerService>();
     })
     .Build();
 

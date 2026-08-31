@@ -1,6 +1,8 @@
 using Entities.Configuration;
 using Models.ColdStorage;
 
+using Migration.Engine.Settings;
+
 namespace Migration.Engine.Migration;
 
 /// <summary>
@@ -109,8 +111,9 @@ public sealed class ArchiveEligibilityEvaluator : IArchiveEligibilityEvaluator
     private readonly IArchiveExtensionPolicySource? _extensionPolicySource;
     private readonly IFileReadActivitySource? _readActivitySource;
     private readonly int _maxAccessCount;
+    private readonly IColdStorageSettingsSource? _settings;
 
-    public ArchiveEligibilityEvaluator(Config config, IArchiveExclusionSource? exclusionSource = null, IFileReadActivitySource? readActivitySource = null, IArchiveExtensionPolicySource? extensionPolicySource = null)
+    public ArchiveEligibilityEvaluator(Config config, IArchiveExclusionSource? exclusionSource = null, IFileReadActivitySource? readActivitySource = null, IArchiveExtensionPolicySource? extensionPolicySource = null, IColdStorageSettingsSource? settings = null)
         : this(
             (config ?? throw new ArgumentNullException(nameof(config))).ColdStorageMinFileSizeBytes,
             config.ColdStorageExcludedExtensions,
@@ -120,6 +123,9 @@ public sealed class ArchiveEligibilityEvaluator : IArchiveEligibilityEvaluator
             config.ColdStorageMaxAccessCount,
             extensionPolicySource)
     {
+        // Portal overrides for the two numeric thresholds, so an admin can tune
+        // eligibility without a redeploy (issues #20, #29).
+        _settings = settings;
     }
 
     /// <summary>
@@ -175,6 +181,15 @@ public sealed class ArchiveEligibilityEvaluator : IArchiveEligibilityEvaluator
 
         var ext = NormalizeExtension(candidate.ServerRelativeUrl);
 
+        // Resolve the numeric thresholds at evaluate time so a portal change applies
+        // without a redeploy; falls back to the value captured from app settings.
+        var minSizeBytes = _settings is null
+            ? _minSizeBytes
+            : await _settings.GetIntAsync(ColdStorageSettingKeys.MinFileSizeBytes, (int)_minSizeBytes, cancellationToken).ConfigureAwait(false);
+        var maxAccessCount = _settings is null
+            ? _maxAccessCount
+            : await _settings.GetIntAsync(ColdStorageSettingKeys.MaxAccessCount, _maxAccessCount, cancellationToken).ConfigureAwait(false);
+
         // Runtime, admin-editable extension policy (DB) layered on top of the
         // config baseline. .url stays in _excluded no matter what, so a placeholder
         // can never become archivable by editing rules in the UI.
@@ -201,22 +216,22 @@ public sealed class ArchiveEligibilityEvaluator : IArchiveEligibilityEvaluator
 
         // Only enforce the size floor when we actually know the size (> 0), so a
         // request that omitted the size isn't skipped on incomplete data.
-        if (_minSizeBytes > 0 && candidate.FileSizeBytes > 0 && candidate.FileSizeBytes < _minSizeBytes)
+        if (minSizeBytes > 0 && candidate.FileSizeBytes > 0 && candidate.FileSizeBytes < minSizeBytes)
         {
             return ArchiveEligibilityResult.Skip(
-                $"file is {candidate.FileSizeBytes:N0} bytes, below the {_minSizeBytes:N0}-byte minimum archive size");
+                $"file is {candidate.FileSizeBytes:N0} bytes, below the {minSizeBytes:N0}-byte minimum archive size");
         }
 
         // Read-activity rule (issue #11): keep heavily-read documents out of cold
         // storage even when they're rarely edited. Uses the persisted all-time
         // access count; absence of a signal never blocks.
-        if (_readActivitySource is not null && _maxAccessCount > 0)
+        if (_readActivitySource is not null && maxAccessCount > 0)
         {
             var accessCount = await _readActivitySource.GetAccessCountAsync(candidate, cancellationToken).ConfigureAwait(false);
-            if (accessCount.HasValue && accessCount.Value > _maxAccessCount)
+            if (accessCount.HasValue && accessCount.Value > maxAccessCount)
             {
                 return ArchiveEligibilityResult.Skip(
-                    $"file has high read activity (access count {accessCount.Value} > {_maxAccessCount}); kept available rather than archived");
+                    $"file has high read activity (access count {accessCount.Value} > {maxAccessCount}); kept available rather than archived");
             }
         }
 

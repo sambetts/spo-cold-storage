@@ -843,6 +843,9 @@ function Set-AppSettings {
 
     # Restore behaviour, deployed explicitly so it can be changed without a code change.
     $deleteBlobAfterRestore = Get-ColdStorageIntOption $global:Params 'deleteBlobAfterRestore' 1
+    # Version-history preservation: the INITIAL value only — an admin can override it at
+    # runtime from the portal (cold_storage_settings), which applies to both hosts.
+    $captureVersionHistory  = Get-ColdStorageIntOption $global:Params 'captureVersionHistory' 0
 
     # Double-underscore convention works on both Windows and Linux.
     $settings = [ordered]@{
@@ -887,6 +890,10 @@ function Set-AppSettings {
         # Restore behaviour. Deployed explicitly so operators can choose it without a code
         # change; the API needs it too because the break-glass/force restore runs in-process.
         'ColdStorageDeleteBlobAfterRestore'                = [string]$deleteBlobAfterRestore
+        # Version-history preservation. The API needs it because the break-glass/force
+        # restore runs in-process, and because the admin settings page reports the
+        # deployed value alongside any portal override.
+        'ColdStorageCaptureVersionHistory'                 = [string]$captureVersionHistory
     }
 
     # Write to a temp JSON file and use az's @file syntax — avoids cmd.exe parsing semicolons
@@ -933,6 +940,7 @@ function Invoke-Phase-Function {
     # Cold-storage runtime toggles (optional top-level "coldStorage" block in params.json).
     $deleteBlobAfterRestore = Get-ColdStorageIntOption $p 'deleteBlobAfterRestore' 1
     $useProviderPipelines   = Get-ColdStorageIntOption $p 'useProviderPipelines' 0
+    $captureVersionHistory  = Get-ColdStorageIntOption $p 'captureVersionHistory' 0
 
     # App settings: identity-based AzureWebJobsStorage (accountName, no key) + the
     # Service Bus trigger (fullyQualifiedNamespace, no connection string), plus the
@@ -963,6 +971,11 @@ function Invoke-Phase-Function {
         # Provider-abstraction pipelines. 0 (default) = the proven inline pipelines. Do NOT
         # enable in production until the SharePoint/Azure adaptors are integration-tested.
         'ColdStorageUseProviderPipelines'       = [string]$useProviderPipelines
+        # Version-history preservation (issue #66). 0 (default) archives only the current
+        # version. When on, every prior version is copied + validated BEFORE the source is
+        # deleted, and replayed oldest-first on restore. This is the INITIAL value only:
+        # an admin can override it live from the portal, which wins over this setting.
+        'ColdStorageCaptureVersionHistory'      = [string]$captureVersionHistory
     }
     $tmp = New-TemporaryFile
     try {

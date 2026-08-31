@@ -9,7 +9,8 @@ import {
   IWorkerHealth,
   MigrationLifecycleStatus,
 } from '../../common/ColdStorageApiClient';
-import { colorFor, describeStatus, effectiveJobStatus, formatCountdown, formatEta, formatLabel, formatNumber, isFailedStatus, isTerminal, normalizeStatus } from '../../common/statusFormat';
+import { colorFor, describeStatus, effectiveJobStatus, formatCountdown, formatEta, formatNumber, isFailedStatus, isTerminal, normalizeStatus } from '../../common/statusFormat';
+import { friendlyJobOutcome, friendlyProgress, friendlyStatusExplanation, friendlyStatusLabel, isUserFacingFailure } from '../../common/userText';
 
 export type DialogPhase = 'submitting' | 'confirm' | 'polling' | 'terminal' | 'expired' | 'error' | 'browse';
 
@@ -230,7 +231,7 @@ function jobCounts(items: IJobItemStatus[]): JobCounts {
  * Shows completed/failed/in-progress/skipped segments, the estimated completion time,
  * and (when throttled) the count and when the queue resumes.
  */
-const JobProgress: React.FC<{ job: ITrackedJob; items: IJobItemStatus[]; active: boolean }> = ({ job, items, active }) => {
+const JobProgress: React.FC<{ job: ITrackedJob; items: IJobItemStatus[]; active: boolean; operation: DialogMode }> = ({ job, items, active, operation }) => {
   const c = jobCounts(items);
   if (c.total === 0) return null;
   const pct = (n: number): string => `${(n / c.total) * 100}%`;
@@ -241,12 +242,11 @@ const JobProgress: React.FC<{ job: ITrackedJob; items: IJobItemStatus[]; active:
     <div style={{ padding: '6px 12px 10px' }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px', color: '#605e5c', marginBottom: '4px', gap: '12px', flexWrap: 'wrap' }}>
         <span>
-          <strong style={{ color: '#201f1e' }}>{c.completed}</strong> of {c.total} done
-          {c.failed > 0 ? ` · ${c.failed} failed` : ''}
-          {c.skipped > 0 ? ` · ${c.skipped} skipped` : ''}
-          {throttled > 0 ? ` · ${throttled} throttled` : ''}
+          {/* Plain-English progress; "throttled" and "in progress" are our words, not the user's. */}
+          {friendlyProgress(c, operation === 'Restore' ? 'Restore' : 'Migrate')}
+          {c.failed > 0 ? ` · ${c.failed} need a look` : ''}
         </span>
-        <span>{active ? `${c.inprogress} in progress · auto-refreshing…` : 'Finished'}</span>
+        <span>{active ? (throttled > 0 ? 'SharePoint is busy — still going' : 'Updating…') : 'Finished'}</span>
       </div>
       <div style={{ display: 'flex', height: '10px', borderRadius: '6px', overflow: 'hidden', background: '#edebe9' }}>
         {c.completed > 0 && <div style={{ width: pct(c.completed), background: '#107c10' }} />}
@@ -322,8 +322,13 @@ const S = {
 // Leaf components
 // ---------------------------------------------------------------------------
 
-const Badge: React.FC<{ value: MigrationLifecycleStatus | string | number | undefined }> = ({ value }) =>
-  <span style={S.badge(value)}>{formatLabel(value)}</span>;
+/**
+ * The badge end users see: plain-English wording instead of the lifecycle status
+ * name (issue #70). Keeps the same colour semantics so "attention" still reads as
+ * attention.
+ */
+const FriendlyBadge: React.FC<{ value: MigrationLifecycleStatus | string | number | undefined; operation: DialogMode }> = ({ value, operation }) =>
+  <span style={S.badge(value)}>{friendlyStatusLabel(value, operation === 'Restore' ? 'Restore' : 'Migrate')}</span>;
 
 type BannerKind = 'info' | 'warn' | 'error' | 'ok';
 const BANNER_PALETTE: Record<BannerKind, { bg: string; border: string; color: string }> = {
@@ -353,85 +358,86 @@ const Spinner: React.FC<{ message: string }> = ({ message }) => (
   </div>
 );
 
-const CollapsibleMessageList: React.FC<{ title: string; messages: string[]; color: string; defaultOpen?: boolean }> = ({ title, messages, color, defaultOpen }) => {
-  const [open, setOpen] = React.useState<boolean>(!!defaultOpen);
-  if (messages.length === 0) { return null; }
+/**
+ * Technical detail, collapsed and clearly framed as "for support" (issue #70).
+ * End users never need this; it exists so that when something genuinely dead-ends
+ * they can copy something useful to whoever helps them, instead of us splashing
+ * raw server errors across the dialog.
+ */
+const SupportDetails: React.FC<{ jobId: string; logs?: IJobLogEntry[]; errors?: string[] }> = ({ jobId, logs, errors }) => {
+  const [open, setOpen] = React.useState<boolean>(false);
   const toggle = (): void => setOpen(o => !o);
+  const recent = (logs ?? []).slice(-12); // oldest→newest; last dozen only
   return (
-    <div style={{ margin: '8px 12px' }}>
+    <div style={{ margin: '8px 12px 12px' }}>
       <div
         role="button"
         tabIndex={0}
         aria-expanded={open}
         onClick={toggle}
         onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); } }}
-        style={{ display: 'flex', alignItems: 'center', gap: '6px', cursor: 'pointer', fontSize: '12px', fontWeight: 600, color }}
+        style={{ display: 'flex', alignItems: 'center', gap: '6px', cursor: 'pointer', fontSize: '12px', color: '#605e5c' }}
       >
-        <span style={{ color: '#605e5c' }}>{open ? '▾' : '▸'}</span>
-        <span>{`${title} (${formatNumber(messages.length)})`}</span>
+        <span>{open ? '▾' : '▸'}</span>
+        <span>Details for support</span>
       </div>
       {open && (
-        <ul style={{ margin: '4px 0 0', paddingLeft: '18px', fontSize: '12px', color: '#323130', maxHeight: '220px', overflow: 'auto' }}>
-          {messages.map((m, i) => <li key={i} style={{ wordBreak: 'break-word', marginBottom: '2px' }}>{m}</li>)}
-        </ul>
+        <div style={{ marginTop: '6px', fontSize: '12px', color: '#605e5c' }}>
+          <div style={{ marginBottom: '4px' }}>
+            {'Reference: '}
+            <span style={{ fontFamily: 'Consolas, "Courier New", monospace' }}>{jobId}</span>
+          </div>
+          {(errors ?? []).length > 0 && (
+            <ul style={{ margin: '4px 0', paddingLeft: '18px', maxHeight: '140px', overflow: 'auto' }}>
+              {(errors ?? []).map((m, i) => <li key={i} style={{ wordBreak: 'break-word' }}>{m}</li>)}
+            </ul>
+          )}
+          {recent.length > 0 && (
+            <ul style={{ margin: '4px 0 0', padding: 0, listStyle: 'none', maxHeight: '160px', overflow: 'auto' }}>
+              {recent.map((log, i) => (
+                <li key={i} style={{ display: 'flex', gap: '8px', padding: '2px 0', alignItems: 'baseline' }}>
+                  <span style={{ color: '#a19f9d', whiteSpace: 'nowrap', fontSize: '11px', minWidth: '58px' }}>{relativeTime(log.timestamp)}</span>
+                  <span style={{ color: logLevelColor(log.level), fontWeight: 700 }}>•</span>
+                  <span style={{ color: '#605e5c', wordBreak: 'break-word' }}>{log.message}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
       )}
     </div>
   );
 };
 
-const Timeline: React.FC<{ logs: IJobLogEntry[] }> = ({ logs }) => {
-  const recent = logs.slice(-12); // oldest→newest; show the last dozen
-  return (
-    <div style={{ margin: '4px 12px 12px' }}>
-      <div style={{ fontSize: '12px', fontWeight: 600, color: '#605e5c', marginBottom: '4px' }}>Activity</div>
-      <ul style={{ margin: 0, padding: 0, listStyle: 'none' }}>
-        {recent.map((log, i) => (
-          <li key={i} style={{ display: 'flex', gap: '8px', fontSize: '12px', padding: '2px 0', alignItems: 'baseline' }}>
-            <span style={{ color: '#a19f9d', whiteSpace: 'nowrap', fontSize: '11px', minWidth: '58px' }}>{relativeTime(log.timestamp)}</span>
-            <span style={{ color: logLevelColor(log.level), fontWeight: 700, whiteSpace: 'nowrap' }}>•</span>
-            <span style={{ color: '#323130', wordBreak: 'break-word' }}>{log.message}</span>
-          </li>
-        ))}
-      </ul>
-    </div>
-  );
+const ItemStep: React.FC<{ item: IJobItemStatus; operation: DialogMode }> = ({ item, operation }) => {
+  // Plain-English explanation instead of the lifecycle description (issue #70).
+  const desc = friendlyStatusExplanation(item.status, operation === 'Restore' ? 'Restore' : 'Migrate');
+  if (!desc) return null;
+  return <div style={{ marginTop: '4px', fontSize: '11px', color: '#605e5c', maxWidth: '280px' }}>{desc}</div>;
 };
 
-const ItemStep: React.FC<{ item: IJobItemStatus }> = ({ item }) => {
-  const desc = describeStatus(item.status);
-  let duration = '';
-  if (!isTerminal(item.status) && item.updatedAt) {
-    const ms = parseServerDate(item.updatedAt);
-    if (!isNaN(ms)) {
-      const d = formatDuration(Date.now() - ms);
-      duration = item.status === MigrationLifecycleStatus.Queued ? ` · queued ${d}` : ` · ${d} in this step`;
-    }
-  }
-  if (!desc && !duration) return null;
-  return <div style={{ marginTop: '4px', fontSize: '11px', color: '#605e5c', maxWidth: '280px' }}>{`${desc}${duration}`}</div>;
-};
-
-const FileLeaf: React.FC<{ item: IJobItemStatus; depth: number }> = ({ item, depth }) => (
+const FileLeaf: React.FC<{ item: IJobItemStatus; depth: number; operation: DialogMode }> = ({ item, depth, operation }) => (
   <div style={{ display: 'flex', alignItems: 'flex-start', gap: '8px', borderTop: '1px solid #f8f7f6', fontSize: '13px', paddingTop: '5px', paddingBottom: '5px', paddingRight: '12px', paddingLeft: 12 + (depth + 1) * 16 }}>
-    <span style={{ flex: '1 1 auto', wordBreak: 'break-all' }} title={item.spServerRelativeUrl}>{basename(item.spServerRelativeUrl)}</span>
-    {item.lastError && <span style={{ color: '#a4262c', fontSize: '12px', maxWidth: '200px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={item.lastErrorDetail ?? item.lastError}>{item.lastError}</span>}
+    <span style={{ flex: '1 1 auto', wordBreak: 'break-all' }}>{basename(item.spServerRelativeUrl)}</span>
     {normalizeStatus(item.status) === MigrationLifecycleStatus.RetryScheduled && item.nextRetryAt && (
+      // A throttle is not an error and must not read like one — SharePoint is
+      // just busy and this retries itself.
       <span
         style={{ color: '#835c00', fontSize: '12px', whiteSpace: 'nowrap', flex: '0 0 auto' }}
-        title={`Throttled — automatic retry at ${new Date(item.nextRetryAt).toLocaleString()}${item.lastRetryAfterSeconds ? ` (server asked to wait ${item.lastRetryAfterSeconds}s)` : ''}`}
-      >{`\u23F3 retry ${formatCountdown(item.nextRetryAt)}`}</span>
+        title="SharePoint is busy. This will try again on its own — nothing for you to do."
+      >{`\u23F3 retrying ${formatCountdown(item.nextRetryAt)}`}</span>
     )}
     <div style={{ flex: '0 0 auto', textAlign: 'right' }}>
-      <Badge value={item.status} />
-      <ItemStep item={item} />
+      <FriendlyBadge value={item.status} operation={operation} />
+      <ItemStep item={item} operation={operation} />
     </div>
   </div>
 );
 
 const TreeFolderNode: React.FC<{
-  node: FileTreeNode; depth: number; jobId: string;
+  node: FileTreeNode; depth: number; jobId: string; operation: DialogMode;
   expandedFolders: ReadonlySet<string>; onToggleFolder: (nsKey: string) => void;
-}> = ({ node, depth, jobId, expandedFolders, onToggleFolder }) => {
+}> = ({ node, depth, jobId, operation, expandedFolders, onToggleFolder }) => {
   const nsKey = `${jobId}::${node.path}`;
   const expanded = expandedFolders.has(nsKey);
   const rollup = folderRollup(node.descendants);
@@ -453,8 +459,8 @@ const TreeFolderNode: React.FC<{
       </div>
       {expanded && (
         <div>
-          {node.folders.map(f => <TreeFolderNode key={f.path} node={f} depth={depth + 1} jobId={jobId} expandedFolders={expandedFolders} onToggleFolder={onToggleFolder} />)}
-          {node.files.map(f => <FileLeaf key={f.item!.itemId} item={f.item!} depth={depth + 1} />)}
+          {node.folders.map(f => <TreeFolderNode key={f.path} node={f} depth={depth + 1} jobId={jobId} operation={operation} expandedFolders={expandedFolders} onToggleFolder={onToggleFolder} />)}
+          {node.files.map(f => <FileLeaf key={f.item!.itemId} item={f.item!} depth={depth + 1} operation={operation} />)}
         </div>
       )}
     </div>
@@ -462,9 +468,9 @@ const TreeFolderNode: React.FC<{
 };
 
 const ItemsByFolder: React.FC<{
-  job: ITrackedJob; items: IJobItemStatus[]; expandedFolders: ReadonlySet<string>;
+  job: ITrackedJob; items: IJobItemStatus[]; operation: DialogMode; expandedFolders: ReadonlySet<string>;
   onToggleFolder: (nsKey: string) => void; onToggleAllFolders: (nsKeys: string[], expand: boolean) => void;
-}> = ({ job, items, expandedFolders, onToggleFolder, onToggleAllFolders }) => {
+}> = ({ job, items, operation, expandedFolders, onToggleFolder, onToggleAllFolders }) => {
   const tree = React.useMemo(() => buildFileTree(items), [items]);
   const folderPaths = React.useMemo(() => allTreeFolderPaths(tree), [tree]);
   const nsKeys = folderPaths.map(p => `${job.jobId}::${p}`);
@@ -481,9 +487,9 @@ const ItemsByFolder: React.FC<{
         >{allExpanded ? 'Collapse all' : 'Expand all'}</button>
       </div>
       {tree.folders.map(f => (
-        <TreeFolderNode key={f.path} node={f} depth={0} jobId={job.jobId} expandedFolders={expandedFolders} onToggleFolder={onToggleFolder} />
+        <TreeFolderNode key={f.path} node={f} depth={0} jobId={job.jobId} operation={operation} expandedFolders={expandedFolders} onToggleFolder={onToggleFolder} />
       ))}
-      {tree.files.map(f => <FileLeaf key={f.item!.itemId} item={f.item!} depth={0} />)}
+      {tree.files.map(f => <FileLeaf key={f.item!.itemId} item={f.item!} depth={0} operation={operation} />)}
     </div>
   );
 };
@@ -510,14 +516,13 @@ const JobMeta: React.FC<{ job: ITrackedJob; overallStatus?: MigrationLifecycleSt
 };
 
 const JobBlock: React.FC<{
-  job: ITrackedJob; expandedFolders: ReadonlySet<string>;
+  job: ITrackedJob; operation: DialogMode; expandedFolders: ReadonlySet<string>;
   onToggleFolder: (nsKey: string) => void; onToggleAllFolders: (nsKeys: string[], expand: boolean) => void;
-}> = ({ job, expandedFolders, onToggleFolder, onToggleAllFolders }) => {
+}> = ({ job, operation, expandedFolders, onToggleFolder, onToggleAllFolders }) => {
   const items = job.lastResponse?.items ?? [];
   const rawStatus = job.lastResponse?.status ?? job.acceptResponse?.status;
   // Never show an in-progress badge on a job whose items are all finished (the server rollup can lag).
   const overallStatus = effectiveJobStatus(rawStatus, items);
-  const warnings = mergedWarnings(job);
   const jobTerminal = items.length > 0 ? items.every(it => isTerminal(it.status)) : (job.lastResponse ? isTerminal(job.lastResponse.status) : false);
   const active = !jobTerminal;
 
@@ -526,21 +531,29 @@ const JobBlock: React.FC<{
   const [expanded, setExpanded] = React.useState(false);
   const showDetail = active || expanded;
   const c = jobCounts(items);
+  const opKind = operation === 'Restore' ? 'Restore' : 'Migrate';
+  // Anything the user might need to act on — drives whether we offer support detail.
+  const hasAttention = items.some(it => isUserFacingFailure(it.status));
+  // Expander warnings ("you don't have permission on any container; nothing was
+  // queued") are already written for end users and explain an empty job, so they
+  // are surfaced rather than buried.
+  const warnings = mergedWarnings(job);
 
   let emptyText: string | undefined;
   if (items.length === 0) {
     if (job.lastResponse && isTerminal(job.lastResponse.status)) {
-      emptyText = 'No items were queued for this job — see the warnings below for the reason.';
+      emptyText = warnings.length > 0 ? warnings[0] : 'Nothing here needed doing.';
     } else if (job.lastResponse) {
-      emptyText = 'Job has no items yet.';
+      emptyText = 'Getting your files ready…';
     } else {
-      emptyText = 'Waiting for first status update…';
+      emptyText = 'Starting…';
     }
   }
 
-  // Compact one-line result shown in the (collapsed) header of a finished job.
+  // Compact one-line result shown in the (collapsed) header of a finished job —
+  // written as an outcome, not as counters (issue #70).
   const collapsedSummary = jobTerminal && c.total > 0
-    ? `${c.completed}/${c.total} done${c.failed > 0 ? ` · ${c.failed} failed` : ''}${c.skipped > 0 ? ` · ${c.skipped} skipped` : ''}`
+    ? friendlyJobOutcome(c, opKind).headline
     : undefined;
 
   const headerToggle = jobTerminal ? (): void => setExpanded(v => !v) : undefined;
@@ -557,20 +570,18 @@ const JobBlock: React.FC<{
       >
         {jobTerminal && <span style={{ color: '#605e5c', flex: '0 0 auto' }}>{expanded ? '▾' : '▸'}</span>}
         <span style={{ fontWeight: 600 }}>{job.label}</span>
-        <Badge value={overallStatus} />
+        <FriendlyBadge value={overallStatus} operation={operation} />
         {collapsedSummary && !expanded && (
           <span style={{ fontSize: '12px', color: c.failed > 0 ? '#a4262c' : '#605e5c' }}>{collapsedSummary}</span>
         )}
-        <span style={{ fontSize: '12px', color: '#605e5c', fontFamily: 'Consolas, "Courier New", monospace' }}>{job.jobId}</span>
         {job.lastPollError && (
-          <span style={{ fontSize: '12px', color: '#a4262c' }}>
-            {` Refresh failing (${job.lastPollError.status === 0 ? 'network' : job.lastPollError.status}) — retrying…`}
-          </span>
+          // Never show a status code to an end user — this is transient and self-healing.
+          <span style={{ fontSize: '12px', color: '#605e5c' }}>{' Reconnecting…'}</span>
         )}
       </div>
 
       {/* Progress bar + ETA is always shown for active jobs (parity with the SPA). */}
-      {active && <JobProgress job={job} items={items} active={active} />}
+      {active && <JobProgress job={job} items={items} active={active} operation={operation} />}
 
       {showDetail && (
         <>
@@ -578,12 +589,13 @@ const JobBlock: React.FC<{
 
           {emptyText
             ? <p style={{ margin: '12px', color: '#605e5c', fontSize: '13px' }}>{emptyText}</p>
-            : <ItemsByFolder job={job} items={items} expandedFolders={expandedFolders} onToggleFolder={onToggleFolder} onToggleAllFolders={onToggleAllFolders} />}
+            : <ItemsByFolder job={job} items={items} operation={operation} expandedFolders={expandedFolders} onToggleFolder={onToggleFolder} onToggleAllFolders={onToggleAllFolders} />}
 
-          {warnings.length > 0 && <CollapsibleMessageList title="Warnings" messages={warnings} color="#797775" />}
-          {job.lastResponse && job.lastResponse.errors.length > 0 && <CollapsibleMessageList title="Errors" messages={job.lastResponse.errors} color="#a4262c" defaultOpen />}
-          {job.lastResponse?.summary && <p style={{ margin: '8px 12px', fontSize: '12px', color: '#605e5c' }}>{job.lastResponse.summary}</p>}
-          {job.logs && job.logs.length > 0 && <Timeline logs={job.logs} />}
+          {/* Raw warnings/errors and the activity log are technical: they live behind
+              "Details for support" instead of being shown to the user (issue #70). */}
+          {(hasAttention || (job.lastResponse?.errors.length ?? 0) > 0) && (
+            <SupportDetails jobId={job.jobId} logs={job.logs} errors={[...(job.lastResponse?.errors ?? []), ...warnings]} />
+          )}
         </>
       )}
     </section>
@@ -593,14 +605,16 @@ const JobBlock: React.FC<{
 const WorkerBannerView: React.FC<{ health: IWorkerHealth; jobs: ITrackedJob[] }> = ({ health, jobs }) => {
   if (!hasPendingWork(jobs)) return null;
   if (!health.isOnline) {
-    const seen = health.lastSeenUtc ? `last seen ${relativeTime(health.lastSeenUtc)}` : 'no worker has checked in yet';
+    // Deliberately says nothing about workers, instances or "checking in" — the
+    // user can't act on any of that. It reassures and tells them what to do.
     return (
       <Banner kind="warn">
-        {`⚠ The background worker appears to be offline (${seen}). Queued items won’t start until it’s running — on an idle app the worker may need to be started.`}
+        {'This is taking longer than usual to start. Your files are safe and nothing has changed yet — you can close this window and check back shortly.'}
       </Banner>
     );
   }
-  return <Banner kind="info">{`The background worker is online and processing${health.workerCount ? ` (${formatNumber(health.workerCount)} active instance${health.workerCount === 1 ? '' : 's'})` : ''} — queued items will start shortly.`}</Banner>;
+  // When things are working normally there is nothing worth saying.
+  return null;
 };
 
 const ConfirmView: React.FC<{
@@ -697,7 +711,7 @@ const DialogBody: React.FC<{ state: IDialogViewState; handlers: IDialogViewHandl
 
       {state.phase === 'browse' && <div style={{ fontSize: '12px', color: '#605e5c', marginBottom: '8px' }}>{state.statusMessage}</div>}
       {state.phase === 'expired' && (
-        <Banner kind="warn">Still working after 15 minutes — stopping live refresh. You can close this dialog; the cold-storage status column will keep updating in the background.</Banner>
+        <Banner kind="warn">This is taking a while, so we’ve stopped refreshing. Your files are still being worked on in the background — you can close this window and check the library later.</Banner>
       )}
       {state.phase === 'polling' && state.statusMessage && (
         <div style={{ fontSize: '12px', color: '#605e5c', marginBottom: '8px' }}>{state.statusMessage}</div>
@@ -705,9 +719,9 @@ const DialogBody: React.FC<{ state: IDialogViewState; handlers: IDialogViewHandl
       {state.phase === 'terminal' && (
         <Banner kind="ok" bold>
           {(allJobsSucceeded(state.jobs)
-            ? 'All items reached a final state.'
-            : 'All items have finished — some did not complete successfully (see details below).')
-            + (state.refreshOnClose ? ' Close this dialog to refresh the library and see the changes.' : '')}
+            ? (state.operation === 'Restore' ? 'Your files are back where they were.' : 'Your files have been archived.')
+            : 'Finished — some files need a look.')
+            + (state.refreshOnClose ? ' Close this window to see the changes.' : '')}
         </Banner>
       )}
 
@@ -715,6 +729,7 @@ const DialogBody: React.FC<{ state: IDialogViewState; handlers: IDialogViewHandl
         <JobBlock
           key={job.jobId}
           job={job}
+          operation={state.operation}
           expandedFolders={state.expandedFolders}
           onToggleFolder={handlers.onToggleFolder}
           onToggleAllFolders={handlers.onToggleAllFolders}
@@ -743,9 +758,9 @@ const HeaderButton: React.FC<{ glyph: string; label: string; onClick: () => void
 };
 
 export const MigrationProgressDialogView: React.FC<{ state: IDialogViewState; handlers: IDialogViewHandlers; onCloseButtonRef?: (el: HTMLButtonElement | null) => void }> = ({ state, handlers }) => {
-  const title = state.operation === 'Migrate' ? 'Migrate to cold storage'
-    : state.operation === 'Restore' ? 'Restore from cold storage'
-    : 'Cold storage status';
+  const title = state.operation === 'Migrate' ? 'Archive files'
+    : state.operation === 'Restore' ? 'Bring files back'
+    : 'Recent activity';
 
   const cardSize: React.CSSProperties = state.maximised
     ? { width: '98vw', height: '96vh', maxHeight: '96vh' }
@@ -784,8 +799,8 @@ export const MigrationProgressDialogView: React.FC<{ state: IDialogViewState; ha
         <div style={{ padding: '10px 20px 14px', borderTop: '1px solid #edebe9', background: '#faf9f8' }}>
           <p style={{ margin: 0, fontSize: '12px', color: '#605e5c', lineHeight: 1.4 }}>
             {state.refreshOnClose
-              ? 'Closing this dialog will refresh the document library so the changes appear. The job itself already finished on the server.'
-              : 'Closing this dialog does not cancel the job — the server will keep working in the background and the cold-storage status column will update.'}
+              ? 'Closing this window refreshes the library so you can see the changes. Everything is already finished.'
+              : 'Closing this window won’t stop anything — your files keep being worked on in the background.'}
           </p>
         </div>
       </div>

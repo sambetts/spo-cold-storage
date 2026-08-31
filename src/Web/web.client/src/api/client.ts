@@ -93,6 +93,8 @@ export interface ApiClient {
   getResponse(path: string, signal?: AbortSignal): Promise<Response>;
   /** POST JSON + parse JSON. Throws ApiError on non-2xx. */
   post<T>(path: string, body?: unknown, signal?: AbortSignal): Promise<T>;
+  /** PUT JSON + parse JSON. Throws ApiError on non-2xx. */
+  put<T>(path: string, body?: unknown, signal?: AbortSignal): Promise<T>;
   /** DELETE. Throws ApiError on non-2xx. */
   del(path: string, signal?: AbortSignal): Promise<void>;
 }
@@ -137,12 +139,22 @@ export function createApiClient(instance: IPublicClientApplication, account: Acc
       );
       return response.status === 204 ? (undefined as T) : ((await response.json()) as T);
     },
+    async put<T>(path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
+      const response = await ensureOk(
+        await request(path, {
+          method: "PUT",
+          headers: body !== undefined ? { "Content-Type": "application/json" } : undefined,
+          body: body !== undefined ? JSON.stringify(body) : undefined,
+          signal,
+        }),
+      );
+      return response.status === 204 ? (undefined as T) : ((await response.json()) as T);
+    },
     async del(path: string, signal?: AbortSignal): Promise<void> {
       await ensureOk(await request(path, { method: "DELETE", signal }));
     },
   };
 }
-
 /**
  * Hook returning a memoised API client bound to the signed-in account. Use this
  * in every page/component instead of threading a raw bearer token as a prop.

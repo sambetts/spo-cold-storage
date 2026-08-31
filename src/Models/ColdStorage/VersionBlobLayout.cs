@@ -33,6 +33,21 @@ public static class VersionBlobLayout
     }
 
     /// <summary>
+    /// Blob-name prefix that every prior-version content blob for this file sits under.
+    /// Used to enumerate + delete the sidecars as one archive unit (issue #64), which
+    /// deliberately does not depend on the manifest: a partial capture can leave version
+    /// blobs the manifest never listed, and those would otherwise be orphaned forever.
+    /// </summary>
+    public static string VersionFolderPrefix(string baseKey)
+    {
+        if (string.IsNullOrEmpty(baseKey))
+        {
+            throw new ArgumentException("baseKey must be provided", nameof(baseKey));
+        }
+        return $"{baseKey}.versions/";
+    }
+
+    /// <summary>
     /// True when a blob key is a version-history sidecar — a prior-version content blob under the
     /// <c>.versions/</c> virtual folder, or the <c>.versions.json</c> manifest — rather than a
     /// current-version file blob. Blob-driven restore skips these so version sidecars are never

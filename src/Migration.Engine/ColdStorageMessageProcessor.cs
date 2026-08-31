@@ -6,6 +6,7 @@ using Microsoft.Extensions.Logging;
 using Migration.Engine.Lifecycle;
 using Migration.Engine.Migration;
 using Migration.Engine.Restore;
+using Migration.Engine.Settings;
 using Migration.Engine.Utils;
 using Models;
 using Models.ColdStorage;
@@ -44,6 +45,18 @@ public sealed class ColdStorageMessageProcessor(Config config, ILogger logger, I
     // second in-flight restore can't double-upload (issue #10). Cross-host
     // restores are additionally coalesced by the pipeline's DB status guard.
     private readonly ConcurrentDictionary<string, byte> _inFlightRestorePlaceholders = new(StringComparer.OrdinalIgnoreCase);
+
+    private readonly IColdStorageSettingsSource _settings = new DbColdStorageSettingsSource(config, logger);
+
+    /// <summary>
+    /// True when version-history preservation is switched on right now — the portal
+    /// setting (cold_storage_settings) wins, falling back to this host's app setting.
+    /// </summary>
+    private async Task<bool> IsVersionHistoryEnabledAsync(CancellationToken cancellationToken)
+        => await _settings.GetIntAsync(
+            ColdStorageSettingKeys.CaptureVersionHistory,
+            _config.ColdStorageCaptureVersionHistory,
+            cancellationToken).ConfigureAwait(false) > 0;
 
     /// <summary>
     /// Processes one raw message body and returns how the host should settle it.
@@ -214,7 +227,8 @@ public sealed class ColdStorageMessageProcessor(Config config, ILogger logger, I
                 _logger.LogInformation("Item {ItemId} is already {Status} (e.g. admin-cancelled); skipping.", envelope.ItemId, current.Status);
                 success = true;
             }
-            else if (_config.ColdStorageUseProviderPipelines > 0)
+            else if (_config.ColdStorageUseProviderPipelines > 0
+                     && !await IsVersionHistoryEnabledAsync(cancellationToken).ConfigureAwait(false))
             {
                 // Provider-abstraction path (feature-flagged foundation): identical behaviour + guards
                 // via ISourceStore/IColdStore, proven by the in-memory unit tests. Legacy inline
@@ -223,6 +237,17 @@ public sealed class ColdStorageMessageProcessor(Config config, ILogger logger, I
             }
             else if (envelope.Operation == MigrationOperationKind.Migrate)
             {
+                if (_config.ColdStorageUseProviderPipelines > 0)
+                {
+                    // Guard (issue #66): the provider pipelines have no version-history support, so
+                    // running them with preservation enabled would archive only the current version
+                    // and then delete the source — silently destroying history we promised to keep.
+                    // Refuse the combination by falling back to the legacy pipelines, loudly.
+                    _logger.LogError(
+                        "ColdStorageUseProviderPipelines is enabled but so is version-history preservation, " +
+                        "which the provider pipelines do not support. Falling back to the legacy pipelines for " +
+                        "item {ItemId}. Turn one of them off to silence this.", envelope.ItemId);
+                }
                 var pipeline = new ColdStorageMigratorPipeline(_config, _logger, writer);
                 var app = await AuthUtils.GetNewClientApp(_config).ConfigureAwait(false);
                 success = await pipeline.ProcessAsync(envelope, app, cancellationToken).ConfigureAwait(false);

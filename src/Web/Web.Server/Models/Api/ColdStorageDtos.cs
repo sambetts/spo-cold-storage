@@ -310,6 +310,46 @@ public class ExtensionRuleResponse
 }
 
 /// <summary>
+/// One runtime-configurable product setting (issue #66), as returned by
+/// <c>GET /api/admin/settings</c>.
+/// </summary>
+public class RuntimeSettingResponse
+{
+    public string Key { get; set; } = string.Empty;
+
+    /// <summary>Human-readable name for the portal.</summary>
+    public string Label { get; set; } = string.Empty;
+
+    /// <summary>How to render it: <c>Toggle</c>, <c>Number</c> or <c>Choice</c>.</summary>
+    public string Kind { get; set; } = "Toggle";
+
+    /// <summary>Allowed values for a <c>Choice</c> setting; null otherwise.</summary>
+    public string[]? Choices { get; set; }
+
+    /// <summary>The value actually in force (the override when set, else the deployed value).</summary>
+    public string Value { get; set; } = "0";
+
+    /// <summary>This host's deployed app-setting value, used when there is no override.</summary>
+    public string DeployedValue { get; set; } = "0";
+
+    /// <summary>True when an admin has overridden the deployed value from the portal.</summary>
+    public bool IsOverridden { get; set; }
+
+    public string? UpdatedBy { get; set; }
+    public DateTime? UpdatedAt { get; set; }
+
+    /// <summary>Operator-facing explanation, including any risk or fidelity caveats.</summary>
+    public string Description { get; set; } = string.Empty;
+}
+
+/// <summary>Request body for <c>PUT /api/admin/settings/{key}</c>.</summary>
+public class UpdateRuntimeSettingRequest
+{
+    /// <summary>New value as text. Toggles use "0"/"1"; numbers a whole number; choices one of the allowed values.</summary>
+    public string Value { get; set; } = string.Empty;
+}
+
+/// <summary>
 /// Request body for <c>POST /api/exclusions/extensions</c>. <see cref="Extension"/>
 /// is required; <see cref="Mode"/> defaults to "Exclude".
 /// </summary>

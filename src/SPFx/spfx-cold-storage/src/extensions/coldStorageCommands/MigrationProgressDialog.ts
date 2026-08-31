@@ -140,7 +140,7 @@ export class MigrationProgressDialog {
     }));
     this.phase = 'browse';
     this.statusMessage = jobs.length === 0
-      ? 'No migration or restore jobs have been submitted from this site yet.'
+      ? 'Nothing has been archived or brought back from this site yet.'
       : `Showing ${formatNumber(jobs.length)} most recent job${jobs.length === 1 ? '' : 's'} for this site.`;
     this.render();
     void this.refreshWorkerHealthAndRender();
@@ -218,7 +218,7 @@ export class MigrationProgressDialog {
     this.confirmHandler = undefined;
     this.confirmRequest = undefined;
     this.phase = 'submitting';
-    this.statusMessage = this.operation === 'Restore' ? 'Submitting restore…' : 'Submitting migration…';
+    this.statusMessage = this.operation === 'Restore' ? 'Getting your files…' : 'Getting started…';
     this.render();
     submit?.(result);
   }

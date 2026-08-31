@@ -401,6 +401,13 @@ public sealed class MigrationExpander(
         var skipSamples = new List<string>();
         var seenBlobs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var hitCap = false;
+        // Blobs actually looked at, including ones we skip or de-duplicate. The queued-work
+        // cap alone doesn't bound enumeration: a container full of skips/duplicates never
+        // increments queueWork, so expansion could walk an unbounded number of blobs (and
+        // pay for every LIST) while queueing almost nothing (issue #65). Allow a generous
+        // multiple of the cap so a legitimately sparse folder still fills a batch.
+        var examined = 0;
+        var examineCap = cap * 20;
         void Skip(string reason)
         {
             skipped++;
@@ -413,6 +420,13 @@ public sealed class MigrationExpander(
         {
             if (queueWork.Count >= cap)
             {
+                return false;
+            }
+            if (++examined > examineCap)
+            {
+                _logger.LogWarning(
+                    "Restore job {JobId}: stopped after examining {Examined} blobs (queued {Queued}); narrow the selection.",
+                    job.JobId, examined, queueWork.Count);
                 return false;
             }
             if (!seenBlobs.Add(container.BlobContainerName + "|" + blob.BlobPath))

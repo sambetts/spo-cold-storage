@@ -1,5 +1,6 @@
 using Microsoft.Extensions.Logging;
 using Microsoft.SharePoint.Client;
+using Migration.Engine.Caching;
 using Migration.Engine.Utils;
 using Models.ColdStorage;
 using System.Text;
@@ -76,6 +77,200 @@ public sealed class SharePointPlaceholderWriter(ILogger logger)
     }
 
     /// <summary>
+    /// Captures an item's unique permissions before the source is deleted (issue #67),
+    /// so the same access can be re-applied to the <c>.url</c> placeholder and, later,
+    /// to the restored file. Returns null when the item inherits its permissions —
+    /// nothing needs restoring in that case, and breaking inheritance to "restore" an
+    /// inherited ACL would be wrong.
+    /// <para>
+    /// Best-effort: returns null on failure rather than throwing, so a permissions read
+    /// can never fail an otherwise-valid migration.
+    /// </para>
+    /// </summary>
+    public async Task<ArchivedPermissions?> CaptureUniquePermissionsAsync(
+        ClientContext ctx,
+        string serverRelativeUrl,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(ctx);
+        cancellationToken.ThrowIfCancellationRequested();
+
+        try
+        {
+            var item = ctx.Web.GetFileByServerRelativeUrl(serverRelativeUrl).ListItemAllFields;
+            ctx.Load(item,
+                i => i.HasUniqueRoleAssignments,
+                i => i.RoleAssignments.Include(
+                    r => r.Member.LoginName,
+                    r => r.Member.Title,
+                    r => r.RoleDefinitionBindings));
+            await ctx.ExecuteQueryAsyncWithThrottleRetries(_logger).ConfigureAwait(false);
+
+            if (!item.HasUniqueRoleAssignments)
+            {
+                return null;
+            }
+
+            var snapshot = new ArchivedPermissions
+            {
+                HadUniqueRoleAssignments = true,
+                CapturedAtUtc = DateTime.UtcNow,
+            };
+
+            foreach (var assignment in item.RoleAssignments)
+            {
+                var roles = assignment.RoleDefinitionBindings
+                    .Select(r => r.Name)
+                    // "Limited Access" is SharePoint bookkeeping that it grants itself so a
+                    // principal can traverse to an item; it cannot be assigned explicitly and
+                    // re-applying it throws. SharePoint recreates it as needed.
+                    .Where(n => !string.IsNullOrWhiteSpace(n)
+                                && !string.Equals(n, "Limited Access", StringComparison.OrdinalIgnoreCase))
+                    .ToList();
+                if (roles.Count == 0)
+                {
+                    continue;
+                }
+                snapshot.Assignments.Add(new ArchivedRoleAssignment
+                {
+                    LoginName = assignment.Member.LoginName,
+                    Title = assignment.Member.Title,
+                    Roles = roles,
+                });
+            }
+
+            _logger.LogInformation("Captured {Count} unique role assignment(s) for '{Url}'.", snapshot.Count, serverRelativeUrl);
+            return snapshot;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "Could not capture unique permissions for '{Url}'; continuing without a permissions snapshot.", serverRelativeUrl);
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Role-definition name → id for a web. Cached in the <b>shared</b> cache (issue #68):
+    /// they are static configuration that changes very rarely, but permission replay needs
+    /// them for every item, and a per-process cache meant every worker instance re-fetched
+    /// them. Ids are cached rather than the CSOM objects, and re-hydrated with
+    /// <c>GetById</c>, which costs no round trip.
+    /// </summary>
+    private async Task<Dictionary<string, int>> GetRoleDefinitionIdsAsync(ClientContext ctx, CancellationToken cancellationToken)
+    {
+        var webUrl = ctx.Url ?? string.Empty;
+        var cached = await ColdStorageCacheFactory.Shared
+            .GetAsync<RoleDefinitionMap>(ColdStorageCacheKeys.RoleDefinitions(webUrl), cancellationToken)
+            .ConfigureAwait(false);
+        if (cached?.ByName is { Count: > 0 })
+        {
+            return new Dictionary<string, int>(cached.ByName, StringComparer.OrdinalIgnoreCase);
+        }
+
+        ctx.Load(ctx.Web, w => w.RoleDefinitions.Include(r => r.Name, r => r.Id));
+        await ctx.ExecuteQueryAsyncWithThrottleRetries(_logger).ConfigureAwait(false);
+
+        var byName = ctx.Web.RoleDefinitions
+            .GroupBy(r => r.Name, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(g => g.Key, g => g.First().Id, StringComparer.OrdinalIgnoreCase);
+
+        await ColdStorageCacheFactory.Shared
+            .SetAsync(ColdStorageCacheKeys.RoleDefinitions(webUrl), new RoleDefinitionMap(byName), RoleDefinitionTtl, cancellationToken)
+            .ConfigureAwait(false);
+        return byName;
+    }
+
+    private static readonly TimeSpan RoleDefinitionTtl = TimeSpan.FromMinutes(30);
+
+    /// <summary>Serialisable carrier for the cached role-definition map.</summary>
+    private sealed record RoleDefinitionMap(Dictionary<string, int> ByName);
+
+    /// <summary>
+    /// Re-applies a captured permissions snapshot onto an item (the <c>.url</c> placeholder
+    /// at migrate time, or the restored file at restore time) — issue #67.
+    /// <para>
+    /// Best-effort and non-fatal by design: the content is already safe by the time this
+    /// runs, so a principal that no longer exists (a deleted user, a group removed since
+    /// archiving) must degrade to a warning rather than fail the operation. Each principal
+    /// is applied in its own round trip so one bad principal doesn't lose the rest.
+    /// </para>
+    /// </summary>
+    public async Task<bool> ApplyPermissionsAsync(
+        ClientContext ctx,
+        string serverRelativeUrl,
+        ArchivedPermissions? permissions,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(ctx);
+        cancellationToken.ThrowIfCancellationRequested();
+
+        if (permissions is null || !permissions.HadUniqueRoleAssignments || permissions.Count == 0)
+        {
+            // Inherited permissions: leave the destination inheriting.
+            return true;
+        }
+
+        try
+        {
+            var roleDefinitionIds = await GetRoleDefinitionIdsAsync(ctx, cancellationToken).ConfigureAwait(false);
+
+            var item = ctx.Web.GetFileByServerRelativeUrl(serverRelativeUrl).ListItemAllFields;
+            // copyRoleAssignments:false — we are replacing the ACL wholesale with the
+            // captured one, not layering on top of the inherited set.
+            item.BreakRoleInheritance(copyRoleAssignments: false, clearSubscopes: false);
+            await ctx.ExecuteQueryAsyncWithThrottleRetries(_logger).ConfigureAwait(false);
+
+            var applied = 0;
+            foreach (var assignment in permissions.Assignments)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                try
+                {
+                    var bindings = new RoleDefinitionBindingCollection(ctx);
+                    var matched = 0;
+                    foreach (var roleName in assignment.Roles)
+                    {
+                        if (roleDefinitionIds.TryGetValue(roleName, out var definitionId))
+                        {
+                            bindings.Add(ctx.Web.RoleDefinitions.GetById(definitionId));
+                            matched++;
+                        }
+                        else
+                        {
+                            _logger.LogWarning("Role definition '{Role}' does not exist on this web; skipping it for '{Principal}'.",
+                                roleName, assignment.Title ?? assignment.LoginName);
+                        }
+                    }
+                    if (matched == 0)
+                    {
+                        continue;
+                    }
+
+                    var principal = ctx.Web.EnsureUser(assignment.LoginName);
+                    item.RoleAssignments.Add(principal, bindings);
+                    await ctx.ExecuteQueryAsyncWithThrottleRetries(_logger).ConfigureAwait(false);
+                    applied++;
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    // Most likely a principal that no longer resolves. Keep going.
+                    _logger.LogWarning(ex, "Could not re-apply permissions for '{Principal}' on '{Url}'.",
+                        assignment.Title ?? assignment.LoginName, serverRelativeUrl);
+                }
+            }
+
+            _logger.LogInformation("Re-applied {Applied} of {Total} role assignment(s) onto '{Url}'.",
+                applied, permissions.Count, serverRelativeUrl);
+            return applied == permissions.Count;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "Failed to re-apply permissions onto '{Url}'. Continuing with inherited permissions.", serverRelativeUrl);
+            return false;
+        }
+    }
+
+    /// <summary>
     /// Copies role assignments from a source list-item to a destination
     /// list-item. Skips silently when the source had inherited permissions
     /// (nothing to copy) and logs without throwing so the migration is not
@@ -141,57 +336,304 @@ public sealed class SharePointPlaceholderWriter(ILogger logger)
     private const string FieldOriginalCreated = "ColdStorageOriginalCreated";
 
     /// <summary>
-    /// Ensures the cold-storage "original metadata" columns exist on the
-    /// placeholder's library and stamps the captured author/editor/timestamps
-    /// onto the placeholder list item. Best-effort: a failure here is logged and
-    /// swallowed so it never undoes an otherwise-successful migration (mirrors
-    /// <see cref="CopyRoleAssignmentsAsync"/>).
+    /// Internal name of the cold-storage status column stamped onto every
+    /// placeholder so archived files are visually identifiable in the library
+    /// view (issue #32). Unlike the "Original *" columns above this one is
+    /// <b>not</b> opt-in: the badge is the only at-a-glance signal a user gets
+    /// that a ".url" file is an archived document.
     /// </summary>
-    public async Task<bool> StampOriginalMetadataAsync(
+    public const string FieldColdStorageStatus = "ColdStorageStatus";
+
+    /// <summary>
+    /// Component id of the SPFx <c>ColdStorageStatusFieldCustomizer</c> (see
+    /// <c>src/SPFx/spfx-cold-storage/src/extensions/coldStorageStatusField/ColdStorageStatusFieldCustomizer.manifest.json</c>).
+    /// Binding it to the <i>list</i> column is what makes SharePoint render the
+    /// coloured badge instead of raw text — a site column alone renders nothing
+    /// because it is never added to a library or a view.
+    /// </summary>
+    public const string StatusFieldCustomizerId = "bcc81765-0e17-4bd7-a1a5-68a72cb5a016";
+
+    /// <summary>
+    /// Schema XML for the status column. Kept as a helper so the customizer
+    /// binding is covered by a unit test.
+    /// </summary>
+    public static string BuildStatusFieldXml() =>
+        $"<Field Type='Text' DisplayName='Cold storage' Name='{FieldColdStorageStatus}' " +
+        $"StaticName='{FieldColdStorageStatus}' Group='Cold Storage' MaxLength='64' Required='FALSE' " +
+        $"ClientSideComponentId='{StatusFieldCustomizerId}' />";
+
+    /// <summary>
+    /// Document libraries already known to carry the cold-storage columns, keyed by
+    /// <c>{sharepoint host}|{library root folder server-relative URL}</c> (value =
+    /// whether the optional "Original *" columns were provisioned too). Static because
+    /// the pipeline builds a writer per message, so an instance-level cache would never hit.
+    /// <para>
+    /// The host is part of the key because server-relative URLs are <b>not</b> globally
+    /// unique — two host-named site collections both have a <c>/Shared Documents</c> — and
+    /// a collision would make one site skip provisioning and silently lose every badge
+    /// (the same reasoning as <see cref="ColdStorageBlobKey"/> prefixing the host).
+    /// </para>
+    /// <para>
+    /// This exists to keep the badge cheap: without it every single file would pay an
+    /// extra CSOM round trip to re-discover columns that were created by the first
+    /// file in that library, which matters on large jobs where SharePoint throttling
+    /// is the bottleneck.
+    /// </para>
+    /// </summary>
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, bool> ProvisionedLibraries =
+        new(StringComparer.OrdinalIgnoreCase);
+
+    private static string HostOf(ClientContext ctx)
+        => Uri.TryCreate(ctx.Url, UriKind.Absolute, out var uri) ? uri.Host : string.Empty;
+
+    private static string LibraryCacheKey(ClientContext ctx, string libraryRootServerRelativeUrl)
+        => $"{HostOf(ctx)}|{libraryRootServerRelativeUrl}";
+
+    private static string? FindProvisionedLibrary(
+        ClientContext ctx, string placeholderServerRelativeUrl, bool needOriginalMetadataColumns)
+    {
+        var host = HostOf(ctx);
+        foreach (var entry in ProvisionedLibraries)
+        {
+            if (needOriginalMetadataColumns && !entry.Value)
+            {
+                continue;
+            }
+            var separator = entry.Key.IndexOf('|');
+            if (separator < 0
+                || !entry.Key.AsSpan(0, separator).Equals(host, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+            if (IsUnder(placeholderServerRelativeUrl, entry.Key[(separator + 1)..]))
+            {
+                return entry.Key;
+            }
+        }
+        return null;
+    }
+
+    private static bool IsUnder(string path, string libraryRoot) =>
+        path.Length > libraryRoot.Length
+        && path[libraryRoot.Length] == '/'
+        && path.StartsWith(libraryRoot, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Ensures the cold-storage columns exist on the placeholder's library and
+    /// stamps their values onto the placeholder list item:
+    /// <list type="bullet">
+    ///   <item>the status badge column, always (issue #32); and</item>
+    ///   <item>the captured author/editor/timestamps, when
+    ///   <paramref name="copyOriginalMetadataColumns"/> is set (issue #1).</item>
+    /// </list>
+    /// Best-effort: a failure here is logged and swallowed so it never undoes an
+    /// otherwise-successful migration (mirrors <see cref="CopyRoleAssignmentsAsync"/>).
+    /// </summary>
+    public async Task<bool> StampPlaceholderColumnsAsync(
         ClientContext ctx,
         string placeholderServerRelativeUrl,
         PlaceholderFileMetadata metadata,
+        bool copyOriginalMetadataColumns,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(ctx);
         ArgumentNullException.ThrowIfNull(metadata);
         cancellationToken.ThrowIfCancellationRequested();
 
+        var cachedLibrary = FindProvisionedLibrary(ctx, placeholderServerRelativeUrl, copyOriginalMetadataColumns);
         try
         {
             var phFile = ctx.Web.GetFileByServerRelativeUrl(placeholderServerRelativeUrl);
             var item = phFile.ListItemAllFields;
-            ctx.Load(item, i => i.ParentList);
-            var list = item.ParentList;
-            ctx.Load(list, l => l.Fields.Include(f => f.InternalName));
-            await ctx.ExecuteQueryAsync().ConfigureAwait(false);
 
-            var existing = new HashSet<string>(
-                list.Fields.Select(f => f.InternalName), StringComparer.OrdinalIgnoreCase);
+            var stampStatus = true;
+            var stampOriginal = copyOriginalMetadataColumns;
 
-            EnsureTextField(list, existing, FieldOriginalAuthor, "Original Author");
-            EnsureTextField(list, existing, FieldOriginalEditor, "Original Editor");
-            EnsureDateField(list, existing, FieldOriginalModified, "Original Modified");
-            EnsureDateField(list, existing, FieldOriginalCreated, "Original Created");
-            await ctx.ExecuteQueryAsync().ConfigureAwait(false);
-
-            SetIfPresent(item, FieldOriginalAuthor, metadata.OriginalCreatedBy);
-            SetIfPresent(item, FieldOriginalEditor, metadata.OriginalModifiedBy);
-            if (metadata.OriginalLastModified > DateTime.MinValue)
+            if (cachedLibrary is null)
             {
-                item[FieldOriginalModified] = metadata.OriginalLastModified;
+                ctx.Load(item, i => i.ParentList);
+                var list = item.ParentList;
+                ctx.Load(list, l => l.Fields.Include(f => f.InternalName), l => l.RootFolder.ServerRelativeUrl);
+                await ctx.ExecuteQueryAsyncWithThrottleRetries(_logger).ConfigureAwait(false);
+
+                var existing = new HashSet<string>(
+                    list.Fields.Select(f => f.InternalName), StringComparer.OrdinalIgnoreCase);
+
+                // Each group is provisioned in its own round trip and REPORTS success
+                // instead of throwing: the worker scales out, so several files from a
+                // fresh library race to create the same column and all but one get a
+                // duplicate-name error. Losing that race must not cost us the values we
+                // can still write — the column exists either way.
+                stampStatus = await EnsureStatusFieldAsync(ctx, list, existing, cancellationToken).ConfigureAwait(false);
+                if (copyOriginalMetadataColumns)
+                {
+                    stampOriginal = await EnsureOriginalMetadataFieldsAsync(ctx, list, existing, cancellationToken).ConfigureAwait(false);
+                }
+
+                var root = list.RootFolder.ServerRelativeUrl;
+                if (stampStatus && !string.IsNullOrEmpty(root))
+                {
+                    cachedLibrary = LibraryCacheKey(ctx, root);
+                    ProvisionedLibraries.AddOrUpdate(cachedLibrary, stampOriginal, (_, had) => had || stampOriginal);
+                }
             }
-            if (metadata.OriginalCreated > DateTime.MinValue)
+
+            if (!stampStatus && !stampOriginal)
             {
-                item[FieldOriginalCreated] = metadata.OriginalCreated;
+                return false;
+            }
+
+            // The placeholder only ever exists once the copy is verified and the
+            // source removed, so the archived state is the terminal migrate status.
+            if (stampStatus)
+            {
+                item[FieldColdStorageStatus] = nameof(MigrationLifecycleStatus.ColdStorageMigrationCompleted);
+            }
+
+            if (stampOriginal)
+            {
+                SetIfPresent(item, FieldOriginalAuthor, metadata.OriginalCreatedBy);
+                SetIfPresent(item, FieldOriginalEditor, metadata.OriginalModifiedBy);
+                if (metadata.OriginalLastModified > DateTime.MinValue)
+                {
+                    item[FieldOriginalModified] = metadata.OriginalLastModified;
+                }
+                if (metadata.OriginalCreated > DateTime.MinValue)
+                {
+                    item[FieldOriginalCreated] = metadata.OriginalCreated;
+                }
             }
             item.Update();
-            await ctx.ExecuteQueryAsync().ConfigureAwait(false);
+            await ctx.ExecuteQueryAsyncWithThrottleRetries(_logger).ConfigureAwait(false);
             return true;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            _logger.LogWarning(ex, "Failed to stamp original-metadata columns onto placeholder '{Url}'. Continuing.", placeholderServerRelativeUrl);
+            // Drop the cache entry so the next file re-discovers the columns rather
+            // than repeating a doomed update (e.g. someone deleted the column).
+            if (cachedLibrary is not null)
+            {
+                ProvisionedLibraries.TryRemove(cachedLibrary, out _);
+            }
+            _logger.LogWarning(ex, "Failed to stamp cold-storage columns onto placeholder '{Url}'. Continuing.", placeholderServerRelativeUrl);
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Adds the status column to the library (and to its default view) bound to the
+    /// SPFx field customizer, so archived rows render the badge without any manual
+    /// <c>Set-PnPField</c> step. Returns true when the column is present afterwards.
+    /// Never throws — a provisioning failure only costs the badge, never the migration.
+    /// </summary>
+    private async Task<bool> EnsureStatusFieldAsync(
+        ClientContext ctx, List list, HashSet<string> existing, CancellationToken cancellationToken)
+    {
+        if (existing.Contains(FieldColdStorageStatus))
+        {
+            return true;
+        }
+
+        try
+        {
+            var field = list.Fields.AddFieldAsXml(BuildStatusFieldXml(), true, AddFieldOptions.AddFieldInternalNameHint);
+            // Belt and braces: not every SPO build honours ClientSideComponentId in
+            // the field schema, and without it the customizer never renders.
+            field.ClientSideComponentId = new Guid(StatusFieldCustomizerId);
+            field.Update();
+            await ctx.ExecuteQueryAsyncWithThrottleRetries(_logger).ConfigureAwait(false);
+            existing.Add(FieldColdStorageStatus);
+            return true;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogDebug(ex, "Could not create the '{Field}' list column; checking whether it exists already.", FieldColdStorageStatus);
+        }
+
+        // Most likely cause: another worker archiving into the same fresh library won
+        // the race and SharePoint rejected ours as a duplicate name. The column exists,
+        // so this is a success, not a failure.
+        if (await ListHasFieldsAsync(ctx, list, existing, [FieldColdStorageStatus], cancellationToken).ConfigureAwait(false))
+        {
+            return true;
+        }
+
+        // Otherwise fall back to the site column provisioned by the SPFx feature's
+        // elements.xml (it already carries the customizer binding).
+        try
+        {
+            var siteField = ctx.Web.AvailableFields.GetByInternalNameOrTitle(FieldColdStorageStatus);
+            list.Fields.Add(siteField);
+            var view = list.DefaultView;
+            view.ViewFields.Add(FieldColdStorageStatus);
+            view.Update();
+            await ctx.ExecuteQueryAsyncWithThrottleRetries(_logger).ConfigureAwait(false);
+            existing.Add(FieldColdStorageStatus);
+            return true;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "Could not provision the '{Field}' column on the library; the cold-storage badge will not show for this item.", FieldColdStorageStatus);
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Adds the opt-in "Original *" columns. Same contract as
+    /// <see cref="EnsureStatusFieldAsync"/>: returns whether they are present, never throws.
+    /// </summary>
+    private async Task<bool> EnsureOriginalMetadataFieldsAsync(
+        ClientContext ctx, List list, HashSet<string> existing, CancellationToken cancellationToken)
+    {
+        string[] all = [FieldOriginalAuthor, FieldOriginalEditor, FieldOriginalModified, FieldOriginalCreated];
+        if (all.All(existing.Contains))
+        {
+            return true;
+        }
+
+        try
+        {
+            EnsureTextField(list, existing, FieldOriginalAuthor, "Original Author");
+            EnsureTextField(list, existing, FieldOriginalEditor, "Original Editor");
+            EnsureDateField(list, existing, FieldOriginalModified, "Original Modified");
+            EnsureDateField(list, existing, FieldOriginalCreated, "Original Created");
+            await ctx.ExecuteQueryAsyncWithThrottleRetries(_logger).ConfigureAwait(false);
+            foreach (var name in all)
+            {
+                existing.Add(name);
+            }
+            return true;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogDebug(ex, "Could not create the 'Original *' columns; checking whether they exist already.");
+        }
+
+        return await ListHasFieldsAsync(ctx, list, existing, all, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Re-reads the list's fields and reports whether all of <paramref name="internalNames"/>
+    /// are now present, refreshing <paramref name="existing"/>. Used to tell "someone else
+    /// created it" apart from a real provisioning failure.
+    /// </summary>
+    private async Task<bool> ListHasFieldsAsync(
+        ClientContext ctx, List list, HashSet<string> existing, string[] internalNames, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        try
+        {
+            ctx.Load(list, l => l.Fields.Include(f => f.InternalName));
+            await ctx.ExecuteQueryAsyncWithThrottleRetries(_logger).ConfigureAwait(false);
+            foreach (var name in list.Fields.Select(f => f.InternalName))
+            {
+                existing.Add(name);
+            }
+            return internalNames.All(existing.Contains);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogDebug(ex, "Could not re-read the library's columns.");
             return false;
         }
     }

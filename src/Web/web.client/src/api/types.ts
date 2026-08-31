@@ -194,3 +194,21 @@ export interface ExclusionScope {
   createdBy?: string | null;
   createdAt: string;
 }
+
+/**
+ * GET /api/admin/settings — a runtime-configurable product setting. `value` is what
+ * is actually in force; `deployedValue` is this host's app setting, used whenever
+ * `isOverridden` is false.
+ */
+export interface RuntimeSetting {
+  key: string;
+  label: string;
+  kind: "Toggle" | "Number" | "Choice";
+  choices?: string[] | null;
+  value: string;
+  deployedValue: string;
+  isOverridden: boolean;
+  updatedBy?: string | null;
+  updatedAt?: string | null;
+  description: string;
+}

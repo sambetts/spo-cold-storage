@@ -3,6 +3,7 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
+using Web.Authorization;
 using Web.Models.Api;
 using Web.Services;
 
@@ -25,6 +26,22 @@ public class JobsController(
     private readonly IColdStorageAdminAuthorizationService _admin = admin ?? throw new ArgumentNullException(nameof(admin));
     private readonly ILogger<JobsController> _logger = logger ?? throw new ArgumentNullException(nameof(logger));
 
+    /// <summary>
+    /// A job is visible to the admin team, or to the user who submitted it (issue #70).
+    /// Job ids are GUIDs, but a GUID is not an authorization control — without this any
+    /// signed-in user who obtained one could read another user's file paths and audit log.
+    /// </summary>
+    private async Task<bool> CanSeeJobAsync(Entities.DBEntities.ColdStorage.MigrationJob job, CancellationToken cancellationToken)
+    {
+        var upn = User.GetUpn();
+        if (!string.IsNullOrWhiteSpace(upn)
+            && string.Equals(job.RequestedByUpn, upn, StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+        return await _admin.IsAdminAsync(User, cancellationToken).ConfigureAwait(false);
+    }
+
     [HttpGet("{jobId:guid}")]
     public async Task<ActionResult<JobStatusResponse>> GetAsync(Guid jobId, CancellationToken cancellationToken)
     {
@@ -38,6 +55,11 @@ public class JobsController(
         {
             return NotFound();
         }
+        if (!await CanSeeJobAsync(job, cancellationToken).ConfigureAwait(false))
+        {
+            // 404, not 403: don't confirm that a job id exists to someone who can't see it.
+            return NotFound();
+        }
         return await BuildJobResponseAsync(job, cancellationToken).ConfigureAwait(false);
     }
 
@@ -45,11 +67,11 @@ public class JobsController(
     /// <c>GET /api/jobs?siteUrl={url}&amp;take={n}</c> – recent jobs for a single
     /// SharePoint site collection (used by the SPFx COLDSTORAGE_STATUS toolbar
     /// command to surface activity without requiring a file selection). Ordered
-    /// by created_at desc, capped at 100. The endpoint does NOT enforce the
-    /// site-owner check on read because the per-job payload only carries
-    /// metadata the caller would have already seen in the SPFx UI (server URLs,
-    /// item statuses, job IDs); we rely on the user being signed in (the
-    /// [Authorize] attribute above) plus the siteUrl filter.
+    /// by created_at desc, capped at 100.
+    /// <para>
+    /// Scoped to the caller's own jobs (issue #70); cold-storage admins see every
+    /// job for the site.
+    /// </para>
     /// </summary>
     [HttpGet]
     public async Task<ActionResult<List<JobStatusResponse>>> ListAsync(
@@ -65,11 +87,23 @@ public class JobsController(
         var capped = take is null ? 20 : Math.Clamp(take.Value, 1, 100);
         var trimmedSite = siteUrl.TrimEnd('/');
 
-        var jobs = await _db.MigrationJobs
+        var query = _db.MigrationJobs
             .Include(j => j.Container)
             .Include(j => j.Items)
             .AsNoTracking()
-            .Where(j => j.SiteUrl == siteUrl || j.SiteUrl == trimmedSite)
+            .Where(j => j.SiteUrl == siteUrl || j.SiteUrl == trimmedSite);
+
+        if (!await _admin.IsAdminAsync(User, cancellationToken).ConfigureAwait(false))
+        {
+            var upn = User.GetUpn();
+            if (string.IsNullOrWhiteSpace(upn))
+            {
+                return new List<JobStatusResponse>();
+            }
+            query = query.Where(j => j.RequestedByUpn == upn);
+        }
+
+        var jobs = await query
             .OrderByDescending(j => j.CreatedAt)
             .Take(capped)
             .ToListAsync(cancellationToken)
@@ -345,8 +379,17 @@ public class JobsController(
     public async Task<ActionResult<IEnumerable<JobLogEntryResponse>>> GetLogsAsync(Guid jobId, [FromQuery] int? take, CancellationToken cancellationToken)
     {
         var capped = take is null ? 500 : Math.Clamp(take.Value, 1, 5000);
-        var exists = await _db.MigrationJobs.AnyAsync(j => j.JobId == jobId, cancellationToken).ConfigureAwait(false);
-        if (!exists)
+        var job = await _db.MigrationJobs
+            .AsNoTracking()
+            .FirstOrDefaultAsync(j => j.JobId == jobId, cancellationToken)
+            .ConfigureAwait(false);
+        if (job is null)
+        {
+            return NotFound();
+        }
+        // The log carries file paths and error detail, so it needs the same
+        // owner-or-admin gate as the job itself (issue #70).
+        if (!await CanSeeJobAsync(job, cancellationToken).ConfigureAwait(false))
         {
             return NotFound();
         }

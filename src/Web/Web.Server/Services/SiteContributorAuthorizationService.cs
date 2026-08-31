@@ -2,6 +2,7 @@ using Entities.Configuration;
 using Microsoft.Extensions.Logging;
 using Microsoft.SharePoint.Client;
 using Migration.Engine;
+using Migration.Engine.Caching;
 using System.Security.Claims;
 using Web.Authorization;
 
@@ -27,10 +28,9 @@ public sealed class SiteContributorAuthorizationService(Config config, ILogger<S
     private readonly Config _config = config ?? throw new ArgumentNullException(nameof(config));
     private readonly ILogger<SiteContributorAuthorizationService> _logger = logger ?? throw new ArgumentNullException(nameof(logger));
 
-    // Per-process cache. siteUrl|upn -> (decision, expiry). Short TTL so role
-    // changes propagate quickly while keeping interactive use snappy.
-    private static readonly Dictionary<string, (bool Allowed, DateTime ExpiresAt)> _cache = new(StringComparer.OrdinalIgnoreCase);
-    private static readonly object _cacheLock = new();
+    // Positive decisions are shared across processes (issue #68) so scaling out doesn't
+    // multiply the CSOM effective-permissions call. The TTL stays short so a revoked
+    // permission propagates quickly.
     private static readonly TimeSpan _cacheTtl = TimeSpan.FromMinutes(2);
 
     public async Task<bool> IsCallerSiteContributorAsync(ClaimsPrincipal caller, string siteUrl, CancellationToken cancellationToken = default)
@@ -49,13 +49,12 @@ public sealed class SiteContributorAuthorizationService(Config config, ILogger<S
         }
         var oid = caller.GetEntraObjectId();
 
-        var cacheKey = siteUrl + "|" + upn;
-        lock (_cacheLock)
+        var cacheKey = ColdStorageCacheKeys.SiteContributor(siteUrl, upn);
+        var cached = await ColdStorageCacheFactory.Shared
+            .GetAsync<CachedFlag>(cacheKey, cancellationToken).ConfigureAwait(false);
+        if (cached is not null)
         {
-            if (_cache.TryGetValue(cacheKey, out var cached) && cached.ExpiresAt > DateTime.UtcNow)
-            {
-                return cached.Allowed;
-            }
+            return cached.Value;
         }
 
         bool allowed;
@@ -67,23 +66,29 @@ public sealed class SiteContributorAuthorizationService(Config config, ILogger<S
         catch (Exception ex)
         {
             // Per the security principle - default deny on errors so a transient
-            // SharePoint failure can't accidentally grant access.
+            // SharePoint failure can't accidentally grant access. Deliberately NOT cached:
+            // caching a deny would turn a blip into two minutes of lockout.
             _logger.LogError(ex, "Contributor check failed for {SiteUrl} / {Upn}. Denying.", siteUrl, upn);
             return false;
         }
 
-        lock (_cacheLock)
-        {
-            _cache[cacheKey] = (allowed, DateTime.UtcNow + _cacheTtl);
-        }
+        await ColdStorageCacheFactory.Shared
+            .SetAsync(cacheKey, new CachedFlag(allowed), _cacheTtl, cancellationToken).ConfigureAwait(false);
         return allowed;
     }
 
     /// <summary>
-    /// True when the caller has contributor (edit) rights on the web. Primary check is the
-    /// caller's effective permissions (EditListItems); if that lookup can't be resolved (e.g.
-    /// an external/guest login-name shape we didn't build), fall back to owner-group membership
-    /// so the broadening never regresses existing owners.
+    /// True when the caller has contributor rights on the web. Primary check is the
+    /// caller's effective permissions; if that lookup can't be resolved (e.g. an
+    /// external/guest login-name shape we didn't build), fall back to owner-group
+    /// membership so the broadening never regresses existing owners.
+    /// <para>
+    /// Requires <b>both</b> <see cref="PermissionKind.EditListItems"/> and
+    /// <see cref="PermissionKind.DeleteListItems"/> (issue #61). Archiving <i>deletes</i>
+    /// the user's file — the worker then performs that delete with app-only
+    /// <c>Sites.FullControl.All</c>, so a caller who cannot delete the file themselves
+    /// must not be able to have the service delete it for them.
+    /// </para>
     /// </summary>
     private async Task<bool> CheckCanContributeAsync(ClientContext ctx, string upn, string? oid)
     {
@@ -94,11 +99,16 @@ public sealed class SiteContributorAuthorizationService(Config config, ILogger<S
             var loginName = "i:0#.f|membership|" + upn;
             var perms = ctx.Web.GetUserEffectivePermissions(loginName);
             await ctx.ExecuteQueryAsync().ConfigureAwait(false);
-            if (perms.Value.Has(PermissionKind.EditListItems))
+            if (perms.Value.Has(PermissionKind.EditListItems)
+                && perms.Value.Has(PermissionKind.DeleteListItems))
             {
                 return true;
             }
-            // Resolved cleanly but the user only has read/visitor rights — not a contributor.
+            // Resolved cleanly but the user lacks edit and/or delete — not a contributor
+            // for archiving purposes.
+            _logger.LogInformation(
+                "Caller '{Upn}' resolved but lacks the required web permissions (edit={Edit}, delete={Delete}).",
+                upn, perms.Value.Has(PermissionKind.EditListItems), perms.Value.Has(PermissionKind.DeleteListItems));
             return false;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)

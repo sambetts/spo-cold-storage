@@ -6,6 +6,7 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Identity.Client;
 using Migration.Engine.Lifecycle;
 using Migration.Engine.Migration;
+using Migration.Engine.Settings;
 using Migration.Engine.Utils;
 using Microsoft.SharePoint.Client;
 using Models;
@@ -28,8 +29,9 @@ public sealed class ColdStorageMigratorPipeline : BaseComponent
     private readonly SharePointPlaceholderWriter _placeholderWriter;
     private readonly BlobStorageUploader _blobUploader;
     private readonly IArchiveEligibilityEvaluator _eligibility;
-    private readonly IArchiveHoldDetector? _holdDetector;
-    private readonly VersionHistoryArchiver? _versionArchiver;
+    private readonly IArchiveHoldDetector _holdDetector;
+    private readonly VersionHistoryArchiver _versionArchiver;
+    private readonly IColdStorageSettingsSource _settings;
 
     public ColdStorageMigratorPipeline(
         Config config,
@@ -39,19 +41,40 @@ public sealed class ColdStorageMigratorPipeline : BaseComponent
         _statusWriter = statusWriter ?? throw new ArgumentNullException(nameof(statusWriter));
         _placeholderWriter = new SharePointPlaceholderWriter(logger);
         _blobUploader = new BlobStorageUploader(config, logger);
+        _settings = new DbColdStorageSettingsSource(config, logger);
         _eligibility = new ArchiveEligibilityEvaluator(
             config,
             new DbArchiveExclusionSource(config, logger),
             new DbFileReadActivitySource(config, logger),
-            new DbArchiveExtensionPolicySource(config, logger));
-        // Only stand up the (per-item, CSOM round-trip) hold detector when enabled.
-        _holdDetector = config.ColdStorageSkipRetentionLabeled > 0
-            ? new RetentionLabelHoldDetector(logger)
-            : null;
-        _versionArchiver = config.ColdStorageCaptureVersionHistory > 0
-            ? new VersionHistoryArchiver(config, logger)
-            : null;
+            new DbArchiveExtensionPolicySource(config, logger),
+            _settings);
+        // Always constructed: whether it actually runs is decided per item from the
+        // portal setting, so an admin can turn hold-skipping on without a redeploy.
+        _holdDetector = new RetentionLabelHoldDetector(logger);
+        // Version-history preservation is likewise resolved per item, not at
+        // construction. The deployed app setting is the fallback for both.
+        _versionArchiver = new VersionHistoryArchiver(config, logger);
     }
+
+    /// <summary>
+    /// True when version-history preservation is switched on right now — the portal
+    /// setting wins, falling back to this host's deployed app setting.
+    /// </summary>
+    private async Task<bool> IsVersionHistoryEnabledAsync(CancellationToken cancellationToken)
+        => await _settings.GetIntAsync(
+            ColdStorageSettingKeys.CaptureVersionHistory,
+            _config.ColdStorageCaptureVersionHistory,
+            cancellationToken).ConfigureAwait(false) > 0;
+
+    /// <summary>
+    /// True when files carrying a retention label must be skipped. Same precedence:
+    /// portal setting, then the deployed app setting.
+    /// </summary>
+    private async Task<bool> IsHoldSkipEnabledAsync(CancellationToken cancellationToken)
+        => await _settings.GetIntAsync(
+            ColdStorageSettingKeys.SkipRetentionLabeled,
+            _config.ColdStorageSkipRetentionLabeled,
+            cancellationToken).ConfigureAwait(false) > 0;
 
     /// <summary>
     /// Executes the full lifecycle for one file. Returns true if the file was
@@ -121,7 +144,8 @@ public sealed class ColdStorageMigratorPipeline : BaseComponent
         // --- Compliance-hold gate (issue #15) -----------------------------
         // Never copy content under a retention/legal-hold label out to Azure.
         // Runs before any download so held content never leaves SharePoint.
-        if (_holdDetector is not null)
+        // Enabled per item from the portal setting so it can be turned on without a redeploy.
+        if (await IsHoldSkipEnabledAsync(cancellationToken).ConfigureAwait(false))
         {
             using var holdCtx = await AuthUtils.GetClientContext(_config, file.SiteUrl, _logger, null, warmUpWeb: false).ConfigureAwait(false);
             var hold = await _holdDetector.CheckAsync(holdCtx, file.ServerRelativeFilePath, cancellationToken).ConfigureAwait(false);
@@ -238,6 +262,7 @@ public sealed class ColdStorageMigratorPipeline : BaseComponent
         DateTime? originalCreated = null;
         DateTime? originalModified = null;
         var capturedVersionCount = 0;
+        ArchivedPermissions? capturedPermissions = null;
 
         ClientContext? spCtx = null;
         try
@@ -269,18 +294,46 @@ public sealed class ColdStorageMigratorPipeline : BaseComponent
 
                 CaptureSourceAuthorship(spFile, ref originalCreatedBy, ref originalModifiedBy, ref originalCreated, ref originalModified);
 
+                // Capture unique item permissions BEFORE the source is deleted (issue #67)
+                // so the same access can be mirrored onto the .url placeholder and
+                // re-applied when the file is restored. Best-effort: returns null for an
+                // inheriting item (nothing to restore) or on failure.
+                capturedPermissions = await _placeholderWriter
+                    .CaptureUniquePermissionsAsync(spCtx, file.ServerRelativeFilePath, cancellationToken).ConfigureAwait(false);
+                if (capturedPermissions is not null)
+                {
+                    await _statusWriter.RecordPermissionsAsync(
+                        envelope.ItemId, capturedPermissions.ToJson(), cancellationToken).ConfigureAwait(false);
+                }
+
                 // Preserve the captured authorship on the archive blob so the original
                 // metadata is kept in cold storage (and restorable) regardless of whether
                 // the placeholder is given the visible "Original *" columns. Best-effort.
                 await TryStampArchiveAuthorMetadataAsync(
                     blobContainerName, blobPath, originalCreatedBy, originalModifiedBy, originalCreated, cancellationToken).ConfigureAwait(false);
 
-                // Capture prior version history to cold storage BEFORE the source
-                // is deleted (issue #18). Best-effort; never fails the migration.
-                if (_versionArchiver is not null)
+                // Capture prior version history to cold storage BEFORE the source is
+                // deleted (issues #18, #66). When preservation is ON this is part of the
+                // archive contract, so a capture or validation failure MUST stop the
+                // delete — otherwise we'd destroy history we promised to keep. The
+                // source is left fully intact for a retry.
+                if (await IsVersionHistoryEnabledAsync(cancellationToken).ConfigureAwait(false))
                 {
-                    capturedVersionCount = await _versionArchiver.CaptureAsync(
+                    var capture = await _versionArchiver.CaptureAsync(
                         spCtx, file.ServerRelativeFilePath, blobPath, blobContainerName, cancellationToken).ConfigureAwait(false);
+
+                    if (!capture.Success)
+                    {
+                        _logger.LogError("Version-history capture failed for '{Url}': {Reason}. Refusing to delete the source.",
+                            file.FullSharePointUrl, capture.FailureReason);
+                        await HandleStepFailureAsync(envelope.ItemId,
+                            capture.Failure ?? new InvalidOperationException(capture.FailureReason),
+                            MigrationLifecycleStatus.CopyToColdStorageFailed,
+                            $"Version-history capture failed: {capture.FailureReason}. The source file was left untouched.",
+                            cancellationToken);
+                        return false;
+                    }
+                    capturedVersionCount = capture.Count;
                 }
 
                 if (spFile.CheckOutType != CheckOutType.None)
@@ -368,16 +421,21 @@ public sealed class ColdStorageMigratorPipeline : BaseComponent
                 // even when storage public network access is locked down by policy.
                 userFacingUrl: BuildPlaceholderUserFacingUrl(envelope.ItemId)).ConfigureAwait(false);
 
-            // Best-effort: when the submitter opted in, copy the captured authorship onto
-            // visible "Original *" placeholder columns (issue #1). Off by default — the
-            // original metadata is already preserved on the archive blob + in the .url file,
-            // so the placeholder is otherwise left as just the .url shortcut. These are
-            // additive copy columns; SharePoint won't let the placeholder's own
-            // Author/Modified be back-dated to the source values. Never fails the migration.
-            if (envelope.CopyMetadataColumns)
-            {
-                await _placeholderWriter.StampOriginalMetadataAsync(spCtx!, placeholderUrl, metadata, cancellationToken).ConfigureAwait(false);
-            }
+            // Always stamp the cold-storage status column so the archived file is
+            // visually identifiable in the library view (issue #32), and — when the
+            // submitter opted in — copy the captured authorship onto visible
+            // "Original *" columns (issue #1). The latter is off by default: the
+            // original metadata is already preserved on the archive blob + in the
+            // .url file. These are additive copy columns; SharePoint won't let the
+            // placeholder's own Author/Modified be back-dated to the source values.
+            // Best-effort throughout — never fails the migration.
+            await _placeholderWriter.StampPlaceholderColumnsAsync(
+                spCtx!, placeholderUrl, metadata, envelope.CopyMetadataColumns, cancellationToken).ConfigureAwait(false);
+
+            // Mirror the source's unique permissions onto the placeholder so the .url
+            // is no more visible than the file it replaced (issue #67). Best-effort.
+            await _placeholderWriter.ApplyPermissionsAsync(
+                spCtx!, placeholderUrl, capturedPermissions, cancellationToken).ConfigureAwait(false);
 
             await _statusWriter.RecordPlaceholderCreatedAsync(envelope.ItemId, placeholderUrl, cancellationToken);
             return true;
@@ -511,10 +569,9 @@ public sealed class ColdStorageMigratorPipeline : BaseComponent
             var placeholderUrl = await _placeholderWriter.WritePlaceholderAsync(
                 spCtx, file.ServerRelativeFilePath, metadata, cancellationToken,
                 userFacingUrl: BuildPlaceholderUserFacingUrl(envelope.ItemId)).ConfigureAwait(false);
-            if (item.CopyMetadataColumns)
-            {
-                await _placeholderWriter.StampOriginalMetadataAsync(spCtx, placeholderUrl, metadata, cancellationToken).ConfigureAwait(false);
-            }
+            // Always stamp the status badge column (issue #32); "Original *" columns only on opt-in.
+            await _placeholderWriter.StampPlaceholderColumnsAsync(
+                spCtx, placeholderUrl, metadata, item.CopyMetadataColumns, cancellationToken).ConfigureAwait(false);
             await _statusWriter.RecordPlaceholderCreatedAsync(envelope.ItemId, placeholderUrl, cancellationToken).ConfigureAwait(false);
             return true;
         }

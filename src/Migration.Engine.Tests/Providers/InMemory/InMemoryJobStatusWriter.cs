@@ -132,6 +132,12 @@ public sealed class InMemoryJobStatusWriter : IJobStatusWriter
     public Task<bool> IsRestoreInFlightForOtherItemAsync(Guid itemId, string placeholderServerRelativeUrl, CancellationToken cancellationToken = default)
         => Task.FromResult(SimulateRestoreInFlight);
 
+    public Task RecordPermissionsAsync(Guid itemId, string permissionsJson, CancellationToken cancellationToken = default)
+    {
+        Ensure(itemId).PermissionsJson = permissionsJson;
+        return Task.CompletedTask;
+    }
+
     public Task<int> CompleteAlreadyArchivedAsync(int maxItems, CancellationToken cancellationToken = default)
     {
         // Reconciliation helper; not exercised by the pipelines under test. Mirror the real rule so
