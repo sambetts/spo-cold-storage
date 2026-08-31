@@ -68,6 +68,12 @@ public class Program
         var config = new Config(builder.Configuration);
         builder.Services.AddSingleton(config);
 
+        // Cross-process cache (issue #68). Shared with the queue worker via Table Storage,
+        // so an authorization decision or a SharePoint lookup warmed by one instance is
+        // reused by all of them instead of each paying its own SharePoint call.
+        Migration.Engine.Caching.ColdStorageCacheFactory.Initialise(
+            config, LoggerFactory.Create(b => b.AddConsole()).CreateLogger("ColdStorageCache"));
+
         // Data Protection backs the short-lived, tamper-proof tokens that authorise
         // cold-storage blob downloads streamed through PlaceholdersController.ContentAsync
         // (the browser can't reach the private storage account directly). On Azure App

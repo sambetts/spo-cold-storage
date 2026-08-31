@@ -260,6 +260,20 @@ public class Config(Microsoft.Extensions.Configuration.IConfiguration config) : 
     [ConfigValue(true)]
     public int ColdStorageCaptureVersionHistory { get; set; }
 
+    /// <summary>
+    /// Backend for the cross-process cache that reduces SharePoint calls (issue #68):
+    /// <c>table</c> (default) shares cached values between the API and every worker
+    /// instance via Azure Table Storage in the existing storage account; <c>memory</c>
+    /// keeps each process isolated (useful on a dev box). Any failure degrades to
+    /// per-process caching automatically — the cache is never a source of truth.
+    /// </summary>
+    [ConfigValue(true)]
+    public string ColdStorageCacheBackend { get; set; } = "table";
+
+    /// <summary>Table used by the shared cache. Created on first use if absent.</summary>
+    [ConfigValue(true)]
+    public string ColdStorageCacheTableName { get; set; } = "coldstoragecache";
+
     [ConfigSection("AzureAd")]
     public AzureAdConfig AzureAdConfig { get; set; } = null!;
 

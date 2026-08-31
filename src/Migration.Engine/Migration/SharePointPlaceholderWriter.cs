@@ -1,5 +1,6 @@
 using Microsoft.Extensions.Logging;
 using Microsoft.SharePoint.Client;
+using Migration.Engine.Caching;
 using Migration.Engine.Utils;
 using Models.ColdStorage;
 using System.Text;
@@ -149,26 +150,21 @@ public sealed class SharePointPlaceholderWriter(ILogger logger)
     }
 
     /// <summary>
-    /// Role definitions ("Full Control", "Contribute", …) per web, cached briefly.
-    /// They are static configuration that changes very rarely, but permission replay
-    /// needs them for <b>every</b> item — without this cache a 5,000-file restore adds
-    /// 5,000 avoidable CSOM round trips and makes throttling far likelier (issue #68).
-    /// </summary>
-    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, (DateTime ExpiresUtc, Dictionary<string, int> ByName)> RoleDefinitionCache =
-        new(StringComparer.OrdinalIgnoreCase);
-
-    private static readonly TimeSpan RoleDefinitionTtl = TimeSpan.FromMinutes(10);
-
-    /// <summary>
-    /// Role-definition name → id for a web, from cache when warm. Ids are stable per
-    /// web, so we cache ids and re-hydrate the CSOM objects by id (cheap, no round trip).
+    /// Role-definition name → id for a web. Cached in the <b>shared</b> cache (issue #68):
+    /// they are static configuration that changes very rarely, but permission replay needs
+    /// them for every item, and a per-process cache meant every worker instance re-fetched
+    /// them. Ids are cached rather than the CSOM objects, and re-hydrated with
+    /// <c>GetById</c>, which costs no round trip.
     /// </summary>
     private async Task<Dictionary<string, int>> GetRoleDefinitionIdsAsync(ClientContext ctx, CancellationToken cancellationToken)
     {
-        var key = ctx.Url ?? string.Empty;
-        if (RoleDefinitionCache.TryGetValue(key, out var cached) && cached.ExpiresUtc > DateTime.UtcNow)
+        var webUrl = ctx.Url ?? string.Empty;
+        var cached = await ColdStorageCacheFactory.Shared
+            .GetAsync<RoleDefinitionMap>(ColdStorageCacheKeys.RoleDefinitions(webUrl), cancellationToken)
+            .ConfigureAwait(false);
+        if (cached?.ByName is { Count: > 0 })
         {
-            return cached.ByName;
+            return new Dictionary<string, int>(cached.ByName, StringComparer.OrdinalIgnoreCase);
         }
 
         ctx.Load(ctx.Web, w => w.RoleDefinitions.Include(r => r.Name, r => r.Id));
@@ -178,9 +174,16 @@ public sealed class SharePointPlaceholderWriter(ILogger logger)
             .GroupBy(r => r.Name, StringComparer.OrdinalIgnoreCase)
             .ToDictionary(g => g.Key, g => g.First().Id, StringComparer.OrdinalIgnoreCase);
 
-        RoleDefinitionCache[key] = (DateTime.UtcNow + RoleDefinitionTtl, byName);
+        await ColdStorageCacheFactory.Shared
+            .SetAsync(ColdStorageCacheKeys.RoleDefinitions(webUrl), new RoleDefinitionMap(byName), RoleDefinitionTtl, cancellationToken)
+            .ConfigureAwait(false);
         return byName;
     }
+
+    private static readonly TimeSpan RoleDefinitionTtl = TimeSpan.FromMinutes(30);
+
+    /// <summary>Serialisable carrier for the cached role-definition map.</summary>
+    private sealed record RoleDefinitionMap(Dictionary<string, int> ByName);
 
     /// <summary>
     /// Re-applies a captured permissions snapshot onto an item (the <c>.url</c> placeholder

@@ -19,6 +19,11 @@ var host = new HostBuilder()
         var config = new Config(context.Configuration);
         services.AddSingleton(config);
 
+        // Cross-process cache (issue #68): a value warmed by any instance is available to
+        // every instance, so scaling the worker out no longer multiplies SharePoint load.
+        Migration.Engine.Caching.ColdStorageCacheFactory.Initialise(
+            config, LoggerFactory.Create(b => b.AddConsole()).CreateLogger("ColdStorageCache"));
+
         // Shared, transport-agnostic dispatch core — identical behaviour to the
         // WebJob listener (envelope + legacy fallback, per-host in-flight guards,
         // dead-letter of unparseable messages). The retry publisher lets it schedule
