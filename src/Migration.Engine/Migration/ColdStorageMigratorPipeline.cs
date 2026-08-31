@@ -29,7 +29,7 @@ public sealed class ColdStorageMigratorPipeline : BaseComponent
     private readonly SharePointPlaceholderWriter _placeholderWriter;
     private readonly BlobStorageUploader _blobUploader;
     private readonly IArchiveEligibilityEvaluator _eligibility;
-    private readonly IArchiveHoldDetector? _holdDetector;
+    private readonly IArchiveHoldDetector _holdDetector;
     private readonly VersionHistoryArchiver _versionArchiver;
     private readonly IColdStorageSettingsSource _settings;
 
@@ -41,20 +41,19 @@ public sealed class ColdStorageMigratorPipeline : BaseComponent
         _statusWriter = statusWriter ?? throw new ArgumentNullException(nameof(statusWriter));
         _placeholderWriter = new SharePointPlaceholderWriter(logger);
         _blobUploader = new BlobStorageUploader(config, logger);
+        _settings = new DbColdStorageSettingsSource(config, logger);
         _eligibility = new ArchiveEligibilityEvaluator(
             config,
             new DbArchiveExclusionSource(config, logger),
             new DbFileReadActivitySource(config, logger),
-            new DbArchiveExtensionPolicySource(config, logger));
-        // Only stand up the (per-item, CSOM round-trip) hold detector when enabled.
-        _holdDetector = config.ColdStorageSkipRetentionLabeled > 0
-            ? new RetentionLabelHoldDetector(logger)
-            : null;
-        // Version-history preservation is resolved per item, not at construction: an
-        // admin can turn it on/off from the portal (cold_storage_settings) and the
-        // worker must honour that without a redeploy. The app setting is the fallback.
+            new DbArchiveExtensionPolicySource(config, logger),
+            _settings);
+        // Always constructed: whether it actually runs is decided per item from the
+        // portal setting, so an admin can turn hold-skipping on without a redeploy.
+        _holdDetector = new RetentionLabelHoldDetector(logger);
+        // Version-history preservation is likewise resolved per item, not at
+        // construction. The deployed app setting is the fallback for both.
         _versionArchiver = new VersionHistoryArchiver(config, logger);
-        _settings = new DbColdStorageSettingsSource(config, logger);
     }
 
     /// <summary>
@@ -65,6 +64,16 @@ public sealed class ColdStorageMigratorPipeline : BaseComponent
         => await _settings.GetIntAsync(
             ColdStorageSettingKeys.CaptureVersionHistory,
             _config.ColdStorageCaptureVersionHistory,
+            cancellationToken).ConfigureAwait(false) > 0;
+
+    /// <summary>
+    /// True when files carrying a retention label must be skipped. Same precedence:
+    /// portal setting, then the deployed app setting.
+    /// </summary>
+    private async Task<bool> IsHoldSkipEnabledAsync(CancellationToken cancellationToken)
+        => await _settings.GetIntAsync(
+            ColdStorageSettingKeys.SkipRetentionLabeled,
+            _config.ColdStorageSkipRetentionLabeled,
             cancellationToken).ConfigureAwait(false) > 0;
 
     /// <summary>
@@ -135,7 +144,8 @@ public sealed class ColdStorageMigratorPipeline : BaseComponent
         // --- Compliance-hold gate (issue #15) -----------------------------
         // Never copy content under a retention/legal-hold label out to Azure.
         // Runs before any download so held content never leaves SharePoint.
-        if (_holdDetector is not null)
+        // Enabled per item from the portal setting so it can be turned on without a redeploy.
+        if (await IsHoldSkipEnabledAsync(cancellationToken).ConfigureAwait(false))
         {
             using var holdCtx = await AuthUtils.GetClientContext(_config, file.SiteUrl, _logger, null, warmUpWeb: false).ConfigureAwait(false);
             var hold = await _holdDetector.CheckAsync(holdCtx, file.ServerRelativeFilePath, cancellationToken).ConfigureAwait(false);

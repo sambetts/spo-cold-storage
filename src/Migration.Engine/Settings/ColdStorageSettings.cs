@@ -7,8 +7,8 @@ namespace Migration.Engine.Settings;
 
 /// <summary>
 /// Runtime product settings an admin can change from the portal without a redeploy
-/// (issue #66). Both hosts — the API and the queue worker — resolve settings through
-/// this, so a change applies everywhere.
+/// (issues #66, #21, #20, #29, #33). Both hosts — the API and the queue worker —
+/// resolve settings through this, so a change applies everywhere.
 /// </summary>
 public interface IColdStorageSettingsSource
 {
@@ -18,24 +18,110 @@ public interface IColdStorageSettingsSource
     /// default carried by that fallback.
     /// </summary>
     Task<int> GetIntAsync(string key, int appSettingFallback, CancellationToken cancellationToken = default);
+
+    /// <summary>Same precedence as <see cref="GetIntAsync"/>, for free-text/choice settings.</summary>
+    Task<string> GetStringAsync(string key, string appSettingFallback, CancellationToken cancellationToken = default);
+}
+
+/// <summary>How the portal should render a setting.</summary>
+public enum RuntimeSettingKind
+{
+    /// <summary>0/1 flag shown as an on/off button.</summary>
+    Toggle = 0,
+
+    /// <summary>Integer shown as a number box. 0 conventionally disables the rule.</summary>
+    Number = 1,
+
+    /// <summary>One of <see cref="RuntimeSettingDefinition.Choices"/>, shown as a dropdown.</summary>
+    Choice = 2,
 }
 
 /// <summary>
-/// Well-known runtime setting keys. Only these are readable/writable through the admin
-/// API — the settings table is deliberately not a general-purpose config escape hatch.
+/// Metadata for one runtime-configurable setting: what it's called, how to render it,
+/// and what it does (including any risk), so the portal can explain itself.
+/// </summary>
+public sealed record RuntimeSettingDefinition(
+    string Key,
+    string Label,
+    RuntimeSettingKind Kind,
+    string Description,
+    string[]? Choices = null);
+
+/// <summary>
+/// The allow-list of runtime-configurable settings. Only these are readable/writable
+/// through the admin API — the settings table is deliberately not a general-purpose
+/// config escape hatch.
 /// </summary>
 public static class ColdStorageSettingKeys
 {
     /// <summary>
-    /// 0 = archive only the current version (default); &gt; 0 = also capture and replay
+    /// 0 = archive only the current version (default); 1 = also capture and replay
     /// SharePoint version history. Mirrors <c>Config.ColdStorageCaptureVersionHistory</c>.
     /// </summary>
     public const string CaptureVersionHistory = "CaptureVersionHistory";
 
+    /// <summary>Mirrors <c>Config.ColdStorageSkipRetentionLabeled</c>.</summary>
+    public const string SkipRetentionLabeled = "SkipRetentionLabeled";
+
+    /// <summary>Mirrors <c>Config.ColdStorageDeleteBlobAfterRestore</c>.</summary>
+    public const string DeleteBlobAfterRestore = "DeleteBlobAfterRestore";
+
+    /// <summary>Mirrors <c>Config.ColdStorageMinFileSizeBytes</c>.</summary>
+    public const string MinFileSizeBytes = "MinFileSizeBytes";
+
+    /// <summary>Mirrors <c>Config.ColdStorageMaxAccessCount</c>.</summary>
+    public const string MaxAccessCount = "MaxAccessCount";
+
+    /// <summary>Mirrors <c>Config.ColdStorageReconcileIntervalHours</c>.</summary>
+    public const string ReconcileIntervalHours = "ReconcileIntervalHours";
+
+    /// <summary>Mirrors <c>Config.ColdStorageOrphanPolicy</c>.</summary>
+    public const string OrphanPolicy = "OrphanPolicy";
+
+    public static readonly IReadOnlyList<RuntimeSettingDefinition> Definitions =
+    [
+        new(CaptureVersionHistory, "Preserve version history", RuntimeSettingKind.Toggle,
+            "Copy every prior SharePoint version to cold storage and replay it on restore. Each version is validated "
+            + "(length + MD5) BEFORE the source file is deleted, so a capture failure fails the item and leaves the "
+            + "file untouched. Uses more storage and makes archiving slower. Replayed versions are re-authored by the "
+            + "service account with new timestamps — SharePoint does not allow setting a version's author or date."),
+
+        new(SkipRetentionLabeled, "Skip files with a retention label", RuntimeSettingKind.Toggle,
+            "Refuse to archive any file carrying a retention label, checked before anything is copied or deleted. "
+            + "Note this detects item retention LABELS only — content under an eDiscovery hold with no label on the "
+            + "item is not detected."),
+
+        new(DeleteBlobAfterRestore, "Delete the archive after a verified restore", RuntimeSettingKind.Toggle,
+            "On by default. Once a restore is verified, the archived blob (and its version sidecars) are removed so "
+            + "the file isn't duplicated across SharePoint and cold storage. Turn off to keep a second copy. The "
+            + "inferred 'already restored' skip path never deletes."),
+
+        new(MinFileSizeBytes, "Minimum file size to archive (bytes)", RuntimeSettingKind.Number,
+            "Files smaller than this are skipped — archiving tiny files costs more in placeholders and requests than "
+            + "it saves. 0 disables the floor. Only applied when the file's size is known."),
+
+        new(MaxAccessCount, "Maximum read count to archive", RuntimeSettingKind.Number,
+            "Skip files read more often than this, so heavily-used documents stay in SharePoint even if rarely "
+            + "edited. 0 disables the rule. A file with no recorded activity is never blocked."),
+
+        new(ReconcileIntervalHours, "Orphan reconciliation interval (hours)", RuntimeSettingKind.Number,
+            "How often the worker sweeps for orphaned cold-storage blobs — archives whose .url placeholder or whole "
+            + "site has been deleted. 0 disables the scheduled sweep (an admin can still run it on demand). Takes "
+            + "effect when the worker next restarts."),
+
+        new(OrphanPolicy, "What to do with an orphaned archive", RuntimeSettingKind.Choice,
+            "'report' (default) audits only. 'quarantine' tags the blob and keeps it for review. 'delete' removes it "
+            + "— PERMANENT, because the SharePoint source was already deleted at archive time.",
+            ["report", "quarantine", "delete"]),
+    ];
+
     public static readonly IReadOnlySet<string> All =
-        new HashSet<string>(StringComparer.OrdinalIgnoreCase) { CaptureVersionHistory };
+        Definitions.Select(d => d.Key).ToHashSet(StringComparer.OrdinalIgnoreCase);
 
     public static bool IsKnown(string? key) => key is not null && All.Contains(key);
+
+    public static RuntimeSettingDefinition? Find(string? key)
+        => key is null ? null : Definitions.FirstOrDefault(d => string.Equals(d.Key, key, StringComparison.OrdinalIgnoreCase));
 }
 
 /// <summary>
@@ -68,6 +154,12 @@ public sealed class DbColdStorageSettingsSource : IColdStorageSettingsSource
             return appSettingFallback;
         }
         return int.TryParse(raw.Trim(), out var value) ? value : appSettingFallback;
+    }
+
+    public async Task<string> GetStringAsync(string key, string appSettingFallback, CancellationToken cancellationToken = default)
+    {
+        var raw = await GetRawAsync(key, cancellationToken).ConfigureAwait(false);
+        return string.IsNullOrWhiteSpace(raw) ? appSettingFallback : raw.Trim();
     }
 
     private async Task<string?> GetRawAsync(string key, CancellationToken cancellationToken)

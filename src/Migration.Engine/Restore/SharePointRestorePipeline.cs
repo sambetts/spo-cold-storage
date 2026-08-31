@@ -4,6 +4,7 @@ using Entities.Configuration;
 using Microsoft.Extensions.Logging;
 using Migration.Engine.Lifecycle;
 using Migration.Engine.Migration;
+using Migration.Engine.Settings;
 using Migration.Engine.Utils;
 using Microsoft.SharePoint.Client;
 using Models.ColdStorage;
@@ -21,7 +22,7 @@ namespace Migration.Engine.Restore;
 public sealed class SharePointRestorePipeline : BaseComponent
 {
     private readonly IJobStatusWriter _statusWriter;
-    private readonly bool _deleteBlobAfterRestore;
+    private readonly IColdStorageSettingsSource _settings;
     private readonly VersionHistoryArchiver _versionArchiver;
 
     public SharePointRestorePipeline(
@@ -30,13 +31,24 @@ public sealed class SharePointRestorePipeline : BaseComponent
         IJobStatusWriter statusWriter) : base(config, logger)
     {
         _statusWriter = statusWriter ?? throw new ArgumentNullException(nameof(statusWriter));
-        _deleteBlobAfterRestore = config.ColdStorageDeleteBlobAfterRestore > 0;
+        _settings = new DbColdStorageSettingsSource(config, logger);
         // Always constructed: restore must replay whatever history the ARCHIVE holds,
         // regardless of whether capture happens to be switched on right now. An archive
         // written while preservation was enabled is still restorable after it's turned
         // off, and the sidecars must still be cleaned up as one unit (issue #64).
         _versionArchiver = new VersionHistoryArchiver(config, logger);
     }
+
+    /// <summary>
+    /// Whether a verified restore should delete the archive. Resolved per restore from
+    /// the portal setting (falling back to the deployed app setting) so an operator can
+    /// change retention behaviour without a redeploy.
+    /// </summary>
+    private async Task<bool> ShouldDeleteBlobAfterRestoreAsync(CancellationToken cancellationToken)
+        => await _settings.GetIntAsync(
+            ColdStorageSettingKeys.DeleteBlobAfterRestore,
+            _config.ColdStorageDeleteBlobAfterRestore,
+            cancellationToken).ConfigureAwait(false) > 0;
 
     /// <summary>
     /// Replays archived prior versions onto the destination before the current content
@@ -246,7 +258,7 @@ public sealed class SharePointRestorePipeline : BaseComponent
             // blob, so the file never lives in both places. Mirrors the migrate
             // invariant (never delete a copy until the other side is verified); a
             // delete failure is logged but never fails the restore.
-            if (_deleteBlobAfterRestore)
+            if (await ShouldDeleteBlobAfterRestoreAsync(cancellationToken).ConfigureAwait(false))
             {
                 await TryDeleteBlobAsync(envelope.JobId, envelope.ItemId, metadata.ContainerName, metadata.BlobPath, cancellationToken).ConfigureAwait(false);
             }
@@ -416,7 +428,7 @@ public sealed class SharePointRestorePipeline : BaseComponent
             await VerifyRestoredAsync(spCtx, destinationUrl, cancellationToken).ConfigureAwait(false);
 
             // Only after the restored file is verified do we optionally delete the archive blob.
-            if (_deleteBlobAfterRestore)
+            if (await ShouldDeleteBlobAfterRestoreAsync(cancellationToken).ConfigureAwait(false))
             {
                 await TryDeleteBlobAsync(envelope.JobId, envelope.ItemId, envelope.ContainerName, target.BlobPath!, cancellationToken).ConfigureAwait(false);
             }
@@ -675,7 +687,7 @@ public sealed class SharePointRestorePipeline : BaseComponent
                 "Verifying restored file in SharePoint.", cancellationToken: cancellationToken);
             await VerifyRestoredAsync(spCtx, destinationUrl, cancellationToken).ConfigureAwait(false);
 
-            if (_deleteBlobAfterRestore)
+            if (await ShouldDeleteBlobAfterRestoreAsync(cancellationToken).ConfigureAwait(false))
             {
                 await TryDeleteBlobAsync(jobId, itemId, containerName, blobPath, cancellationToken).ConfigureAwait(false);
             }

@@ -202,8 +202,11 @@ export interface ExclusionScope {
  */
 export interface RuntimeSetting {
   key: string;
-  value: number;
-  deployedValue: number;
+  label: string;
+  kind: "Toggle" | "Number" | "Choice";
+  choices?: string[] | null;
+  value: string;
+  deployedValue: string;
   isOverridden: boolean;
   updatedBy?: string | null;
   updatedAt?: string | null;

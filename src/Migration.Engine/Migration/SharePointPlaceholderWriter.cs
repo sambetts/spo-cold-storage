@@ -149,6 +149,40 @@ public sealed class SharePointPlaceholderWriter(ILogger logger)
     }
 
     /// <summary>
+    /// Role definitions ("Full Control", "Contribute", …) per web, cached briefly.
+    /// They are static configuration that changes very rarely, but permission replay
+    /// needs them for <b>every</b> item — without this cache a 5,000-file restore adds
+    /// 5,000 avoidable CSOM round trips and makes throttling far likelier (issue #68).
+    /// </summary>
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, (DateTime ExpiresUtc, Dictionary<string, int> ByName)> RoleDefinitionCache =
+        new(StringComparer.OrdinalIgnoreCase);
+
+    private static readonly TimeSpan RoleDefinitionTtl = TimeSpan.FromMinutes(10);
+
+    /// <summary>
+    /// Role-definition name → id for a web, from cache when warm. Ids are stable per
+    /// web, so we cache ids and re-hydrate the CSOM objects by id (cheap, no round trip).
+    /// </summary>
+    private async Task<Dictionary<string, int>> GetRoleDefinitionIdsAsync(ClientContext ctx, CancellationToken cancellationToken)
+    {
+        var key = ctx.Url ?? string.Empty;
+        if (RoleDefinitionCache.TryGetValue(key, out var cached) && cached.ExpiresUtc > DateTime.UtcNow)
+        {
+            return cached.ByName;
+        }
+
+        ctx.Load(ctx.Web, w => w.RoleDefinitions.Include(r => r.Name, r => r.Id));
+        await ctx.ExecuteQueryAsyncWithThrottleRetries(_logger).ConfigureAwait(false);
+
+        var byName = ctx.Web.RoleDefinitions
+            .GroupBy(r => r.Name, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(g => g.Key, g => g.First().Id, StringComparer.OrdinalIgnoreCase);
+
+        RoleDefinitionCache[key] = (DateTime.UtcNow + RoleDefinitionTtl, byName);
+        return byName;
+    }
+
+    /// <summary>
     /// Re-applies a captured permissions snapshot onto an item (the <c>.url</c> placeholder
     /// at migrate time, or the restored file at restore time) — issue #67.
     /// <para>
@@ -175,15 +209,9 @@ public sealed class SharePointPlaceholderWriter(ILogger logger)
 
         try
         {
+            var roleDefinitionIds = await GetRoleDefinitionIdsAsync(ctx, cancellationToken).ConfigureAwait(false);
+
             var item = ctx.Web.GetFileByServerRelativeUrl(serverRelativeUrl).ListItemAllFields;
-            ctx.Load(item, i => i.HasUniqueRoleAssignments);
-            ctx.Load(ctx.Web, w => w.RoleDefinitions.Include(r => r.Name, r => r.Id));
-            await ctx.ExecuteQueryAsyncWithThrottleRetries(_logger).ConfigureAwait(false);
-
-            var roleDefinitions = ctx.Web.RoleDefinitions
-                .GroupBy(r => r.Name, StringComparer.OrdinalIgnoreCase)
-                .ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
-
             // copyRoleAssignments:false — we are replacing the ACL wholesale with the
             // captured one, not layering on top of the inherited set.
             item.BreakRoleInheritance(copyRoleAssignments: false, clearSubscopes: false);
@@ -199,9 +227,9 @@ public sealed class SharePointPlaceholderWriter(ILogger logger)
                     var matched = 0;
                     foreach (var roleName in assignment.Roles)
                     {
-                        if (roleDefinitions.TryGetValue(roleName, out var definition))
+                        if (roleDefinitionIds.TryGetValue(roleName, out var definitionId))
                         {
-                            bindings.Add(definition);
+                            bindings.Add(ctx.Web.RoleDefinitions.GetById(definitionId));
                             matched++;
                         }
                         else

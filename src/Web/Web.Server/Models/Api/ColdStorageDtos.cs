@@ -317,11 +317,20 @@ public class RuntimeSettingResponse
 {
     public string Key { get; set; } = string.Empty;
 
+    /// <summary>Human-readable name for the portal.</summary>
+    public string Label { get; set; } = string.Empty;
+
+    /// <summary>How to render it: <c>Toggle</c>, <c>Number</c> or <c>Choice</c>.</summary>
+    public string Kind { get; set; } = "Toggle";
+
+    /// <summary>Allowed values for a <c>Choice</c> setting; null otherwise.</summary>
+    public string[]? Choices { get; set; }
+
     /// <summary>The value actually in force (the override when set, else the deployed value).</summary>
-    public int Value { get; set; }
+    public string Value { get; set; } = "0";
 
     /// <summary>This host's deployed app-setting value, used when there is no override.</summary>
-    public int DeployedValue { get; set; }
+    public string DeployedValue { get; set; } = "0";
 
     /// <summary>True when an admin has overridden the deployed value from the portal.</summary>
     public bool IsOverridden { get; set; }
@@ -329,15 +338,15 @@ public class RuntimeSettingResponse
     public string? UpdatedBy { get; set; }
     public DateTime? UpdatedAt { get; set; }
 
-    /// <summary>Operator-facing explanation, including any fidelity caveats.</summary>
+    /// <summary>Operator-facing explanation, including any risk or fidelity caveats.</summary>
     public string Description { get; set; } = string.Empty;
 }
 
 /// <summary>Request body for <c>PUT /api/admin/settings/{key}</c>.</summary>
 public class UpdateRuntimeSettingRequest
 {
-    /// <summary>New value. Flags use 0 (off) / 1 (on).</summary>
-    public int Value { get; set; }
+    /// <summary>New value as text. Toggles use "0"/"1"; numbers a whole number; choices one of the allowed values.</summary>
+    public string Value { get; set; } = string.Empty;
 }
 
 /// <summary>

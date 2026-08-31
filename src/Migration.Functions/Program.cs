@@ -39,6 +39,11 @@ var host = new HostBuilder()
         // fail items stuck by a crashed worker, so a migration can never silently
         // freeze (see DispatchReconcilerService / MigrationDispatchReconciler).
         services.AddHostedService<DispatchReconcilerService>();
+
+        // Scheduled orphan reconciliation (issue #21): sweeps for archives whose
+        // .url placeholder or whole site has been deleted, so they aren't billed
+        // forever. Disabled unless an interval is configured (portal or app setting).
+        services.AddHostedService<OrphanReconcilerService>();
     })
     .Build();
 

@@ -53,20 +53,23 @@ public class SettingsController(
             .ConfigureAwait(false);
 
         var result = new List<RuntimeSettingResponse>();
-        foreach (var key in ColdStorageSettingKeys.All)
+        foreach (var definition in ColdStorageSettingKeys.Definitions)
         {
-            var deployed = DeployedValueFor(key);
-            rows.TryGetValue(key, out var row);
-            var overridden = row is not null && int.TryParse(row.SettingValue, out var parsed);
+            rows.TryGetValue(definition.Key, out var row);
+            var deployed = DeployedValueFor(definition.Key);
+            var overridden = row is not null && !string.IsNullOrWhiteSpace(row.SettingValue);
             result.Add(new RuntimeSettingResponse
             {
-                Key = key,
-                Value = overridden && int.TryParse(row!.SettingValue, out var v) ? v : deployed,
+                Key = definition.Key,
+                Label = definition.Label,
+                Kind = definition.Kind.ToString(),
+                Choices = definition.Choices,
+                Value = overridden ? row!.SettingValue! : deployed,
                 DeployedValue = deployed,
                 IsOverridden = overridden,
                 UpdatedBy = row?.UpdatedBy,
                 UpdatedAt = row?.UpdatedAt,
-                Description = DescriptionFor(key),
+                Description = definition.Description,
             });
         }
         return result;
@@ -80,46 +83,75 @@ public class SettingsController(
         {
             return Forbid();
         }
-        if (!ColdStorageSettingKeys.IsKnown(key))
+        var definition = ColdStorageSettingKeys.Find(key);
+        if (definition is null)
         {
             return BadRequest($"'{key}' is not a runtime-configurable setting.");
         }
-        if (request is null)
+        if (request is null || string.IsNullOrWhiteSpace(request.Value))
         {
             return BadRequest("A value is required.");
         }
 
-        // Canonicalise to the stored key casing so the unique index can't be defeated
-        // by a differently-cased write.
-        var canonical = ColdStorageSettingKeys.All.First(k => string.Equals(k, key, StringComparison.OrdinalIgnoreCase));
+        var value = request.Value.Trim();
+
+        // Validate against the declared shape so the portal can't write something the
+        // worker will silently ignore (and fall back to the app setting on).
+        switch (definition.Kind)
+        {
+            case RuntimeSettingKind.Toggle:
+                if (value is not ("0" or "1"))
+                {
+                    return BadRequest("A toggle must be '0' or '1'.");
+                }
+                break;
+            case RuntimeSettingKind.Number:
+                if (!int.TryParse(value, out var number) || number < 0)
+                {
+                    return BadRequest("Enter a whole number of 0 or more.");
+                }
+                value = number.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                break;
+            case RuntimeSettingKind.Choice:
+                if (definition.Choices is null
+                    || !definition.Choices.Contains(value, StringComparer.OrdinalIgnoreCase))
+                {
+                    return BadRequest($"Choose one of: {string.Join(", ", definition.Choices ?? [])}.");
+                }
+                value = definition.Choices.First(c => string.Equals(c, value, StringComparison.OrdinalIgnoreCase));
+                break;
+        }
 
         var row = await _db.ColdStorageSettings
-            .FirstOrDefaultAsync(s => s.SettingKey == canonical, cancellationToken)
+            .FirstOrDefaultAsync(s => s.SettingKey == definition.Key, cancellationToken)
             .ConfigureAwait(false);
 
         if (row is null)
         {
-            row = new ColdStorageSetting { SettingKey = canonical };
+            row = new ColdStorageSetting { SettingKey = definition.Key };
             _db.ColdStorageSettings.Add(row);
         }
-        row.SettingValue = request.Value.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        row.SettingValue = value;
         row.UpdatedBy = User.GetUpn();
         row.UpdatedAt = DateTime.UtcNow;
 
         await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
         DbColdStorageSettingsSource.InvalidateCache();
 
-        _logger.LogInformation("Runtime setting '{Key}' set to {Value} by {Upn}.", canonical, request.Value, row.UpdatedBy);
+        _logger.LogInformation("Runtime setting '{Key}' set to '{Value}' by {Upn}.", definition.Key, value, row.UpdatedBy);
 
         return new RuntimeSettingResponse
         {
-            Key = canonical,
-            Value = request.Value,
-            DeployedValue = DeployedValueFor(canonical),
+            Key = definition.Key,
+            Label = definition.Label,
+            Kind = definition.Kind.ToString(),
+            Choices = definition.Choices,
+            Value = value,
+            DeployedValue = DeployedValueFor(definition.Key),
             IsOverridden = true,
             UpdatedBy = row.UpdatedBy,
             UpdatedAt = row.UpdatedAt,
-            Description = DescriptionFor(canonical),
+            Description = definition.Description,
         };
     }
 
@@ -146,19 +178,19 @@ public class SettingsController(
         return NoContent();
     }
 
-    private int DeployedValueFor(string key) => key switch
+    private string DeployedValueFor(string key) => key switch
     {
-        ColdStorageSettingKeys.CaptureVersionHistory => _config.ColdStorageCaptureVersionHistory,
-        _ => 0,
+        ColdStorageSettingKeys.CaptureVersionHistory => Flag(_config.ColdStorageCaptureVersionHistory),
+        ColdStorageSettingKeys.SkipRetentionLabeled => Flag(_config.ColdStorageSkipRetentionLabeled),
+        ColdStorageSettingKeys.DeleteBlobAfterRestore => Flag(_config.ColdStorageDeleteBlobAfterRestore),
+        ColdStorageSettingKeys.MinFileSizeBytes => Num(_config.ColdStorageMinFileSizeBytes),
+        ColdStorageSettingKeys.MaxAccessCount => Num(_config.ColdStorageMaxAccessCount),
+        ColdStorageSettingKeys.ReconcileIntervalHours => Num(_config.ColdStorageReconcileIntervalHours),
+        ColdStorageSettingKeys.OrphanPolicy => string.IsNullOrWhiteSpace(_config.ColdStorageOrphanPolicy) ? "report" : _config.ColdStorageOrphanPolicy,
+        _ => "0",
     };
 
-    private static string DescriptionFor(string key) => key switch
-    {
-        ColdStorageSettingKeys.CaptureVersionHistory =>
-            "Preserve SharePoint version history. When on, every prior version is copied to cold storage and "
-            + "validated before the source file is deleted, and versions are replayed oldest-first on restore. "
-            + "Uses more storage and makes archiving slower. Replayed versions are re-authored by the service "
-            + "account with new timestamps — SharePoint does not allow setting a version's author or date.",
-        _ => string.Empty,
-    };
+    private static string Flag(int value) => value > 0 ? "1" : "0";
+
+    private static string Num(int value) => value.ToString(System.Globalization.CultureInfo.InvariantCulture);
 }
