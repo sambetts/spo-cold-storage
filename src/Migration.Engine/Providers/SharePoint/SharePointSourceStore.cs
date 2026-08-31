@@ -166,10 +166,9 @@ public sealed class SharePointSourceStore(Config config, ILogger logger) : ISour
     {
         using var ctx = await ContextAsync(item.StoreUrl).ConfigureAwait(false);
         var placeholderUrl = await _placeholderWriter.WritePlaceholderAsync(ctx, item.ItemPath, pointer, cancellationToken, userFacingUrl).ConfigureAwait(false);
-        if (stampMetadataColumns)
-        {
-            await _placeholderWriter.StampOriginalMetadataAsync(ctx, placeholderUrl, pointer, cancellationToken).ConfigureAwait(false);
-        }
+        // The status badge column is always stamped (issue #32); the "Original *"
+        // metadata columns remain opt-in via stampMetadataColumns.
+        await _placeholderWriter.StampPlaceholderColumnsAsync(ctx, placeholderUrl, pointer, stampMetadataColumns, cancellationToken).ConfigureAwait(false);
         return placeholderUrl;
     }
 

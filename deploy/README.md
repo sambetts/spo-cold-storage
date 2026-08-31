@@ -62,7 +62,7 @@ Edit `deploy/params.json` and fill in:
 | `sharePoint.appCatalogUrl` | `https://contoso.sharepoint.com/sites/appcatalog` | Confirm with `Get-PnPTenantAppCatalogUrl` |
 | `sharePoint.targetSiteRelativeUrl` | `/sites/ColdStorage` | Where the SPFx web part installs |
 | `storage.userDataReaders` *(optional)* | `[]` | Only needed if you want users to open the storage account **directly** (Storage Explorer / portal). The SPA browses and downloads via the API, so leave this empty by default |
-| `coldStorage` *(optional)* | `{ "deleteBlobAfterRestore": 1, "useProviderPipelines": 0 }` | `deleteBlobAfterRestore`: `1` (default) deletes the archive after a **verified** restore; `0` keeps it. `useProviderPipelines`: leave `0` — the provider-abstraction pipelines don't yet cover blob-driven/orphan restore or version history. Omit the block to accept the defaults |
+| `coldStorage` *(optional)* | `{ "deleteBlobAfterRestore": 1, "useProviderPipelines": 0, "captureVersionHistory": 0 }` | `deleteBlobAfterRestore`: `1` (default) deletes the archive after a **verified** restore; `0` keeps it. `useProviderPipelines`: leave `0` — the provider-abstraction pipelines don't yet cover blob-driven/orphan restore or version history. `captureVersionHistory`: `0` (default) archives only the current version; `1` also preserves SharePoint version history (see below). Omit the block to accept the defaults |
 | `savings` *(optional)* | `{ "currency": "USD", "azureRetailSku": "Hot GRS" }` | Savings dashboard currency + live Azure pricing. Region defaults to `location`; the app fetches the live per-GB price from the Azure Retail Prices API (fallback to the configured price). Omit the block to accept the defaults. |
 
 ### 4. Provision the AAD app
@@ -246,9 +246,41 @@ az role assignment create `
   --scope '/subscriptions/<sub>/resourceGroups/<rg>/providers/Microsoft.Storage/storageAccounts/<name>'
 ```
 
-### (Optional) Attach the field customizer to a column
+### Version-history preservation
 
-The Spfx package ships a `ListView Command Set` (auto-attaches) and a `Field Customizer` (does NOT auto-attach). To bind the cold-storage status field customizer to a document-library column:
+`coldStorage.captureVersionHistory` sets the **initial** value only. Once deployed, an
+admin changes it live from the SPA: **Admin → Archive rules → Preservation settings**
+(`PUT /api/admin/settings/CaptureVersionHistory`). The override is stored in
+`cold_storage_settings` and read by **both** hosts — the web app and the queue worker —
+so no redeploy or restart is needed. "Reset to deployed" removes the override.
+
+When it is **on**:
+
+- Every prior version is copied to `{blob}.versions/<label>`, with a manifest at
+  `{blob}.versions.json`.
+- Each version is validated (length + MD5) **before** the SharePoint source is deleted.
+  A capture or validation failure fails the item as `CopyToColdStorageFailed` and
+  **leaves the source completely intact** — the product never deletes a file having
+  archived less history than it promised.
+- On restore, versions are replayed oldest-first and the archived current version is
+  uploaded last, so it remains the latest.
+- The base blob, version blobs and manifest are treated as **one archive unit**: the
+  post-restore cleanup removes them together.
+
+**Fidelity limits (SharePoint API constraints, not bugs):** replayed versions are
+authored by the service account with new timestamps — SharePoint does not allow setting
+a version's author or created date on upload. The original label, author, check-in
+comment, timestamp and major/minor state are preserved in the manifest for audit.
+Expect more storage and more SharePoint calls per file, so throttling is likelier on
+large jobs.
+
+### (Optional) Attach the field customizer to another column
+The Spfx package ships a `ListView Command Set` and a `Field Customizer`, both of which now attach automatically:
+
+- The command set is registered on every document library by `elements.xml`.
+- The **cold-storage status badge** column is provisioned onto a library by the worker the first time it archives a file there — `SharePointPlaceholderWriter` adds the `ColdStorageStatus` list column (bound to the field customizer, added to the default view) and stamps the lifecycle status onto each `.url` placeholder, so archived files are visually distinguishable with no manual step.
+
+If you want the badge on a library *before* anything has been archived there, or on a differently-named column, bind it by hand:
 
 ```powershell
 Connect-PnPOnline -Url https://<tenant>.sharepoint.com/sites/ColdStorage -Interactive

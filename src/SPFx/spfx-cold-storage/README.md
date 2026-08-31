@@ -47,8 +47,14 @@ SharePoint Admin Center.
 ## Field provisioning
 
 The `sharepoint/assets/elements.xml` element manifest creates a `ColdStorageStatus`
-site column wired to the `ColdStorageStatusFieldCustomizer`. Add the column to
-any document library where you want the lifecycle status to show.
+site column wired to the `ColdStorageStatusFieldCustomizer`.
+
+A site column on its own is never added to a library or a view, so the badge would
+never render. The worker therefore provisions the column **onto the library** the
+first time it archives a file there: `SharePointPlaceholderWriter.StampPlaceholderColumnsAsync`
+adds `ColdStorageStatus` as a list column (bound to this customizer's component id
+and added to the default view) and stamps the lifecycle status onto the `.url`
+placeholder item. No manual `Set-PnPField` step is required.
 
 ## Notes
 

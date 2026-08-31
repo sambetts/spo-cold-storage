@@ -310,6 +310,37 @@ public class ExtensionRuleResponse
 }
 
 /// <summary>
+/// One runtime-configurable product setting (issue #66), as returned by
+/// <c>GET /api/admin/settings</c>.
+/// </summary>
+public class RuntimeSettingResponse
+{
+    public string Key { get; set; } = string.Empty;
+
+    /// <summary>The value actually in force (the override when set, else the deployed value).</summary>
+    public int Value { get; set; }
+
+    /// <summary>This host's deployed app-setting value, used when there is no override.</summary>
+    public int DeployedValue { get; set; }
+
+    /// <summary>True when an admin has overridden the deployed value from the portal.</summary>
+    public bool IsOverridden { get; set; }
+
+    public string? UpdatedBy { get; set; }
+    public DateTime? UpdatedAt { get; set; }
+
+    /// <summary>Operator-facing explanation, including any fidelity caveats.</summary>
+    public string Description { get; set; } = string.Empty;
+}
+
+/// <summary>Request body for <c>PUT /api/admin/settings/{key}</c>.</summary>
+public class UpdateRuntimeSettingRequest
+{
+    /// <summary>New value. Flags use 0 (off) / 1 (on).</summary>
+    public int Value { get; set; }
+}
+
+/// <summary>
 /// Request body for <c>POST /api/exclusions/extensions</c>. <see cref="Extension"/>
 /// is required; <see cref="Mode"/> defaults to "Exclude".
 /// </summary>

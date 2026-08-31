@@ -22,7 +22,7 @@ public sealed class SharePointRestorePipeline : BaseComponent
 {
     private readonly IJobStatusWriter _statusWriter;
     private readonly bool _deleteBlobAfterRestore;
-    private readonly VersionHistoryArchiver? _versionArchiver;
+    private readonly VersionHistoryArchiver _versionArchiver;
 
     public SharePointRestorePipeline(
         Config config,
@@ -31,9 +31,27 @@ public sealed class SharePointRestorePipeline : BaseComponent
     {
         _statusWriter = statusWriter ?? throw new ArgumentNullException(nameof(statusWriter));
         _deleteBlobAfterRestore = config.ColdStorageDeleteBlobAfterRestore > 0;
-        _versionArchiver = config.ColdStorageCaptureVersionHistory > 0
-            ? new VersionHistoryArchiver(config, logger)
-            : null;
+        // Always constructed: restore must replay whatever history the ARCHIVE holds,
+        // regardless of whether capture happens to be switched on right now. An archive
+        // written while preservation was enabled is still restorable after it's turned
+        // off, and the sidecars must still be cleaned up as one unit (issue #64).
+        _versionArchiver = new VersionHistoryArchiver(config, logger);
+    }
+
+    /// <summary>
+    /// Replays archived prior versions onto the destination before the current content
+    /// is uploaded, so the destination rebuilds its history with the archived current
+    /// version last (issue #66). Returns how many were replayed (0 when the archive has
+    /// no version history). Best-effort — never throws.
+    /// </summary>
+    private async Task<int> ReplayArchivedVersionsAsync(
+        ClientContext spCtx, string containerName, string? baseBlobPath, string destinationUrl, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrEmpty(baseBlobPath))
+        {
+            return 0;
+        }
+        return await _versionArchiver.ReplayAsync(spCtx, destinationUrl, baseBlobPath, containerName, cancellationToken).ConfigureAwait(false);
     }
 
     public async Task<bool> ProcessAsync(ColdStorageBusEnvelope envelope, CancellationToken cancellationToken = default)
@@ -170,10 +188,10 @@ public sealed class SharePointRestorePipeline : BaseComponent
             // content uploaded next becomes the latest version, rebuilding history
             // (issue #18). Best-effort; never fails the restore.
             var replayedVersions = 0;
-            if (_versionArchiver is not null && metadata.VersionCount > 0)
+            if (metadata.VersionCount > 0)
             {
-                replayedVersions = await _versionArchiver.ReplayAsync(
-                    spCtx, destinationUrl, metadata.BlobPath, metadata.ContainerName, cancellationToken).ConfigureAwait(false);
+                replayedVersions = await ReplayArchivedVersionsAsync(
+                    spCtx, metadata.ContainerName, metadata.BlobPath, destinationUrl, cancellationToken).ConfigureAwait(false);
             }
 
             using (var fs = IOFile.OpenRead(tempFile))
@@ -341,6 +359,14 @@ public sealed class SharePointRestorePipeline : BaseComponent
 
             var destinationFolder = GetParentFolder(destinationUrl);
             var restoredLength = new FileInfo(tempFile).Length;
+
+            // Replay archived prior versions FIRST (oldest-first) so the current content
+            // uploaded next lands as the latest version, rebuilding history (issue #66).
+            // The blob-driven path is the production restore route, so without this the
+            // feature was inert even when capture was enabled.
+            var replayedVersions = await ReplayArchivedVersionsAsync(
+                spCtx, envelope.ContainerName, target.BlobPath, destinationUrl, cancellationToken).ConfigureAwait(false);
+
             using (var fs = IOFile.OpenRead(tempFile))
             {
                 var folder = await EnsureDestinationFolderAsync(spCtx, destinationFolder, cancellationToken).ConfigureAwait(false);
@@ -349,7 +375,9 @@ public sealed class SharePointRestorePipeline : BaseComponent
                 {
                     ContentStream = fs,
                     Url = Path.GetFileName(destinationUrl),
-                    Overwrite = envelope.ConflictBehavior == ConflictBehavior.Overwrite,
+                    // Overwrite when explicitly requested, or when we just replayed versions
+                    // onto the destination (the current content must land on top of them).
+                    Overwrite = envelope.ConflictBehavior == ConflictBehavior.Overwrite || replayedVersions > 0,
                 };
                 try
                 {
@@ -734,7 +762,10 @@ public sealed class SharePointRestorePipeline : BaseComponent
     }
 
     /// <summary>
-    /// Deletes the cold-storage blob after a verified restore (issue #4).
+    /// Deletes the cold-storage archive after a verified restore (issue #4). The archive
+    /// is ONE unit: the base blob plus any version-history sidecars and manifest
+    /// (issue #64) — deleting only the base blob leaves the sidecars orphaned forever,
+    /// since nothing else references them.
     /// Best-effort: a failure is logged + audited but never fails the restore,
     /// since the file is already safely back in SharePoint and a leftover blob is
     /// only a cost concern (the orphan-reconciliation job will catch it).
@@ -747,13 +778,20 @@ public sealed class SharePointRestorePipeline : BaseComponent
             var blob = serviceClient.GetBlobContainerClient(containerName).GetBlobClient(blobPath);
             var deleted = await blob.DeleteIfExistsAsync(cancellationToken: cancellationToken).ConfigureAwait(false);
 
-            _logger.LogInformation("Post-restore cleanup: blob '{Container}/{Path}' {Outcome}.",
-                containerName, blobPath, deleted.Value ? "deleted" : "already absent");
+            // Remove the version sidecars with the base blob so the archive unit goes away
+            // together. Runs unconditionally: an archive may hold history captured while
+            // preservation was enabled even if it is switched off now.
+            var sidecars = await _versionArchiver
+                .DeleteVersionArtifactsAsync(containerName, blobPath, cancellationToken).ConfigureAwait(false);
+
+            _logger.LogInformation("Post-restore cleanup: blob '{Container}/{Path}' {Outcome}; {Sidecars} version artifact(s) removed.",
+                containerName, blobPath, deleted.Value ? "deleted" : "already absent", sidecars);
             await _statusWriter.LogAsync(jobId, itemId, MigrationLifecycleStatus.RestoreCompleted,
                 LogLevel.Information,
-                deleted.Value
+                (deleted.Value
                     ? $"Cold-storage blob '{containerName}/{blobPath}' deleted after verified restore."
-                    : $"Cold-storage blob '{containerName}/{blobPath}' was already absent at cleanup.",
+                    : $"Cold-storage blob '{containerName}/{blobPath}' was already absent at cleanup.")
+                + (sidecars > 0 ? $" Also removed {sidecars} version-history artifact(s)." : string.Empty),
                 null, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)

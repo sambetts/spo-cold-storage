@@ -98,7 +98,9 @@
     "_deleteBlobAfterRestore_comment": "1 (default) deletes the archive after a VERIFIED restore so the file isn't duplicated across SharePoint + cold storage. Set 0 to keep the archive after a restore. Never deletes on the inferred 'already restored' skip path.",
     "deleteBlobAfterRestore": 1,
     "_useProviderPipelines_comment": "0 (default) uses the proven inline migrate/restore pipelines. 1 switches to the provider-abstraction pipelines — do NOT enable in production until the SharePoint/Azure adaptors are integration-tested (they do not yet cover blob-driven/orphan restore or version history).",
-    "useProviderPipelines": 0
+    "useProviderPipelines": 0,
+    "_captureVersionHistory_comment": "0 (default) archives only the current version. 1 also copies every prior SharePoint version to cold storage, validates each one (length + MD5) BEFORE the source is deleted, and replays them oldest-first on restore. Costs more storage and more SharePoint calls per file. This is only the INITIAL value — an admin can change it at any time from the portal (Admin > Archive rules > Preservation settings), which overrides this for both the web app and the worker.",
+    "captureVersionHistory": 0
   },
 
   "network": {

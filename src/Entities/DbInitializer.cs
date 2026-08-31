@@ -313,6 +313,20 @@ BEGIN
     );
 END;";
 
+        const string createSettingsSql = @"
+IF OBJECT_ID('dbo.cold_storage_settings', 'U') IS NULL
+BEGIN
+    CREATE TABLE dbo.cold_storage_settings (
+        id INT IDENTITY(1,1) PRIMARY KEY,
+        setting_key NVARCHAR(128) NOT NULL,
+        setting_value NVARCHAR(1024) NULL,
+        updated_by NVARCHAR(256) NULL,
+        updated_at DATETIME2 NOT NULL CONSTRAINT DF_cs_settings_updated DEFAULT(SYSUTCDATETIME())
+    );
+END;
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'UX_cs_settings_key' AND object_id = OBJECT_ID('dbo.cold_storage_settings'))
+    CREATE UNIQUE INDEX UX_cs_settings_key ON dbo.cold_storage_settings(setting_key);";
+
         const string createColdStorageIndexesSql = @"
 IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_migration_job_items_job' AND object_id = OBJECT_ID('dbo.migration_job_items'))
     CREATE INDEX IX_migration_job_items_job ON dbo.migration_job_items(job_id);
@@ -345,6 +359,7 @@ IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_migration_job_logs_act
         await context.Database.ExecuteSqlRawAsync(addColdStorageItemColumnsSql);
         await context.Database.ExecuteSqlRawAsync(addColdStorageLogColumnsSql);
         await context.Database.ExecuteSqlRawAsync(createWorkerHeartbeatSql);
+        await context.Database.ExecuteSqlRawAsync(createSettingsSql);
         await context.Database.ExecuteSqlRawAsync(createColdStorageIndexesSql);
     }
 }

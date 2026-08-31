@@ -56,6 +56,7 @@ public class SPOColdStorageDbContext : DbContext
     public DbSet<ColdStorageContainerAcl> ColdStorageContainerAcls { get; set; } = null!;
     public DbSet<ColdStorageExclusion> ColdStorageExclusions { get; set; } = null!;
     public DbSet<ColdStorageExtensionRule> ColdStorageExtensionRules { get; set; } = null!;
+    public DbSet<ColdStorageSetting> ColdStorageSettings { get; set; } = null!;
     public DbSet<PreArchiveNotice> PreArchiveNotices { get; set; } = null!;
     public DbSet<MigrationJob> MigrationJobs { get; set; } = null!;
     public DbSet<MigrationJobItem> MigrationJobItems { get; set; } = null!;

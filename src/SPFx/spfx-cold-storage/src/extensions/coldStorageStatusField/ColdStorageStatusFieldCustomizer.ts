@@ -4,9 +4,28 @@ import {
   IFieldCustomizerCellEventParameters,
 } from '@microsoft/sp-listview-extensibility';
 
+import { MigrationLifecycleStatus } from '../../common/ColdStorageApiClient';
 import { colorFor, formatLabel, normalizeStatus } from '../../common/statusFormat';
 
 const LOG_SOURCE = 'ColdStorageStatusFieldCustomizer';
+
+/**
+ * Short badge text for the library view. The full lifecycle labels used by the
+ * progress dialog ("Cold storage migration completed") are too verbose for a
+ * column, so the common terminal states get a compact wording here. Anything
+ * else falls back to the shared spaced label.
+ */
+const BADGE_LABELS: Partial<Record<MigrationLifecycleStatus, string>> = {
+  [MigrationLifecycleStatus.ColdStorageMigrationCompleted]: 'Cold storage',
+  [MigrationLifecycleStatus.RestoreCompleted]: 'Restored',
+  [MigrationLifecycleStatus.RetryScheduled]: 'Waiting to retry',
+  [MigrationLifecycleStatus.CompletedWithWarning]: 'Needs attention',
+};
+
+function badgeLabel(value: string | number | undefined): string {
+  const status = normalizeStatus(value);
+  return (status && BADGE_LABELS[status]) || formatLabel(value);
+}
 
 /**
  * Renders a cold-storage badge for the lifecycle status column. As well as the
@@ -47,7 +66,7 @@ export default class ColdStorageStatusFieldCustomizer extends BaseFieldCustomize
 
     const badge = document.createElement('span');
     if (status) {
-      badge.textContent = `❄ ${formatLabel(value)}`;
+      badge.textContent = `❄ ${badgeLabel(value)}`;
       badge.style.background = colorFor(value);
     } else {
       badge.textContent = '❄ Cold storage';
