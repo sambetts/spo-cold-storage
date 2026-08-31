@@ -88,19 +88,19 @@ export default class ColdStorageCommandSet extends BaseListViewCommandSet<IColdS
     const client = this.apiClient;
     if (!client) return;
     const dialog = this.openDialog('Migrate');
-    dialog.setStatusMessage('Looking up available cold-storage containers…');
+    dialog.setStatusMessage('Getting things ready…');
 
     let target: IContainerResponse | undefined;
     try {
       const containers = await client.listContainers();
       target = containers.find(c => c.canMigrate);
     } catch (err) {
-      dialog.showError(this.describeError(err, 'Could not load cold-storage containers'), () => this.runMigrate(event));
+      dialog.showError(this.describeError(err, 'We couldn’t get things ready just now.'), () => this.runMigrate(event));
       return;
     }
 
     if (!target) {
-      dialog.showError('You do not have permission to migrate to any configured cold-storage container.');
+      dialog.showError('You don’t have permission to archive files here. Ask your site owner if you need access.');
       return;
     }
     const container = target;
@@ -118,10 +118,8 @@ export default class ColdStorageCommandSet extends BaseListViewCommandSet<IColdS
       // (the server treats lastModified as optional metadata anyway).
       lastModified: ColdStorageCommandSet.tryParseIsoDate(row.getValueByName('Modified')),
     }));
-
-    const containerName = container.displayName ?? container.name;
     const submit = async (copyMetadataColumns: boolean): Promise<void> => {
-      dialog.setStatusMessage(`Submitting migration for ${formatNumber(items.length)} item${items.length === 1 ? '' : 's'} to container "${containerName}"…`);
+      dialog.setStatusMessage(`Getting ${formatNumber(items.length)} item${items.length === 1 ? '' : 's'} ready…`);
       try {
         const response = await client.startMigration({
           siteUrl, webUrl,
@@ -130,20 +128,20 @@ export default class ColdStorageCommandSet extends BaseListViewCommandSet<IColdS
           copyMetadataColumns,
           items,
         });
-        dialog.addAcceptedJob(response.jobId, response, `Migration job (${formatNumber(items.length)} item${items.length === 1 ? '' : 's'})`);
+        dialog.addAcceptedJob(response.jobId, response, `Archiving ${formatNumber(items.length)} item${items.length === 1 ? '' : 's'}`);
       } catch (err) {
-        dialog.showError(this.describeError(err, 'Failed to submit migration'), () => { void submit(copyMetadataColumns); });
+        dialog.showError(this.describeError(err, 'We couldn’t start archiving just now.'), () => { void submit(copyMetadataColumns); });
       }
     };
 
-    // Confirm before submitting — migration replaces the source with a .url shortcut.
+    // Confirm before submitting — archiving replaces the file with a shortcut.
     dialog.confirm({
-      message: `These items will be migrated to cold-storage container “${containerName}”. Each is copied to cold storage and then replaced with a .url shortcut in place — the original is only removed after the copy is verified. Folders include everything inside them.`,
-      confirmLabel: `Migrate ${formatNumber(items.length)} item${items.length === 1 ? '' : 's'}`,
+      message: 'These will be moved to long-term storage to free up space here. Each one is replaced by a shortcut you can open any time to get the file back. Your file is only removed once the stored copy has been checked. Folders include everything inside them.',
+      confirmLabel: `Archive ${formatNumber(items.length)} item${items.length === 1 ? '' : 's'}`,
       items: items.map(i => ({ name: ColdStorageCommandSet.basename(i.serverRelativeUrl), kind: i.itemKind })),
       metadataOption: {
-        label: 'Keep a copy of the original metadata as columns',
-        note: 'Adds separate “Original Author”, “Original Editor” and “Original Modified” columns to this library and copies the source values into them — it can’t back-date the placeholder’s own Author/Modified fields (those show the migration app). Leave unchecked to keep just the .url shortcut. Either way the original metadata is preserved in cold storage and restored with the file.',
+        label: 'Also show who created and last changed each file',
+        note: 'Adds “Original Author”, “Original Editor” and “Original Modified” columns to this library so that information stays visible after archiving. Either way it is kept with the stored file and comes back with it.',
         defaultChecked: false,
       },
     }, (result) => { void submit(result.copyMetadataColumns); });
@@ -174,15 +172,15 @@ export default class ColdStorageCommandSet extends BaseListViewCommandSet<IColdS
     }
 
     if (placeholders.length === 0 && folders.length === 0) {
-      dialog.showError('Select one or more cold-storage placeholders, or a folder, to restore.');
+      dialog.showError('Select one or more archived files (or a folder) to bring back.');
       return;
     }
 
     const submit = async (): Promise<void> => {
       dialog.setStatusMessage(
         folders.length > 0
-          ? `Submitting bulk restore (${formatNumber(placeholders.length)} file${placeholders.length === 1 ? '' : 's'} + ${formatNumber(folders.length)} folder${folders.length === 1 ? '' : 's'})…`
-          : `Submitting restore for ${formatNumber(placeholders.length)} item${placeholders.length === 1 ? '' : 's'}…`,
+          ? `Getting ${formatNumber(placeholders.length)} file${placeholders.length === 1 ? '' : 's'} + ${formatNumber(folders.length)} folder${folders.length === 1 ? '' : 's'} ready…`
+          : `Getting ${formatNumber(placeholders.length)} item${placeholders.length === 1 ? '' : 's'} ready…`,
       );
       try {
         const response = await client.startBatchRestore({
@@ -197,11 +195,11 @@ export default class ColdStorageCommandSet extends BaseListViewCommandSet<IColdS
         // timed out with "Failed to fetch"). Track the job by id — its progress column fills in as
         // expansion completes — and don't treat the (not-yet-known) count of 0 as "no items".
         const restoreLabel = folders.length > 0
-          ? `Bulk restore (${formatNumber(folders.length)} folder${folders.length === 1 ? '' : 's'}${placeholders.length > 0 ? ` + ${formatNumber(placeholders.length)} file${placeholders.length === 1 ? '' : 's'}` : ''})`
-          : `Restore (${formatNumber(placeholders.length)} item${placeholders.length === 1 ? '' : 's'})`;
+          ? `Bringing back ${formatNumber(folders.length)} folder${folders.length === 1 ? '' : 's'}${placeholders.length > 0 ? ` + ${formatNumber(placeholders.length)} file${placeholders.length === 1 ? '' : 's'}` : ''}`
+          : `Bringing back ${formatNumber(placeholders.length)} item${placeholders.length === 1 ? '' : 's'}`;
         dialog.addAcceptedJob(response.jobId, response, restoreLabel);
       } catch (err) {
-        dialog.showError(this.describeError(err, 'Failed to submit bulk restore'), () => { void submit(); });
+        dialog.showError(this.describeError(err, "We couldn’t start bringing your files back."), () => { void submit(); });
       }
     };
 
@@ -211,7 +209,7 @@ export default class ColdStorageCommandSet extends BaseListViewCommandSet<IColdS
       ...folders.map(f => ({ name: ColdStorageCommandSet.basename(f), kind: 'Folder' as const })),
     ];
     dialog.confirm({
-      message: 'These items will be restored from cold storage back into this library. Each archived file is downloaded and its .url placeholder is replaced with the original. Folders restore everything archived beneath them.',
+      message: 'These will be brought back into this library, replacing their shortcuts with the real files. Folders bring back everything archived inside them.',
       confirmLabel: `Restore ${formatNumber(confirmItems.length)} item${confirmItems.length === 1 ? '' : 's'}`,
       items: confirmItems,
     }, () => { void submit(); });
@@ -224,12 +222,12 @@ export default class ColdStorageCommandSet extends BaseListViewCommandSet<IColdS
     if (!client) return;
     const dialog = this.openDialog('Status');
     const siteUrl = this.context.pageContext.site.absoluteUrl;
-    dialog.setStatusMessage('Loading recent cold-storage jobs for this site…');
+    dialog.setStatusMessage('Looking up recent activity…');
     try {
       const jobs = await client.listRecentJobs(siteUrl, 20);
       dialog.showJobList(jobs);
     } catch (err) {
-      dialog.showError(this.describeError(err, 'Could not load cold-storage jobs'), () => this.runStatus());
+      dialog.showError(this.describeError(err, 'We couldn’t load recent activity just now.'), () => this.runStatus());
     }
   }
 
@@ -239,7 +237,7 @@ export default class ColdStorageCommandSet extends BaseListViewCommandSet<IColdS
     // Close any previous dialog so we never leak overlays / timers.
     this.activeDialog?.close();
     const dialog = new MigrationProgressDialog(this.apiClient!, operation);
-    const opening = operation === 'Migrate' ? 'Preparing migration…'
+    const opening = operation === 'Migrate' ? 'Getting ready…'
                   : operation === 'Restore' ? 'Preparing restore…'
                   : 'Loading recent jobs…';
     dialog.open(opening);
@@ -247,31 +245,39 @@ export default class ColdStorageCommandSet extends BaseListViewCommandSet<IColdS
     return dialog;
   }
 
-  private describeError(err: unknown, prefix: string): string {
+  /**
+   * Turns any error into something an ordinary site user can act on (issue #70).
+   *
+   * End users can do nothing with "HTTP 502" or a server stack trace, and showing
+   * it just alarms them — so we say what happened in their terms and, crucially,
+   * that their files are unaffected. The technical detail still goes to the
+   * browser console for whoever supports them.
+   */
+  private describeError(err: unknown, friendlyPrefix: string): string {
+    // Keep the real detail available without putting it in front of the user.
+    // eslint-disable-next-line no-console
+    console.error('[Cold storage]', friendlyPrefix, err);
+
     if (err instanceof ColdStorageApiError) {
       if (err.isUnauthorized) {
-        return `${prefix}: you are not signed in or do not have permission (HTTP ${err.status}). Please refresh and sign in again.`;
+        return 'You don’t have permission to do this here. Ask your site owner if you need access, or refresh the page and sign in again.';
       }
       if (err.isThrottled) {
-        return `${prefix}: the server is throttling requests (HTTP 429). Please try again in a moment.`;
+        return 'SharePoint is busy at the moment. Please try again in a minute.';
       }
       if (err.isServerError) {
-        return `${prefix}: server error HTTP ${err.status}. ${err.bodyText ? this.truncate(err.bodyText, 240) : err.statusText}`;
+        return `${friendlyPrefix} Please try again in a few minutes.`;
       }
       if (err.isTransport) {
-        return `${prefix}: ${err.message}`;
+        return 'We couldn’t reach the archive service. Check your connection and try again.';
       }
-      return `${prefix}: HTTP ${err.status} — ${err.bodyText ? this.truncate(err.bodyText, 240) : err.statusText}`;
+      // A 4xx we don't specifically recognise: the server's message is written for
+      // callers of the API, so prefer our own wording.
+      return `${friendlyPrefix} Please try again.`;
     }
-    if (err instanceof Error) {
-      return `${prefix}: ${err.message}`;
-    }
-    return `${prefix}: ${String(err)}`;
+    return `${friendlyPrefix} Please try again.`;
   }
 
-  private truncate(s: string, max: number): string {
-    return s.length > max ? `${s.substring(0, max - 1)}…` : s;
-  }
 
   private static tryParseIsoDate(value: unknown): string | undefined {
     if (value === null || value === undefined || value === '') return undefined;
