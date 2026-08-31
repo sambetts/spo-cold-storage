@@ -535,6 +535,21 @@ resource raWebStorageDelegator 'Microsoft.Authorization/roleAssignments@2022-04-
   }
 }
 
+// Web App MSI → Storage Table Data Contributor
+// Required by the cross-process cache (issue #68), which shares SharePoint lookups and
+// authorization decisions between the API and the worker via Table Storage. Blob roles do
+// NOT grant table data-plane access, and without this the API silently degrades to a
+// per-process cache — the exact behaviour the shared cache exists to fix.
+resource raWebStorageTable 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  scope: storage
+  name: guid(storage.id, web.id, roleIds.StorageTableDataContributor)
+  properties: {
+    principalId: web.identity.principalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', roleIds.StorageTableDataContributor)
+  }
+}
+
 // End-user / group → Storage Blob Data Reader on the storage account.
 // Optional: the SPA reaches cold-storage content through the API (Web App MSI), so this is
 // only for operators who want users to open the storage account directly.
