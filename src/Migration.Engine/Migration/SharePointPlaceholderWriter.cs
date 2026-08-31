@@ -76,6 +76,170 @@ public sealed class SharePointPlaceholderWriter(ILogger logger)
     }
 
     /// <summary>
+    /// Captures an item's unique permissions before the source is deleted (issue #67),
+    /// so the same access can be re-applied to the <c>.url</c> placeholder and, later,
+    /// to the restored file. Returns null when the item inherits its permissions —
+    /// nothing needs restoring in that case, and breaking inheritance to "restore" an
+    /// inherited ACL would be wrong.
+    /// <para>
+    /// Best-effort: returns null on failure rather than throwing, so a permissions read
+    /// can never fail an otherwise-valid migration.
+    /// </para>
+    /// </summary>
+    public async Task<ArchivedPermissions?> CaptureUniquePermissionsAsync(
+        ClientContext ctx,
+        string serverRelativeUrl,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(ctx);
+        cancellationToken.ThrowIfCancellationRequested();
+
+        try
+        {
+            var item = ctx.Web.GetFileByServerRelativeUrl(serverRelativeUrl).ListItemAllFields;
+            ctx.Load(item,
+                i => i.HasUniqueRoleAssignments,
+                i => i.RoleAssignments.Include(
+                    r => r.Member.LoginName,
+                    r => r.Member.Title,
+                    r => r.RoleDefinitionBindings));
+            await ctx.ExecuteQueryAsyncWithThrottleRetries(_logger).ConfigureAwait(false);
+
+            if (!item.HasUniqueRoleAssignments)
+            {
+                return null;
+            }
+
+            var snapshot = new ArchivedPermissions
+            {
+                HadUniqueRoleAssignments = true,
+                CapturedAtUtc = DateTime.UtcNow,
+            };
+
+            foreach (var assignment in item.RoleAssignments)
+            {
+                var roles = assignment.RoleDefinitionBindings
+                    .Select(r => r.Name)
+                    // "Limited Access" is SharePoint bookkeeping that it grants itself so a
+                    // principal can traverse to an item; it cannot be assigned explicitly and
+                    // re-applying it throws. SharePoint recreates it as needed.
+                    .Where(n => !string.IsNullOrWhiteSpace(n)
+                                && !string.Equals(n, "Limited Access", StringComparison.OrdinalIgnoreCase))
+                    .ToList();
+                if (roles.Count == 0)
+                {
+                    continue;
+                }
+                snapshot.Assignments.Add(new ArchivedRoleAssignment
+                {
+                    LoginName = assignment.Member.LoginName,
+                    Title = assignment.Member.Title,
+                    Roles = roles,
+                });
+            }
+
+            _logger.LogInformation("Captured {Count} unique role assignment(s) for '{Url}'.", snapshot.Count, serverRelativeUrl);
+            return snapshot;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "Could not capture unique permissions for '{Url}'; continuing without a permissions snapshot.", serverRelativeUrl);
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Re-applies a captured permissions snapshot onto an item (the <c>.url</c> placeholder
+    /// at migrate time, or the restored file at restore time) — issue #67.
+    /// <para>
+    /// Best-effort and non-fatal by design: the content is already safe by the time this
+    /// runs, so a principal that no longer exists (a deleted user, a group removed since
+    /// archiving) must degrade to a warning rather than fail the operation. Each principal
+    /// is applied in its own round trip so one bad principal doesn't lose the rest.
+    /// </para>
+    /// </summary>
+    public async Task<bool> ApplyPermissionsAsync(
+        ClientContext ctx,
+        string serverRelativeUrl,
+        ArchivedPermissions? permissions,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(ctx);
+        cancellationToken.ThrowIfCancellationRequested();
+
+        if (permissions is null || !permissions.HadUniqueRoleAssignments || permissions.Count == 0)
+        {
+            // Inherited permissions: leave the destination inheriting.
+            return true;
+        }
+
+        try
+        {
+            var item = ctx.Web.GetFileByServerRelativeUrl(serverRelativeUrl).ListItemAllFields;
+            ctx.Load(item, i => i.HasUniqueRoleAssignments);
+            ctx.Load(ctx.Web, w => w.RoleDefinitions.Include(r => r.Name, r => r.Id));
+            await ctx.ExecuteQueryAsyncWithThrottleRetries(_logger).ConfigureAwait(false);
+
+            var roleDefinitions = ctx.Web.RoleDefinitions
+                .GroupBy(r => r.Name, StringComparer.OrdinalIgnoreCase)
+                .ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
+
+            // copyRoleAssignments:false — we are replacing the ACL wholesale with the
+            // captured one, not layering on top of the inherited set.
+            item.BreakRoleInheritance(copyRoleAssignments: false, clearSubscopes: false);
+            await ctx.ExecuteQueryAsyncWithThrottleRetries(_logger).ConfigureAwait(false);
+
+            var applied = 0;
+            foreach (var assignment in permissions.Assignments)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                try
+                {
+                    var bindings = new RoleDefinitionBindingCollection(ctx);
+                    var matched = 0;
+                    foreach (var roleName in assignment.Roles)
+                    {
+                        if (roleDefinitions.TryGetValue(roleName, out var definition))
+                        {
+                            bindings.Add(definition);
+                            matched++;
+                        }
+                        else
+                        {
+                            _logger.LogWarning("Role definition '{Role}' does not exist on this web; skipping it for '{Principal}'.",
+                                roleName, assignment.Title ?? assignment.LoginName);
+                        }
+                    }
+                    if (matched == 0)
+                    {
+                        continue;
+                    }
+
+                    var principal = ctx.Web.EnsureUser(assignment.LoginName);
+                    item.RoleAssignments.Add(principal, bindings);
+                    await ctx.ExecuteQueryAsyncWithThrottleRetries(_logger).ConfigureAwait(false);
+                    applied++;
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    // Most likely a principal that no longer resolves. Keep going.
+                    _logger.LogWarning(ex, "Could not re-apply permissions for '{Principal}' on '{Url}'.",
+                        assignment.Title ?? assignment.LoginName, serverRelativeUrl);
+                }
+            }
+
+            _logger.LogInformation("Re-applied {Applied} of {Total} role assignment(s) onto '{Url}'.",
+                applied, permissions.Count, serverRelativeUrl);
+            return applied == permissions.Count;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "Failed to re-apply permissions onto '{Url}'. Continuing with inherited permissions.", serverRelativeUrl);
+            return false;
+        }
+    }
+
+    /// <summary>
     /// Copies role assignments from a source list-item to a destination
     /// list-item. Skips silently when the source had inherited permissions
     /// (nothing to copy) and logs without throwing so the migration is not

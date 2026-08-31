@@ -80,10 +80,17 @@ public sealed class SiteContributorAuthorizationService(Config config, ILogger<S
     }
 
     /// <summary>
-    /// True when the caller has contributor (edit) rights on the web. Primary check is the
-    /// caller's effective permissions (EditListItems); if that lookup can't be resolved (e.g.
-    /// an external/guest login-name shape we didn't build), fall back to owner-group membership
-    /// so the broadening never regresses existing owners.
+    /// True when the caller has contributor rights on the web. Primary check is the
+    /// caller's effective permissions; if that lookup can't be resolved (e.g. an
+    /// external/guest login-name shape we didn't build), fall back to owner-group
+    /// membership so the broadening never regresses existing owners.
+    /// <para>
+    /// Requires <b>both</b> <see cref="PermissionKind.EditListItems"/> and
+    /// <see cref="PermissionKind.DeleteListItems"/> (issue #61). Archiving <i>deletes</i>
+    /// the user's file — the worker then performs that delete with app-only
+    /// <c>Sites.FullControl.All</c>, so a caller who cannot delete the file themselves
+    /// must not be able to have the service delete it for them.
+    /// </para>
     /// </summary>
     private async Task<bool> CheckCanContributeAsync(ClientContext ctx, string upn, string? oid)
     {
@@ -94,11 +101,16 @@ public sealed class SiteContributorAuthorizationService(Config config, ILogger<S
             var loginName = "i:0#.f|membership|" + upn;
             var perms = ctx.Web.GetUserEffectivePermissions(loginName);
             await ctx.ExecuteQueryAsync().ConfigureAwait(false);
-            if (perms.Value.Has(PermissionKind.EditListItems))
+            if (perms.Value.Has(PermissionKind.EditListItems)
+                && perms.Value.Has(PermissionKind.DeleteListItems))
             {
                 return true;
             }
-            // Resolved cleanly but the user only has read/visitor rights — not a contributor.
+            // Resolved cleanly but the user lacks edit and/or delete — not a contributor
+            // for archiving purposes.
+            _logger.LogInformation(
+                "Caller '{Upn}' resolved but lacks the required web permissions (edit={Edit}, delete={Delete}).",
+                upn, perms.Value.Has(PermissionKind.EditListItems), perms.Value.Has(PermissionKind.DeleteListItems));
             return false;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)

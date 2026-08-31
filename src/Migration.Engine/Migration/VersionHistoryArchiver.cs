@@ -82,7 +82,7 @@ public sealed class VersionHistoryArchiver(Config config, ILogger logger)
                 return VersionCaptureResult.Ok(0);
             }
 
-            var container = GetContainerClient(containerName);
+            var container = await GetContainerClientAsync(containerName, cancellationToken).ConfigureAwait(false);
             var manifest = new VersionManifest
             {
                 SchemaVersion = VersionManifest.CurrentSchemaVersion,
@@ -210,7 +210,7 @@ public sealed class VersionHistoryArchiver(Config config, ILogger logger)
 
             var folderUrl = destinationServerRelativeUrl[..destinationServerRelativeUrl.LastIndexOf('/')];
             var fileName = Path.GetFileName(destinationServerRelativeUrl);
-            var container = GetContainerClient(containerName);
+            var container = await GetContainerClientAsync(containerName, cancellationToken).ConfigureAwait(false);
             var folder = ctx.Web.GetFolderByServerRelativeUrl(folderUrl);
             ctx.Load(folder);
             await ctx.ExecuteQueryAsyncWithThrottleRetries(_logger).ConfigureAwait(false);
@@ -256,7 +256,7 @@ public sealed class VersionHistoryArchiver(Config config, ILogger logger)
     {
         try
         {
-            var container = GetContainerClient(containerName);
+            var container = await GetContainerClientAsync(containerName, cancellationToken).ConfigureAwait(false);
             var manifestClient = container.GetBlobClient(VersionBlobLayout.ManifestKey(baseBlobKey));
             if (!await manifestClient.ExistsAsync(cancellationToken).ConfigureAwait(false))
             {
@@ -283,7 +283,7 @@ public sealed class VersionHistoryArchiver(Config config, ILogger logger)
     {
         try
         {
-            var container = GetContainerClient(containerName);
+            var container = await GetContainerClientAsync(containerName, cancellationToken).ConfigureAwait(false);
             var deleted = 0;
 
             // Enumerate rather than trusting the manifest: a partial capture can leave
@@ -328,7 +328,7 @@ public sealed class VersionHistoryArchiver(Config config, ILogger logger)
     {
         try
         {
-            var container = GetContainerClient(containerName);
+            var container = await GetContainerClientAsync(containerName, cancellationToken).ConfigureAwait(false);
             long total = 0;
             await foreach (var item in container
                 .GetBlobsAsync(BlobTraits.None, BlobStates.None, VersionBlobLayout.VersionFolderPrefix(baseBlobKey), cancellationToken)
@@ -371,9 +371,7 @@ public sealed class VersionHistoryArchiver(Config config, ILogger logger)
         return Convert.ToBase64String(md5.ComputeHash(stream));
     }
 
-    private BlobContainerClient GetContainerClient(string containerName)
-    {
-        var serviceClient = BlobServiceClientFactory.Create(_config.ConnectionStrings.Storage, _config);
-        return serviceClient.GetBlobContainerClient(containerName);
-    }
+    private async Task<BlobContainerClient> GetContainerClientAsync(string containerName, CancellationToken cancellationToken)
+        => await ColdStorageContainerClientFactory
+            .GetContainerAsync(_config, containerName, _logger, cancellationToken).ConfigureAwait(false);
 }

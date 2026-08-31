@@ -232,6 +232,11 @@ public sealed class SharePointRestorePipeline : BaseComponent
 
             await _statusWriter.RecordRestoredAsync(envelope.ItemId, destinationUrl, cancellationToken);
 
+            // Re-apply the unique permissions captured at archive time so the restored
+            // file is no more visible than the original was (issue #67). Best-effort:
+            // the content is already back, so a missing principal must not fail the restore.
+            await RestorePermissionsAsync(spCtx, envelope.ItemId, destinationUrl, cancellationToken).ConfigureAwait(false);
+
             await _statusWriter.TransitionAsync(envelope.ItemId, MigrationLifecycleStatus.PostRestoreValidation,
                 "Verifying restored file in SharePoint.", cancellationToken: cancellationToken);
             await VerifyRestoredAsync(spCtx, destinationUrl, cancellationToken).ConfigureAwait(false);
@@ -400,6 +405,11 @@ public sealed class SharePointRestorePipeline : BaseComponent
             }
 
             await _statusWriter.RecordRestoredAsync(envelope.ItemId, destinationUrl, cancellationToken);
+
+            // Re-apply the unique permissions captured at archive time so the restored
+            // file is no more visible than the original was (issue #67). Best-effort:
+            // the content is already back, so a missing principal must not fail the restore.
+            await RestorePermissionsAsync(spCtx, envelope.ItemId, destinationUrl, cancellationToken).ConfigureAwait(false);
 
             await _statusWriter.TransitionAsync(envelope.ItemId, MigrationLifecycleStatus.PostRestoreValidation,
                 "Verifying restored file in SharePoint.", cancellationToken: cancellationToken);
@@ -727,8 +737,11 @@ public sealed class SharePointRestorePipeline : BaseComponent
 
     private async Task DownloadBlobToTempAsync(string containerName, string blobPath, string tempFile, CancellationToken cancellationToken)
     {
-        var serviceClient = BlobServiceClientFactory.Create(_config.ConnectionStrings.Storage, _config);
-        var blob = serviceClient.GetBlobContainerClient(containerName).GetBlobClient(blobPath);
+        // Resolve the container's OWN storage account — containers can live in different
+        // accounts via ColdStorageContainer.StorageAccountUri (issue #62).
+        var container = await ColdStorageContainerClientFactory
+            .GetContainerAsync(_config, containerName, _logger, cancellationToken).ConfigureAwait(false);
+        var blob = container.GetBlobClient(blobPath);
 
         try
         {
@@ -750,8 +763,9 @@ public sealed class SharePointRestorePipeline : BaseComponent
     {
         try
         {
-            var serviceClient = BlobServiceClientFactory.Create(_config.ConnectionStrings.Storage, _config);
-            var blob = serviceClient.GetBlobContainerClient(containerName).GetBlobClient(blobPath);
+            var container = await ColdStorageContainerClientFactory
+                .GetContainerAsync(_config, containerName, _logger, cancellationToken).ConfigureAwait(false);
+            var blob = container.GetBlobClient(blobPath);
             var props = await blob.GetPropertiesAsync(cancellationToken: cancellationToken).ConfigureAwait(false);
             return props.Value.ContentLength;
         }
@@ -774,8 +788,9 @@ public sealed class SharePointRestorePipeline : BaseComponent
     {
         try
         {
-            var serviceClient = BlobServiceClientFactory.Create(_config.ConnectionStrings.Storage, _config);
-            var blob = serviceClient.GetBlobContainerClient(containerName).GetBlobClient(blobPath);
+            var container = await ColdStorageContainerClientFactory
+                .GetContainerAsync(_config, containerName, _logger, cancellationToken).ConfigureAwait(false);
+            var blob = container.GetBlobClient(blobPath);
             var deleted = await blob.DeleteIfExistsAsync(cancellationToken: cancellationToken).ConfigureAwait(false);
 
             // Remove the version sidecars with the base blob so the archive unit goes away
@@ -856,6 +871,32 @@ public sealed class SharePointRestorePipeline : BaseComponent
         var ext = Path.GetExtension(destinationUrl);
         var stamp = DateTime.UtcNow.ToString("yyyyMMddHHmmss", System.Globalization.CultureInfo.InvariantCulture);
         return $"{folder}/{name}.restored-{stamp}{ext}";
+    }
+
+    /// <summary>
+    /// Re-applies the unique permissions captured when the file was archived (issue #67).
+    /// Reads the snapshot persisted on the job item; a null/absent snapshot means the
+    /// original inherited its permissions, so the restored file is left inheriting too.
+    /// Best-effort — never fails the restore, since the content is already back.
+    /// </summary>
+    private async Task RestorePermissionsAsync(
+        ClientContext ctx, Guid itemId, string destinationUrl, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var item = await _statusWriter.FindItemAsync(itemId, cancellationToken).ConfigureAwait(false);
+            var snapshot = ArchivedPermissions.TryParse(item?.PermissionsJson);
+            if (snapshot is null || !snapshot.HadUniqueRoleAssignments)
+            {
+                return;
+            }
+            var writer = new SharePointPlaceholderWriter(_logger);
+            await writer.ApplyPermissionsAsync(ctx, destinationUrl, snapshot, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "Could not restore unique permissions onto '{Url}'; it will inherit from its folder.", destinationUrl);
+        }
     }
 
     private async Task VerifyRestoredAsync(ClientContext ctx, string serverRelativeUrl, CancellationToken cancellationToken)

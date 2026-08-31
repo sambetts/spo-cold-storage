@@ -252,6 +252,7 @@ public sealed class ColdStorageMigratorPipeline : BaseComponent
         DateTime? originalCreated = null;
         DateTime? originalModified = null;
         var capturedVersionCount = 0;
+        ArchivedPermissions? capturedPermissions = null;
 
         ClientContext? spCtx = null;
         try
@@ -282,6 +283,18 @@ public sealed class ColdStorageMigratorPipeline : BaseComponent
                 }
 
                 CaptureSourceAuthorship(spFile, ref originalCreatedBy, ref originalModifiedBy, ref originalCreated, ref originalModified);
+
+                // Capture unique item permissions BEFORE the source is deleted (issue #67)
+                // so the same access can be mirrored onto the .url placeholder and
+                // re-applied when the file is restored. Best-effort: returns null for an
+                // inheriting item (nothing to restore) or on failure.
+                capturedPermissions = await _placeholderWriter
+                    .CaptureUniquePermissionsAsync(spCtx, file.ServerRelativeFilePath, cancellationToken).ConfigureAwait(false);
+                if (capturedPermissions is not null)
+                {
+                    await _statusWriter.RecordPermissionsAsync(
+                        envelope.ItemId, capturedPermissions.ToJson(), cancellationToken).ConfigureAwait(false);
+                }
 
                 // Preserve the captured authorship on the archive blob so the original
                 // metadata is kept in cold storage (and restorable) regardless of whether
@@ -408,6 +421,11 @@ public sealed class ColdStorageMigratorPipeline : BaseComponent
             // Best-effort throughout — never fails the migration.
             await _placeholderWriter.StampPlaceholderColumnsAsync(
                 spCtx!, placeholderUrl, metadata, envelope.CopyMetadataColumns, cancellationToken).ConfigureAwait(false);
+
+            // Mirror the source's unique permissions onto the placeholder so the .url
+            // is no more visible than the file it replaced (issue #67). Best-effort.
+            await _placeholderWriter.ApplyPermissionsAsync(
+                spCtx!, placeholderUrl, capturedPermissions, cancellationToken).ConfigureAwait(false);
 
             await _statusWriter.RecordPlaceholderCreatedAsync(envelope.ItemId, placeholderUrl, cancellationToken);
             return true;
